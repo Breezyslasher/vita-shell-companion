@@ -223,6 +223,13 @@ bool same(const char* a, const char* b) {
     return *a == *b;
 }
 
+// src, cut to fit, into dst, always ended with 0.
+void copyText(char* dst, const char* src, int cap) {
+    int n = 0;
+    for (; src[n] && n < cap - 1; n++) dst[n] = src[n];
+    dst[n] = 0;
+}
+
 // ── State ───────────────────────────────────────────────────────────────────
 // The Music row's parts, by the id hashes SceShell's quick menu gives them:
 // the buttons and lines as ElevenMPV-A's main.h and main.cpp have them, the
@@ -1452,21 +1459,24 @@ void httpEnd(int rcSsl, int rcHttp) {
     sceKernelUnlockMutex(g_netLock, 1);
 }
 
-// A template with the time-outs build 2040's test found to do: 5 s to resolve
-// and to connect, 10 s to send and to receive. Its id, or the code it failed
-// with.
-int httpTemplate(const char* who) {
+// A template with the time-outs VitaPlex's build 2040 test found to do: 5 s
+// to resolve and to connect, 10 s to send and to receive. Its id, or the code
+// it failed with.
+int httpTemplate(const char* who, bool quick = false) {
     const int tmpl = httpFn<FnTemplate>(kHttpCreateTemplate)("ShellCompanion", kHttpVersion11, 1);
     if (tmpl < 0) {
         logLine("%s: template 0x%08X", who, (unsigned)tmpl);
         return tmpl;
     }
-    const int rcResolve = httpFn<FnIdUnsigned>(kHttpResolveTimeOut)(tmpl, 5000000u),
-              rcConnect = httpFn<FnIdUnsigned>(kHttpConnectTimeOut)(tmpl, 5000000u),
-              rcSend = httpFn<FnIdUnsigned>(kHttpSendTimeOut)(tmpl, 10000000u),
-              rcRecv = httpFn<FnIdUnsigned>(kHttpRecvTimeOut)(tmpl, 10000000u);
+    // quick: for pushes to remotes on the network, which answer at once or
+    // not at all, so that one gone holds the listener up a second at most.
+    const unsigned near = quick ? 1000000u : 5000000u, far = quick ? 2000000u : 10000000u;
+    const int rcResolve = httpFn<FnIdUnsigned>(kHttpResolveTimeOut)(tmpl, near),
+              rcConnect = httpFn<FnIdUnsigned>(kHttpConnectTimeOut)(tmpl, near),
+              rcSend = httpFn<FnIdUnsigned>(kHttpSendTimeOut)(tmpl, far),
+              rcRecv = httpFn<FnIdUnsigned>(kHttpRecvTimeOut)(tmpl, far);
     if (rcResolve < 0 || rcConnect < 0 || rcSend < 0 || rcRecv < 0)
-        logLine("%s: time-outs of 5, 5, 10 and 10 s: 0x%08X 0x%08X 0x%08X 0x%08X", who,
+        logLine("%s: time-outs not set: 0x%08X 0x%08X 0x%08X 0x%08X", who,
                 (unsigned)rcResolve, (unsigned)rcConnect, (unsigned)rcSend, (unsigned)rcRecv);
     return tmpl;
 }
@@ -1647,6 +1657,19 @@ int g_carryStopHow;      // ... and how (kEnd*)
 int g_playQueueDue;      // an app has handed its queue over (SC_CMD_MUSIC_PLAY) ...
 int g_playQueueApp;      // ... this one
 int g_carryApp = -1;     // the app whose queue SceShell carries on
+// A remote's commands for the queue SceShell carries on (the control
+// listener's), queued under g_lock for the music thread (carryRemote).
+enum { kRcPlay = 1, kRcPause, kRcToggle, kRcNext, kRcPrevious, kRcStop, kRcSeekTo, kRcForward,
+       kRcBack, kRcSkipTo };
+struct RemoteCmd {
+    int cmd;       // kRc*
+    uint32_t ms;   // kRcSeekTo's place; kRcForward's and kRcBack's step, 0 for the queue's;
+                   // kRcSkipTo's place in the track
+    char id[48];   // kRcSkipTo's track
+};
+const int kRemoteMax = 8;
+RemoteCmd g_remote[kRemoteMax];  // under g_lock, from g_remoteFirst on
+int g_remoteFirst, g_remoteCount;
 // The queue's header lines, sent with every request for it: copied by the
 // fetch and server threads as they begin.
 char g_musicHeaders[2048];
@@ -1706,6 +1729,10 @@ struct Carry {
     // for is passed over for the next track on the card, and with none,
     // held (carryOnCard).
     int offlineSkip;
+    // The queue's buttons=seek: the row's ⏮ ⏭ (and a remote's back and
+    // forward) seek by these within the track, as for an audiobook.
+    int seekButtons;
+    uint32_t seekForwardMs, seekBackMs;
     Track cur;          // the song with the shell
     Track prev;         // the one it had before, whose file stays for previous
     int started;        // seen playing, with its length (newSong)
@@ -1968,6 +1995,116 @@ struct QueueHead {
 };
 QueueHead g_queueHead;  // the music thread's
 
+// ── Remote control: the listener's set-up ───────────────────────────────────
+// (docs/PROTOCOL.md §4.4) A queue may have SceShell listen for a remote
+// while it plays: HTTP on a port of the app's choosing, answering the paths
+// the app lists (control.route) with the commands they stand for and the
+// replies the app wrote (control.reply.<name>), templates as the reports
+// are; a UDP discovery answer, so that remotes find it; and the queue's
+// state pushed to the remotes that subscribe. A Plex player's companion
+// protocol (port 32500, GDM on 32412) is written this way by VitaPlex.
+const int kRoutes = 20, kReplies = 4;
+struct Route {
+    char path[64];
+    char cmds[96];   // commands, ',' between: name or name:param (control.route)
+    char reply[16];  // the reply's name
+};
+struct Reply {
+    char name[16];
+    char body[1536];
+};
+struct ControlCfg {
+    int port;                 // 0: no listener
+    char headers[512];        // header lines on every reply, and on the pushes
+    Route routes[kRoutes];
+    int routeCount;
+    Reply replies[kReplies];
+    int replyCount;
+    char notFound[16];        // the reply for any other path, "" for a plain 404
+    int discoveryPort;        // 0: none
+    char discoveryGroup[16];  // a multicast group to join, or ""
+    char discoveryMatch[32];  // what a search begins with
+    char discoveryReply[640];
+    char helloTo[32];         // "a.b.c.d:port" the hello and bye go to, or ""
+    char hello[512], bye[256];
+    char pushUrl[256];        // a template, with {subscriberIp} and {subscriberPort}
+    char pushMethod[8];
+    char pushReply[16];       // the body's reply
+    char pushType[48];
+    uint32_t pushEveryMs;
+};
+ControlCfg g_ctl;   // written as a queue begins, while no listener runs; the listener's after
+int g_ctlRunning;   // under g_lock: the listener's thread runs
+int g_ctlStop;      // under g_lock: it is to stop
+
+bool headValue(const char* key, char* out, int cap);
+
+// value cut at each '|' in place, into up to n parts: how many.
+int splitBar(char* v, char** part, int n) {
+    int k = 0;
+    part[k++] = v;
+    for (char* p = v; *p && k < n; p++)
+        if (*p == '|') {
+            *p = 0;
+            part[k++] = p + 1;
+        }
+    return k;
+}
+
+// A control.* line of the queue's head into c. Unknown ones are passed over.
+void controlLine(ControlCfg* c) {
+    static char v[1600];
+    char* part[4];
+    char key[64];
+    int k = 0;
+    while (g_line[k] && g_line[k] != '=' && k < (int)sizeof(key) - 1) {
+        key[k] = g_line[k];
+        k++;
+    }
+    key[k] = 0;
+    if (g_line[k] != '=') return;
+    if (!headValue(key, v, sizeof(v))) return;
+    if (same(key, "control.port")) {
+        c->port = (int)toUint(v);
+    } else if (same(key, "control.headers")) {
+        copyText(c->headers, v, sizeof(c->headers));
+    } else if (startsWith(key, "control.reply.") && c->replyCount < kReplies) {
+        Reply* r = &c->replies[c->replyCount++];
+        copyText(r->name, key + 14, sizeof(r->name));
+        copyText(r->body, v, sizeof(r->body));
+    } else if (same(key, "control.route") && c->routeCount < kRoutes) {
+        const int n = splitBar(v, part, 3);
+        Route* r = &c->routes[c->routeCount++];
+        copyText(r->path, part[0], sizeof(r->path));
+        copyText(r->cmds, n > 1 ? part[1] : "", sizeof(r->cmds));
+        copyText(r->reply, n > 2 ? part[2] : "", sizeof(r->reply));
+    } else if (same(key, "control.notFound")) {
+        copyText(c->notFound, v, sizeof(c->notFound));
+    } else if (same(key, "control.discovery.port")) {
+        c->discoveryPort = (int)toUint(v);
+    } else if (same(key, "control.discovery.group")) {
+        copyText(c->discoveryGroup, v, sizeof(c->discoveryGroup));
+    } else if (same(key, "control.discovery.match")) {
+        copyText(c->discoveryMatch, v, sizeof(c->discoveryMatch));
+    } else if (same(key, "control.discovery.reply")) {
+        copyText(c->discoveryReply, v, sizeof(c->discoveryReply));
+    } else if (same(key, "control.discovery.hello")) {
+        const int n = splitBar(v, part, 2);
+        copyText(c->helloTo, part[0], sizeof(c->helloTo));
+        copyText(c->hello, n > 1 ? part[1] : "", sizeof(c->hello));
+    } else if (same(key, "control.discovery.bye")) {
+        copyText(c->bye, v, sizeof(c->bye));
+    } else if (same(key, "control.push")) {
+        const int n = splitBar(v, part, 4);
+        copyText(c->pushUrl, part[0], sizeof(c->pushUrl));
+        copyText(c->pushMethod, n > 1 && part[1][0] ? part[1] : "POST", sizeof(c->pushMethod));
+        copyText(c->pushReply, n > 2 ? part[2] : "", sizeof(c->pushReply));
+        copyText(c->pushType, n > 3 ? part[3] : "", sizeof(c->pushType));
+    } else if (same(key, "control.push.every")) {
+        c->pushEveryMs = toUint(v) * 1000u;
+    }
+}
+
 // The queue read through: its head lines, which come before its tracks, and
 // each track in turn.
 struct QueueScan {
@@ -1978,7 +2115,10 @@ struct QueueScan {
     int start;          // the track to start with (index=), and where in it
     uint32_t startMs;
     int offlineSkip;    // the setting (offlineSkip=), 0 when missing
+    int seekButtons;    // buttons=seek: ⏮ ⏭ seek within a track, not skip it
+    uint32_t seekForwardMs, seekBackMs;
     QueueHead* head;    // the rest of the head, or NULL to pass it over
+    ControlCfg* ctl;    // where control.* lines go, or NULL to pass them over
 };
 
 // The queue of the app the music thread plays for (g_c.folder).
@@ -1990,7 +2130,11 @@ bool scanOpen(QueueScan* s, QueueHead* head = NULL) {
     s->start = 0;
     s->startMs = 0;
     s->offlineSkip = 0;
+    s->seekButtons = 0;
+    s->seekForwardMs = 30000;
+    s->seekBackMs = 10000;
     s->head = head;
+    s->ctl = NULL;
     if (head) {
         sceClibMemset(head, 0, sizeof(*head));
         head->everyS = 10;
@@ -2039,8 +2183,16 @@ bool scanNext(QueueScan* s, const char** fields) {
             s->startMs = toUint(g_line + 11);
         } else if (startsWith(g_line, "offlineSkip=")) {
             s->offlineSkip = toInt(g_line + 12) == 1;
+        } else if (startsWith(g_line, "buttons=")) {
+            s->seekButtons = same(g_line + 8, "seek");
+        } else if (startsWith(g_line, "seekForwardMs=")) {
+            s->seekForwardMs = toUint(g_line + 14);
+        } else if (startsWith(g_line, "seekBackMs=")) {
+            s->seekBackMs = toUint(g_line + 11);
         } else if (same(g_line, "end")) {
             s->whole = true;
+        } else if (s->ctl && startsWith(g_line, "control.")) {
+            controlLine(s->ctl);
         } else if (s->head) {
             char every[16];
             if (headValue("headers", s->head->headers, sizeof(s->head->headers))) {
@@ -3164,45 +3316,75 @@ Sent g_sending;
 char g_serverHeaders[2048];
 int g_reportFailed;
 
-// A template with its placeholders filled in for t, into out. false when it
+// What a template may name beyond the track (the control listener's): the
+// request's query, and the subscriber a timeline is pushed to.
+struct Extra {
+    const char* query;      // the request's query, after '?', or NULL
+    const char* commandID;  // {commandID}
+    const char* subIp;      // {subscriberIp}
+    int subPort;            // {subscriberPort}
+};
+
+bool queryParam(const char* query, const char* name, char* out, int cap);
+
+// A template with its placeholders filled in for t, into out: {id},
+// {state}, {positionMs}, {positionS}, {durationMs}, {durationS}, {index},
+// and with x, {param:NAME}, {commandID}, {subscriberIp} and
+// {subscriberPort}. Anything else in braces is left as it is. false when it
 // does not fit, as a URL is never cut.
 bool expand(const char* tmpl, const Track* t, const char* state, uint32_t posMs, uint32_t durMs,
-            char* out, int cap) {
+            char* out, int cap, const Extra* x = NULL) {
     int n = 0;
-    char v[64];
+    char v[96], name[40];
     for (const char* p = tmpl; *p;) {
         const char* put = NULL;
-        int skip = 0;
+        const char* close = NULL;
         if (*p == '{') {
-            static const char* const kNames[7] = {"{id}",        "{state}",     "{positionMs}",
-                                                  "{positionS}", "{durationMs}", "{durationS}",
-                                                  "{index}"};
-            for (int k = 0; k < 7 && !put; k++) {
-                if (!startsWith(p, kNames[k])) continue;
-                skip = (int)sceClibStrnlen(kNames[k], 16);
-                switch (k) {
-                case 0: put = t->id; break;
-                case 1: put = state; break;
-                case 2: sceClibSnprintf(v, sizeof(v), "%u", (unsigned)posMs); put = v; break;
-                case 3:
-                    sceClibSnprintf(v, sizeof(v), "%u.%03u", (unsigned)(posMs / 1000),
-                                    (unsigned)(posMs % 1000));
-                    put = v;
-                    break;
-                case 4: sceClibSnprintf(v, sizeof(v), "%u", (unsigned)durMs); put = v; break;
-                case 5:
-                    sceClibSnprintf(v, sizeof(v), "%u.%03u", (unsigned)(durMs / 1000),
-                                    (unsigned)(durMs % 1000));
-                    put = v;
-                    break;
-                default: sceClibSnprintf(v, sizeof(v), "%d", t->index); put = v; break;
-                }
+            int k = 1;
+            while (k < 40 && p[k] && p[k] != '}' && p[k] != '{') k++;
+            if (p[k] == '}') {
+                close = p + k;
+                sceClibSnprintf(name, sizeof(name), "%.*s", k - 1, p + 1);
+            }
+        }
+        if (close) {
+            if (same(name, "id")) {
+                put = t->id;
+            } else if (same(name, "state")) {
+                put = state;
+            } else if (same(name, "positionMs")) {
+                sceClibSnprintf(v, sizeof(v), "%u", (unsigned)posMs);
+                put = v;
+            } else if (same(name, "positionS")) {
+                sceClibSnprintf(v, sizeof(v), "%u.%03u", (unsigned)(posMs / 1000),
+                                (unsigned)(posMs % 1000));
+                put = v;
+            } else if (same(name, "durationMs")) {
+                sceClibSnprintf(v, sizeof(v), "%u", (unsigned)durMs);
+                put = v;
+            } else if (same(name, "durationS")) {
+                sceClibSnprintf(v, sizeof(v), "%u.%03u", (unsigned)(durMs / 1000),
+                                (unsigned)(durMs % 1000));
+                put = v;
+            } else if (same(name, "index")) {
+                sceClibSnprintf(v, sizeof(v), "%d", t->index);
+                put = v;
+            } else if (x && startsWith(name, "param:")) {
+                if (!x->query || !queryParam(x->query, name + 6, v, sizeof(v))) v[0] = 0;
+                put = v;
+            } else if (x && same(name, "commandID")) {
+                put = x->commandID ? x->commandID : "";
+            } else if (x && same(name, "subscriberIp")) {
+                put = x->subIp ? x->subIp : "";
+            } else if (x && same(name, "subscriberPort")) {
+                sceClibSnprintf(v, sizeof(v), "%d", x->subPort);
+                put = v;
             }
         }
         if (put) {
             for (; *put; put++, n++)
                 if (n < cap - 1) out[n] = *put;
-            p += skip;
+            p = close + 1;
         } else {
             if (n < cap - 1) out[n] = *p;
             n++;
@@ -3413,10 +3595,15 @@ void report(const Track* t, const char* state, uint32_t timeMs) {
     if (start) startServing();
 }
 
+void startControl();
+void stopControl();
+
 // Stops carrying the queue on (kEnd*). The row goes back to SceShell unless a
 // process has taken it. A fetch under way is stopped, and a song fetched and
 // not played removed.
 void carryEnd(const char* why, int how) {
+    // The remotes go first: nothing they ask now is to be carried out.
+    stopControl();
     int state = 0;
     uint32_t time = 0;
     musicStatus(&state, &time);
@@ -3486,6 +3673,7 @@ void carryEnd(const char* why, int how) {
     g_carry = 0;
     g_carryStop = NULL;
     g_carryApp = -1;
+    g_remoteCount = 0;
     sceClibMemset(g_musicHeaders, 0, sizeof(g_musicHeaders));
     if (g_owner == kOwnerShell) {
         g_active = 0;
@@ -3501,10 +3689,12 @@ void carryEnd(const char* why, int how) {
 // Nothing carried on after all: the row goes back, as it would have without
 // SceShell carrying anything on.
 void carryNone() {
+    stopControl();
     lock();
     g_carry = 0;
     g_carryStop = NULL;
     g_carryApp = -1;
+    g_remoteCount = 0;
     sceClibMemset(g_musicHeaders, 0, sizeof(g_musicHeaders));
     if (g_owner == kOwnerShell) {
         g_active = 0;
@@ -3531,7 +3721,7 @@ void carryReset() {
     unlock();
 }
 
-void seekTo(uint32_t ms);
+void seekTo(uint32_t ms, const char* why = "where the app was");
 
 // Hands t to the shell: stop, open and play, as the player did. true when it
 // took the file.
@@ -3757,6 +3947,15 @@ bool carryStartQueue(int app) {
         logLine("play queue: no queue at %s/%s", g_c.folder, SC_QUEUE);
         return false;
     }
+    // The remote control's set-up, unless the last queue's listener is
+    // somehow still reading the one there.
+    lock();
+    const bool ctlFree = !g_ctlRunning;
+    unlock();
+    if (ctlFree) {
+        sceClibMemset(&g_ctl, 0, sizeof(g_ctl));
+        s.ctl = &g_ctl;
+    }
     const char* fields;
     bool have = false;
     while (scanNext(&s, &fields)) {
@@ -3769,6 +3968,9 @@ bool carryStartQueue(int app) {
     g_c.count = s.index + 1;
     g_c.repeat = s.repeat;
     g_c.offlineSkip = s.offlineSkip;
+    g_c.seekButtons = s.seekButtons;
+    g_c.seekForwardMs = s.seekForwardMs ? s.seekForwardMs : 30000;
+    g_c.seekBackMs = s.seekBackMs ? s.seekBackMs : 10000;
     sceClibSnprintf(g_c.queue, sizeof(g_c.queue), "%s", s.written);
     g_c.reportOn = g_queueHead.state;
     g_c.playedOn = g_queueHead.played;
@@ -3787,10 +3989,11 @@ bool carryStartQueue(int app) {
     }
     const int rcStart = musicTracked(0x30000);
     logLine("play queue: %s's song %d of %d, \"%s\" by %s, %s; repeat %d; offline skip %s; "
-            "reports: state %s, played %s; music service started: 0x%08X",
+            "buttons %s; reports: state %s, played %s; music service started: 0x%08X",
             g_c.name, s.start + 1, g_c.count, g_c.cur.title, g_c.cur.artist, mmss(s.startMs).s,
-            g_c.repeat, g_c.offlineSkip ? "on" : "off", g_c.reportOn.url[0] ? "yes" : "no",
-            g_c.playedOn.url[0] ? "yes" : "no", (unsigned)rcStart);
+            g_c.repeat, g_c.offlineSkip ? "on" : "off", g_c.seekButtons ? "seek" : "tracks",
+            g_c.reportOn.url[0] ? "yes" : "no", g_c.playedOn.url[0] ? "yes" : "no",
+            (unsigned)rcStart);
     if (rcStart < 0) {
         sceClibMemset(&g_queueHead, 0, sizeof(g_queueHead));
         return false;
@@ -3809,6 +4012,11 @@ bool carryStartQueue(int app) {
     notesWanted();
     unlock();
     sceClibMemset(&g_queueHead, 0, sizeof(g_queueHead));
+    if (g_ctl.port)
+        logLine("play queue: remote control on port %d, %d route(s), discovery %s, pushes %s",
+                g_ctl.port, g_ctl.routeCount, g_ctl.discoveryPort ? "on" : "off",
+                g_ctl.pushUrl[0] ? "on" : "off");
+    startControl();
     // Nothing is with the shell yet: the track is played from here.
     g_found = g_c.cur;
     g_c.cur.path[0] = 0;
@@ -3829,12 +4037,13 @@ bool carryStartQueue(int app) {
     return true;
 }
 
-// Takes the song to ms, the app's place in it: the seek time, then the
-// seek event, as player.c's seekFrom; carryTick watches where it lands.
-void seekTo(uint32_t ms) {
+// Takes the song to ms (the app's place in it, unless why says otherwise):
+// the seek time, then the seek event, as player.c's seekFrom; carryTick
+// watches where it lands.
+void seekTo(uint32_t ms, const char* why) {
     const int rcTime = musicSeekTime(ms), rcSeek = musicEvent(kEventSeek);
-    logLine("carry on: song %d of %d to %s, where the app was: seek time 0x%08X, seek 0x%08X",
-            g_c.cur.index + 1, g_c.count, mmss(ms).s, (unsigned)rcTime, (unsigned)rcSeek);
+    logLine("carry on: song %d of %d to %s, %s: seek time 0x%08X, seek 0x%08X",
+            g_c.cur.index + 1, g_c.count, mmss(ms).s, why, (unsigned)rcTime, (unsigned)rcSeek);
     g_c.seekWantMs = ms;
     g_c.seekUs = sceKernelGetSystemTimeWide();
     g_c.seekTries++;
@@ -3856,12 +4065,45 @@ void seekStart(const char* why) {
     g_c.backUs = 0;
 }
 
+// The track taken to ms, from the row or a remote: on to the next track when
+// that is at or past its end. Not before the shell plays it, as where it is
+// is not known yet.
+void seekAt(uint32_t ms, const char* why) {
+    if (!g_c.started) {
+        logLine("carry on: %s: song %d has not begun to play yet; no seek", why, g_c.cur.index + 1);
+        return;
+    }
+    const uint32_t len = g_c.cur.durationMs > 0 ? g_c.cur.durationMs : g_c.lenMs;
+    if (len > 0 && ms + 1000 >= len) {
+        logLine("carry on: %s: %s is past song %d's end; on to the next", why, mmss(ms).s,
+                g_c.cur.index + 1);
+        carryNext(g_c.cur.index, false, why);
+        return;
+    }
+    g_c.seekTries = 0;
+    seekTo(ms, why);
+}
+
+// The track moved by `by` ms from `time`, where it is: back to its start at
+// the most.
+void seekBy(int by, uint32_t time, const char* why) {
+    const int to = (int)time + by;
+    seekAt(to > 0 ? (uint32_t)to : 0, why);
+}
+
 // A press on the row, as player.c's watchSong takes them: play/pause stops
 // the shell and plays it again, which keeps its place; previous goes back to
 // the start past a song's first 3 s, and to the song before within them,
 // fetched first if it is not on the card; next goes on past repeat one.
-void carryPress(int press, int state, uint32_t time) {
+void carryPress(int press, int state, uint32_t time, bool fromRow = true) {
     g_c.backUs = 0;  // where the song goes now is the row's doing
+    // A remote's next and previous are tracks whatever the buttons do: it has
+    // forward and back of its own.
+    if (fromRow && g_c.seekButtons && (press == SC_PRESS_NEXT || press == SC_PRESS_PREVIOUS)) {
+        const int by = press == SC_PRESS_NEXT ? (int)g_c.seekForwardMs : -(int)g_c.seekBackMs;
+        seekBy(by, time, press == SC_PRESS_NEXT ? "forward, from the row" : "back, from the row");
+        return;
+    }
     if (press == SC_PRESS_NEXT) {
         logLine("carry on: next, from the row, at %s", mmss(time).s);
         carryNext(g_c.cur.index, false, "next, from the row");
@@ -3905,6 +4147,151 @@ void carryPress(int press, int state, uint32_t time) {
             mmss(time).s, (unsigned)rc);
 }
 
+// ── Remote control: the commands ────────────────────────────────────────────
+// What a remote asks of the queue SceShell carries on (the control listener,
+// below), queued under g_lock for the music thread, which carries each out
+// at its next look as it does the row's presses.
+// (the commands themselves: RemoteCmd, with the carry-on's state)
+
+// What the queue is doing, for the control listener's replies: written by
+// the music thread at each look, read under g_lock. serial changes with the
+// track or its state, so that a reply waiting for a change sees one.
+struct CtlState {
+    char id[48];
+    int index;
+    uint32_t durationMs, positionMs;
+    const char* state;  // kPlaying, kPaused, kBuffering or kStopped
+    uint32_t serial;
+};
+CtlState g_ctlState;
+
+// A command queued, and the music thread woken for it. Under g_lock. false
+// when too many wait.
+bool remotePush(const RemoteCmd& c) {
+    if (g_remoteCount == kRemoteMax || !g_carry) return false;
+    g_remote[(g_remoteFirst + g_remoteCount) % kRemoteMax] = c;
+    g_remoteCount++;
+    if (g_musicSema >= 0) sceKernelSignalSema(g_musicSema, 1);
+    return true;
+}
+
+// The music thread's: the next command waiting, into *c.
+bool remoteTake(RemoteCmd* c) {
+    lock();
+    const bool any = g_remoteCount > 0;
+    if (any) {
+        *c = g_remote[g_remoteFirst];
+        g_remoteFirst = (g_remoteFirst + 1) % kRemoteMax;
+        g_remoteCount--;
+    }
+    unlock();
+    return any;
+}
+
+// The music thread's: where the queue is, for the control listener.
+void publishState(const Track* t, const char* state, uint32_t positionMs) {
+    lock();
+    if (state != g_ctlState.state || !same(g_ctlState.id, t->id) || g_ctlState.index != t->index)
+        g_ctlState.serial++;
+    sceClibSnprintf(g_ctlState.id, sizeof(g_ctlState.id), "%s", t->id);
+    g_ctlState.index = t->index;
+    g_ctlState.durationMs = t->durationMs > 0 ? t->durationMs : g_c.lenMs;
+    g_ctlState.positionMs = positionMs;
+    g_ctlState.state = state;
+    unlock();
+}
+
+// The queue's track whose id is id, or whose id id ends with after a '/'
+// (as "/library/metadata/123" names 123): its place, or -1.
+int indexOfId(const char* id) {
+    QueueScan s;
+    if (!id[0] || !scanOpen(&s)) return -1;
+    const char* fields;
+    int found = -1;
+    char one[48];
+    const int n = (int)sceClibStrnlen(id, 64);
+    while (found < 0 && scanNext(&s, &fields)) {
+        const char* p = fields;
+        field(&p, one, sizeof(one), true);
+        const int m = (int)sceClibStrnlen(one, sizeof(one));
+        if (same(one, id) || (n > m && id[n - m - 1] == '/' && same(id + n - m, one)))
+            found = s.index;
+    }
+    readerClose();
+    return found;
+}
+
+// The track at index played from its start: from the card, or fetched and
+// waited for. why says who asked.
+void goTo(int index, const char* why) {
+    if (index < 0 || !trackAt(index, &g_found)) {
+        logLine("carry on: %s: no such track in the queue", why);
+        return;
+    }
+    if (fetchedFor(&g_found) || anyOnCard(&g_found)) {
+        if (!carryPlay(&g_found, why)) carryNext(index, false, "the one asked for would not open");
+    } else if (fetchable(&g_found) && !ringHas(&g_c.lost, index)) {
+        waitFor(&g_found, why);
+    } else {
+        logLine("carry on: %s: song %d is not on the card and cannot be fetched", why, index + 1);
+    }
+}
+
+// A remote's command carried out. While a track is fetched (waiting), play,
+// pause and the tracks go the way the row's presses do there, and seeks wait
+// for a track to seek in. true when it took the queue elsewhere, and the
+// look is over.
+bool carryRemote(const RemoteCmd& c, bool waiting, int state, uint32_t time) {
+    static const char* const kNames[11] = {"?",    "play",   "pause", "play/pause", "next", "previous",
+                                           "stop", "seek",   "forward", "back",     "skip to"};
+    logLine("carry on: %s, from a remote", kNames[c.cmd >= 1 && c.cmd <= 10 ? c.cmd : 0]);
+    if (c.cmd == kRcStop) {
+        carryEnd("stopped from a remote", kEndStopped);
+        return true;
+    }
+    if (c.cmd == kRcSkipTo) {
+        const int i = indexOfId(c.id);
+        if (i < 0) {
+            logLine("carry on: skip to \"%s\": not in the queue", c.id);
+            return false;
+        }
+        // Begun at its place, as the app's track is as a queue begins.
+        g_c.startIndex = c.ms >= 2000 ? i : -1;
+        g_c.startAtMs = c.ms >= 2000 ? c.ms : 0;
+        goTo(i, "skip to, from a remote");
+        return true;
+    }
+    const bool paused = g_c.menuPaused || (!waiting && state != 1);
+    int press = 0;
+    if (c.cmd == kRcToggle || (c.cmd == kRcPlay && paused) || (c.cmd == kRcPause && !paused))
+        press = SC_PRESS_PLAY_PAUSE;
+    else if (c.cmd == kRcNext)
+        press = SC_PRESS_NEXT;
+    else if (c.cmd == kRcPrevious)
+        press = SC_PRESS_PREVIOUS;
+    if (press) {
+        if (waiting) {
+            // carryWait takes it as it does the row's.
+            __atomic_store_n(&g_carryPress, press, __ATOMIC_SEQ_CST);
+            return false;
+        }
+        carryPress(press, state, time, false);
+        return true;
+    }
+    if (c.cmd == kRcPlay || c.cmd == kRcPause) return false;  // as it is already
+    if (waiting) {
+        logLine("carry on: no seek while song %d is fetched", g_c.waitIndex + 1);
+        return false;
+    }
+    if (c.cmd == kRcSeekTo)
+        seekAt(c.ms, "seek, from a remote");
+    else if (c.cmd == kRcForward)
+        seekBy((int)(c.ms ? c.ms : g_c.seekForwardMs), time, "forward, from a remote");
+    else if (c.cmd == kRcBack)
+        seekBy(-(int)(c.ms ? c.ms : g_c.seekBackMs), time, "back, from a remote");
+    return true;
+}
+
 // Each look while a song is fetched to play next: it is played once fetched,
 // tried again once if its fetch fails, and else passed over, or, with no
 // answer from the server, the queue goes on from the songs on the card or
@@ -3917,6 +4304,9 @@ void carryWait() {
     // on.
     if ((uint32_t)(sceKernelGetSystemTimeWide() - g_c.statusUs) >= 2000000u)
         carryStatusOf(&g_c.wait, SC_STATE_PLAYING, startAt(&g_c.wait), true);
+    publishState(&g_c.wait, g_c.menuPaused ? kPaused : kBuffering, startAt(&g_c.wait));
+    RemoteCmd rc;
+    if (remoteTake(&rc) && carryRemote(rc, true, 0, 0)) return;
     const int press = __atomic_exchange_n(&g_carryPress, 0, __ATOMIC_SEQ_CST);
     if (press == SC_PRESS_NEXT) {
         logLine("carry on: next, from the row, as song %d is fetched", g_c.waitIndex + 1);
@@ -4048,6 +4438,9 @@ void carryTick() {
         carryPress(press, state, time);
         return;
     }
+    RemoteCmd remote;
+    if (remoteTake(&remote) && carryRemote(remote, false, state, time)) return;
+    publishState(&g_c.cur, g_c.menuPaused ? kPaused : state == 1 ? kPlaying : kBuffering, time);
     if (!g_c.started) {
         // The app's track playing, short of its place: taken there at once,
         // not once its clock is seen to move, which took another 0.66 s in log
@@ -4143,11 +4536,12 @@ void carryTick() {
                         mmss(want).s, secsOf((uint32_t)(now - g_c.songUs) / 1000u).s);
                 g_c.seekWantMs = 0;
                 g_c.fastUntilUs = 0;
+                g_c.maxTime = time;
             } else if (since >= 4000) {
                 if (g_c.seekTries < 2) {
                     logLine("carry on: song %d of %d at %s, not %s, 4 s after the seek: again",
                             g_c.cur.index + 1, g_c.count, mmss(time).s, mmss(want).s);
-                    seekTo(want);
+                    seekTo(want, "again");
                     return;
                 } else {
                     logLine("carry on: the seeks did not take song %d of %d to %s; it goes on "
@@ -4157,9 +4551,12 @@ void carryTick() {
                 }
             }
         }
-        if (time > g_c.maxTime) g_c.maxTime = time;
+        // Not while a seek is under way: the place read before it lands is
+        // where the track was, and one further on than where it lands would
+        // read as the track's end.
+        if (time > g_c.maxTime && !g_c.seekWantMs) g_c.maxTime = time;
         const uint32_t lenMs = g_c.cur.durationMs > 0 ? g_c.cur.durationMs : g_c.lenMs;
-        if (!back && !g_c.resuming && g_c.maxTime + 10000 >= lenMs &&
+        if (!back && !g_c.resuming && !g_c.seekWantMs && g_c.maxTime + 10000 >= lenMs &&
             (time + 5000 < g_c.maxTime || state != 1) && !g_c.menuPaused) {
             logLine("carry on: song %d of %d ended (it got to %s of %s)", g_c.cur.index + 1,
                     g_c.count, mmss(g_c.maxTime).s, mmss(lenMs).s);
@@ -4323,6 +4720,589 @@ void stopCarry(const char* why, int how) {
     g_carryStopHow = how;
     logLine("carry on: to stop: %s", why);
     if (g_musicSema >= 0) sceKernelSignalSema(g_musicSema, 1);
+}
+
+// ── Remote control: the listener ────────────────────────────────────────────
+// A thread of its own while SceShell carries a queue on that asked for one
+// (g_ctl): it answers HTTP on g_ctl.port and discovery searches on UDP, and
+// pushes the queue's state to the remotes that subscribed. One request at a
+// time, each read and answered whole: remotes ask little and seldom. Through
+// SceShell's own SceNet, found with taiHEN as the HTTP library is, so that a
+// firmware without some of it keeps the rest of the plugin. Its lines in the
+// log begin "control:"; no URL or header line is logged.
+const uint32_t kNetLibrary = 0x6BF8B2A2;  // SceNet, in module SceNet
+enum { kNetSocket, kNetBind, kNetListen, kNetAccept, kNetRecv, kNetSend, kNetSendto, kNetRecvfrom,
+       kNetSetsockopt, kNetClose, kNetFns };
+LibFn g_net[kNetFns] = {{"sceNetSocket", 0xF084FCE3, 0},     {"sceNetBind", 0x1296A94B, 0},
+                        {"sceNetListen", 0x7A8DA094, 0},     {"sceNetAccept", 0x1ADF9BB1, 0},
+                        {"sceNetRecv", 0x023643B7, 0},       {"sceNetSend", 0xE3DD8CD9, 0},
+                        {"sceNetSendto", 0x52DB31D5, 0},     {"sceNetRecvfrom", 0xB226138B, 0},
+                        {"sceNetSetsockopt", 0x065505CA, 0}, {"sceNetSocketClose", 0x29822B4D, 0}};
+// As psp2common/net.h has them.
+struct NetAddrIn {
+    uint8_t len, family;
+    uint16_t port;     // network order
+    uint32_t addr;     // network order
+    uint16_t vport;
+    char zero[6];
+};
+static_assert(sizeof(NetAddrIn) == 16, "SceNetSockaddrIn");
+const int kAfInet = 2, kSockStream = 1, kSockDgram = 2;
+const int kSolSocket = 0xFFFF, kSoReuseAddr = 4, kSoSndTimeo = 0x1005, kSoRcvTimeo = 0x1006,
+          kSoNbio = 0x1100, kIpProtoIp = 0, kIpAddMembership = 12;
+typedef int (*FnSocket)(const char*, int, int, int);
+typedef int (*FnBind)(int, const void*, unsigned);
+typedef int (*FnListen)(int, int);
+typedef int (*FnAccept)(int, void*, unsigned*);
+typedef int (*FnRecv)(int, void*, unsigned, int);
+typedef int (*FnNetSend)(int, const void*, unsigned, int);
+typedef int (*FnSendto)(int, const void*, unsigned, int, const void*, unsigned);
+typedef int (*FnRecvfrom)(int, void*, unsigned, int, void*, unsigned*);
+typedef int (*FnSetsockopt)(int, int, int, const void*, unsigned);
+typedef int (*FnClose)(int);
+template <typename F>
+F netFn(int i) {
+    return (F)g_net[i].fn;
+}
+
+bool netFind() {
+    for (int i = 0; i < kNetFns; i++) {
+        uintptr_t fn = 0;
+        const int rc = scGetModuleExportFunc("SceNet", kNetLibrary, g_net[i].nid, &fn);
+        g_net[i].fn = rc >= 0 ? fn : 0;
+        if (rc < 0) {
+            logLine("control: %s not in SceNet: 0x%08X", g_net[i].name, (unsigned)rc);
+            return false;
+        }
+    }
+    return true;
+}
+
+uint16_t netOrder16(int v) {
+    return (uint16_t)(((v & 0xFF) << 8) | ((v >> 8) & 0xFF));
+}
+
+// "a.b.c.d" as an address in network order into *out. true when it is one.
+bool parseIp(const char* s, uint32_t* out) {
+    uint32_t parts[4];
+    for (int i = 0; i < 4; i++) {
+        if (*s < '0' || *s > '9') return false;
+        parts[i] = toUint(s);
+        if (parts[i] > 255) return false;
+        while (*s >= '0' && *s <= '9') s++;
+        if (i < 3 && *s++ != '.') return false;
+    }
+    *out = parts[0] | (parts[1] << 8) | (parts[2] << 16) | (parts[3] << 24);
+    return true;
+}
+
+void ipText(uint32_t addr, char* out, int cap) {
+    sceClibSnprintf(out, cap, "%u.%u.%u.%u", (unsigned)(addr & 0xFF), (unsigned)((addr >> 8) & 0xFF),
+                    (unsigned)((addr >> 16) & 0xFF), (unsigned)(addr >> 24));
+}
+
+int setOpt(int sock, int level, int name, int value) {
+    return netFn<FnSetsockopt>(kNetSetsockopt)(sock, level, name, &value, sizeof(value));
+}
+
+// The value of query parameter name, %XX and '+' decoded, into out. true
+// when it is there.
+bool queryParam(const char* query, const char* name, char* out, int cap) {
+    const int nlen = (int)sceClibStrnlen(name, 40);
+    for (const char* p = query; p && *p;) {
+        if (startsWith(p, name) && p[nlen] == '=') {
+            const char* v = p + nlen + 1;
+            int n = 0;
+            while (v[n] && v[n] != '&') n++;
+            urlDecode(v, n, out, cap, false);
+            for (char* c = out; *c; c++)
+                if (*c == '+') *c = ' ';
+            return true;
+        }
+        while (*p && *p != '&') p++;
+        if (*p) p++;
+    }
+    if (cap) out[0] = 0;
+    return false;
+}
+
+// Remotes that asked for the queue's state to be pushed to them.
+const int kSubscribers = 4;
+const uint32_t kSubscriberIdleMs = 90000;
+struct Subscriber {
+    uint32_t addr;        // network order; 0 for a free slot
+    int port;
+    char commandID[16];
+    SceUInt64 seenUs;     // its last request
+    int failures;         // pushes in a row it did not take
+};
+// The listener thread's alone, all of them.
+Subscriber g_subs[kSubscribers];
+char g_ctlReq[4096];
+char g_ctlBody[2048];
+char g_ctlOut[3072];
+char g_ctlUrl[512];
+Track g_ctlTrack;
+const char* g_ctlTrackState;
+uint32_t g_ctlPos, g_ctlDur, g_ctlSerial;
+
+// The queue's state as the music thread last wrote it, into g_ctlTrack.
+void ctlSnapshot() {
+    lock();
+    sceClibSnprintf(g_ctlTrack.id, sizeof(g_ctlTrack.id), "%s", g_ctlState.id);
+    g_ctlTrack.index = g_ctlState.index;
+    g_ctlTrack.durationMs = g_ctlState.durationMs;
+    g_ctlTrackState = g_ctlState.state ? g_ctlState.state : kStopped;
+    g_ctlPos = g_ctlState.positionMs;
+    g_ctlDur = g_ctlState.durationMs;
+    g_ctlSerial = g_ctlState.serial;
+    unlock();
+}
+
+const char* replyNamed(const char* name) {
+    for (int i = 0; i < g_ctl.replyCount; i++)
+        if (same(g_ctl.replies[i].name, name)) return g_ctl.replies[i].body;
+    return NULL;
+}
+
+// All of data sent on sock. false when it would not go.
+bool sendAll(int sock, const char* data, int n) {
+    while (n > 0) {
+        const int sent = netFn<FnNetSend>(kNetSend)(sock, data, (unsigned)n, 0);
+        if (sent <= 0) return false;
+        data += sent;
+        n -= sent;
+    }
+    return true;
+}
+
+// g_ctl.headers as \r\n-ended lines appended to out at n: its new length.
+int putHeaderLines(char* out, int n, int cap) {
+    for (const char* p = g_ctl.headers; *p && n < cap - 3;) {
+        while (*p && *p != '\r' && *p != '\n' && n < cap - 3) out[n++] = *p++;
+        out[n++] = '\r';
+        out[n++] = '\n';
+        while (*p == '\r' || *p == '\n') p++;
+    }
+    return n;
+}
+
+// A whole answer on sock: status, the app's header lines, extra lines, and
+// body.
+void respond(int sock, int status, const char* extra, const char* body) {
+    const int blen = (int)sceClibStrnlen(body, sizeof(g_ctlBody));
+    int n = sceClibSnprintf(g_ctlOut, sizeof(g_ctlOut),
+                            "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nConnection: close\r\n", status,
+                            status == 200 ? "OK" : status == 404 ? "Not Found" : "Bad Request", blen);
+    n = putHeaderLines(g_ctlOut, n, (int)sizeof(g_ctlOut) - 2);
+    if (extra) n += sceClibSnprintf(g_ctlOut + n, sizeof(g_ctlOut) - n, "%s", extra);
+    if (n > (int)sizeof(g_ctlOut) - 3) n = (int)sizeof(g_ctlOut) - 3;
+    g_ctlOut[n++] = '\r';
+    g_ctlOut[n++] = '\n';
+    if (sendAll(sock, g_ctlOut, n)) sendAll(sock, body, blen);
+}
+
+// A subscriber by its address, made when make; NULL when none (or full).
+Subscriber* subscriberOf(uint32_t addr, bool make) {
+    Subscriber* free = NULL;
+    for (int i = 0; i < kSubscribers; i++) {
+        if (g_subs[i].addr == addr) return &g_subs[i];
+        if (!g_subs[i].addr && !free) free = &g_subs[i];
+    }
+    if (!make || !free) return NULL;
+    sceClibMemset(free, 0, sizeof(*free));
+    free->addr = addr;
+    return free;
+}
+
+// A route's commands carried out for a request with this query from addr.
+// *wait set when it says to wait for a change before replying.
+void runCommands(const char* cmds, const char* query, uint32_t addr, bool* wait) {
+    char one[48], arg[64];
+    // A skip and a seek together (Plex's playMedia) are one command: the
+    // track begun at the place, as the seek alone would come before it plays.
+    RemoteCmd skip;
+    sceClibMemset(&skip, 0, sizeof(skip));
+    uint32_t seekMs = 0;
+    bool seek = false;
+    for (const char* p = cmds; *p;) {
+        int n = 0;
+        while (*p && *p != ',') {
+            if (n < (int)sizeof(one) - 1) one[n++] = *p;
+            p++;
+        }
+        if (*p) p++;
+        one[n] = 0;
+        char* colon = NULL;
+        for (char* c = one; *c && !colon; c++)
+            if (*c == ':') colon = c;
+        if (colon) *colon = 0;
+        const char* name = one;
+        const bool has = colon && queryParam(query, colon + 1, arg, sizeof(arg)) && arg[0];
+        RemoteCmd rc;
+        sceClibMemset(&rc, 0, sizeof(rc));
+        if (same(name, "play")) rc.cmd = kRcPlay;
+        else if (same(name, "pause")) rc.cmd = kRcPause;
+        else if (same(name, "toggle")) rc.cmd = kRcToggle;
+        else if (same(name, "next")) rc.cmd = kRcNext;
+        else if (same(name, "previous")) rc.cmd = kRcPrevious;
+        else if (same(name, "stop")) rc.cmd = kRcStop;
+        else if (same(name, "seekTo") && has) {
+            seek = true;
+            seekMs = toUint(arg);
+        } else if (same(name, "forward") || same(name, "back")) {
+            rc.cmd = same(name, "forward") ? kRcForward : kRcBack;
+            rc.ms = has ? toUint(arg) : 0;
+        } else if (same(name, "skipTo") && has) {
+            skip.cmd = kRcSkipTo;
+            copyText(skip.id, arg, sizeof(skip.id));
+        } else if (same(name, "subscribe")) {
+            Subscriber* sub = subscriberOf(addr, true);
+            if (sub) {
+                sub->port = has ? (int)toUint(arg) : 0;
+                sub->seenUs = sceKernelGetSystemTimeWide();
+                sub->failures = 0;
+                queryParam(query, "commandID", sub->commandID, sizeof(sub->commandID));
+                char ip[16];
+                ipText(addr, ip, sizeof(ip));
+                logLine("control: %s subscribes, port %d", ip, sub->port);
+            }
+        } else if (same(name, "unsubscribe")) {
+            Subscriber* sub = subscriberOf(addr, false);
+            if (sub) sub->addr = 0;
+        } else if (same(name, "wait")) {
+            *wait = true;
+        }
+        if (rc.cmd) {
+            lock();
+            const bool queued = remotePush(rc);
+            unlock();
+            if (!queued) logLine("control: command %s not taken: too many waiting", name);
+        }
+    }
+    if (skip.cmd) {
+        skip.ms = seek ? seekMs : 0;
+    } else if (seek) {
+        skip.cmd = kRcSeekTo;
+        skip.ms = seekMs;
+    }
+    if (skip.cmd) {
+        lock();
+        const bool queued = remotePush(skip);
+        unlock();
+        if (!queued) logLine("control: a skip or seek not taken: too many waiting");
+    }
+}
+
+// One connection: its request read, its route's commands carried out, and
+// its reply sent.
+void handleConnection(int sock, uint32_t addr) {
+    setOpt(sock, kSolSocket, kSoNbio, 0);
+    setOpt(sock, kSolSocket, kSoRcvTimeo, 2000000);
+    setOpt(sock, kSolSocket, kSoSndTimeo, 2000000);
+    int n = 0;
+    for (;;) {
+        const int got = netFn<FnRecv>(kNetRecv)(sock, g_ctlReq + n, sizeof(g_ctlReq) - 1 - n, 0);
+        if (got <= 0) break;
+        n += got;
+        g_ctlReq[n] = 0;
+        if (findText(g_ctlReq, "\r\n\r\n") || n >= (int)sizeof(g_ctlReq) - 1) break;
+    }
+    g_ctlReq[n] = 0;
+    // "METHOD /path?query HTTP/1.1"
+    char method[12], path[128];
+    static char query[1024];
+    int i = 0, k = 0;
+    while (g_ctlReq[i] && g_ctlReq[i] != ' ' && k < (int)sizeof(method) - 1) method[k++] = g_ctlReq[i++];
+    method[k] = 0;
+    while (g_ctlReq[i] == ' ') i++;
+    k = 0;
+    while (g_ctlReq[i] && g_ctlReq[i] != ' ' && g_ctlReq[i] != '?' && k < (int)sizeof(path) - 1)
+        path[k++] = g_ctlReq[i++];
+    path[k] = 0;
+    k = 0;
+    if (g_ctlReq[i] == '?') {
+        i++;
+        while (g_ctlReq[i] && g_ctlReq[i] != ' ' && k < (int)sizeof(query) - 1) query[k++] = g_ctlReq[i++];
+    }
+    query[k] = 0;
+    if (!method[0] || path[0] != '/') {
+        respond(sock, 400, NULL, "");
+        return;
+    }
+    // A subscriber's every request may bring it a new command id.
+    Subscriber* sub = subscriberOf(addr, false);
+    if (sub) {
+        sub->seenUs = sceKernelGetSystemTimeWide();
+        char id[16];
+        if (queryParam(query, "commandID", id, sizeof(id))) copyText(sub->commandID, id, sizeof(sub->commandID));
+    }
+    if (same(method, "OPTIONS")) {
+        // A browser's preflight: what it asks for, allowed.
+        static char extra[512];
+        char asked[256];
+        asked[0] = 0;
+        const char* h = findText(g_ctlReq, "Access-Control-Request-Headers:");
+        if (h) {
+            h += 31;
+            while (*h == ' ') h++;
+            int a = 0;
+            while (h[a] && h[a] != '\r' && h[a] != '\n' && a < (int)sizeof(asked) - 1) {
+                asked[a] = h[a];
+                a++;
+            }
+            asked[a] = 0;
+        }
+        sceClibSnprintf(extra, sizeof(extra),
+                        "Access-Control-Allow-Methods: POST, GET, OPTIONS, DELETE, PUT, HEAD\r\n"
+                        "Access-Control-Max-Age: 1209600\r\n%s%s%s",
+                        asked[0] ? "Access-Control-Allow-Headers: " : "", asked,
+                        asked[0] ? "\r\n" : "");
+        respond(sock, 200, extra, "");
+        return;
+    }
+    const Route* route = NULL;
+    for (int r = 0; r < g_ctl.routeCount && !route; r++)
+        if (same(g_ctl.routes[r].path, path)) route = &g_ctl.routes[r];
+    bool wait = false;
+    if (route) runCommands(route->cmds, query, addr, &wait);
+    ctlSnapshot();
+    // Wait for the state to change (a remote's long poll), a second at most,
+    // so that one remote never holds the listener up for long.
+    if (wait) {
+        const uint32_t was = g_ctlSerial;
+        for (int t = 0; t < 20 && g_ctlSerial == was; t++) {
+            sceKernelDelayThread(50 * 1000);
+            ctlSnapshot();
+        }
+    }
+    const char* tmpl = route ? replyNamed(route->reply) : replyNamed(g_ctl.notFound);
+    char ip[16], cmdId[16];
+    ipText(addr, ip, sizeof(ip));
+    queryParam(query, "commandID", cmdId, sizeof(cmdId));
+    Extra x = {query, cmdId, ip, 0};
+    if (!tmpl || !expand(tmpl, &g_ctlTrack, g_ctlTrackState, g_ctlPos, g_ctlDur, g_ctlBody,
+                         sizeof(g_ctlBody), &x))
+        g_ctlBody[0] = 0;
+    respond(sock, route || tmpl ? 200 : 404, NULL, g_ctlBody);
+}
+
+// A UDP datagram of text to "a.b.c.d:port".
+void sendDatagram(int udp, const char* to, const char* text) {
+    char host[24];
+    int k = 0;
+    while (to[k] && to[k] != ':' && k < (int)sizeof(host) - 1) {
+        host[k] = to[k];
+        k++;
+    }
+    host[k] = 0;
+    NetAddrIn a;
+    sceClibMemset(&a, 0, sizeof(a));
+    if (to[k] != ':' || !parseIp(host, &a.addr)) return;
+    a.len = sizeof(a);
+    a.family = kAfInet;
+    a.port = netOrder16((int)toUint(to + k + 1));
+    netFn<FnSendto>(kNetSendto)(udp, text, (unsigned)sceClibStrnlen(text, 1024), 0, &a, sizeof(a));
+}
+
+// The queue's state to each subscriber, as control.push says. Those idle
+// too long, or that took none of three pushes in a row, are dropped.
+void pushAll(int tmpl) {
+    const char* body = replyNamed(g_ctl.pushReply);
+    const SceUInt64 now = sceKernelGetSystemTimeWide();
+    ctlSnapshot();
+    for (int i = 0; i < kSubscribers; i++) {
+        Subscriber* sub = &g_subs[i];
+        if (!sub->addr) continue;
+        char ip[16];
+        ipText(sub->addr, ip, sizeof(ip));
+        if ((uint32_t)((now - sub->seenUs) / 1000u) > kSubscriberIdleMs || sub->failures >= 3) {
+            logLine("control: %s dropped (%s)", ip, sub->failures >= 3 ? "it took no pushes" : "idle");
+            sub->addr = 0;
+            continue;
+        }
+        Extra x = {NULL, sub->commandID, ip, sub->port};
+        if (!expand(g_ctl.pushUrl, &g_ctlTrack, g_ctlTrackState, g_ctlPos, g_ctlDur, g_ctlUrl,
+                    sizeof(g_ctlUrl), &x) ||
+            !expand(body ? body : "", &g_ctlTrack, g_ctlTrackState, g_ctlPos, g_ctlDur, g_ctlBody,
+                    sizeof(g_ctlBody), &x))
+            continue;
+        HttpAsk ask = getWith(g_ctl.headers);
+        ask.method = g_ctl.pushMethod;
+        ask.body = g_ctlBody;
+        ask.bodyLen = (uint32_t)sceClibStrnlen(g_ctlBody, sizeof(g_ctlBody));
+        if (g_ctl.pushType[0]) ask.type = g_ctl.pushType;
+        int conn, req, status = 0;
+        const int rc = httpOpen(tmpl, NULL, NULL, g_ctlUrl, ask, &conn, &req);
+        if (rc >= 0) {
+            httpFn<FnStatus>(kHttpStatus)(req, &status);
+            httpClose(conn, req);
+        }
+        sub->failures = status >= 200 && status < 300 ? 0 : sub->failures + 1;
+    }
+}
+
+bool ctlStopping() {
+    lock();
+    const bool stop = g_ctlStop != 0;
+    unlock();
+    return stop;
+}
+
+int ctlThread(SceSize, void*) {
+    int tcp = -1, udp = -1, tmpl = -1, rcSsl = -1, rcHttp = -1;
+    sceClibMemset(g_subs, 0, sizeof(g_subs));
+    bool ok = netFind();
+    if (ok) {
+        tcp = netFn<FnSocket>(kNetSocket)("ShellCompanion::Control", kAfInet, kSockStream, 0);
+        NetAddrIn a;
+        sceClibMemset(&a, 0, sizeof(a));
+        a.len = sizeof(a);
+        a.family = kAfInet;
+        a.port = netOrder16(g_ctl.port);
+        int rc = tcp;
+        if (tcp >= 0) {
+            setOpt(tcp, kSolSocket, kSoReuseAddr, 1);
+            rc = netFn<FnBind>(kNetBind)(tcp, &a, sizeof(a));
+            if (rc >= 0) rc = netFn<FnListen>(kNetListen)(tcp, 4);
+            if (rc >= 0) rc = setOpt(tcp, kSolSocket, kSoNbio, 1);
+        }
+        ok = rc >= 0;
+        logLine("control: listening on port %d: 0x%08X", g_ctl.port, (unsigned)rc);
+    }
+    if (ok && g_ctl.discoveryPort) {
+        udp = netFn<FnSocket>(kNetSocket)("ShellCompanion::Discovery", kAfInet, kSockDgram, 0);
+        NetAddrIn a;
+        sceClibMemset(&a, 0, sizeof(a));
+        a.len = sizeof(a);
+        a.family = kAfInet;
+        a.port = netOrder16(g_ctl.discoveryPort);
+        int rc = udp, rcJoin = 0;
+        if (udp >= 0) {
+            setOpt(udp, kSolSocket, kSoReuseAddr, 1);
+            rc = netFn<FnBind>(kNetBind)(udp, &a, sizeof(a));
+            uint32_t group[2] = {0, 0};  // the group, then any interface
+            if (rc >= 0 && g_ctl.discoveryGroup[0] && parseIp(g_ctl.discoveryGroup, &group[0]))
+                rcJoin = netFn<FnSetsockopt>(kNetSetsockopt)(udp, kIpProtoIp, kIpAddMembership, group,
+                                                              sizeof(group));
+            if (rc >= 0) rc = setOpt(udp, kSolSocket, kSoNbio, 1);
+        }
+        logLine("control: discovery on UDP port %d: 0x%08X, group 0x%08X", g_ctl.discoveryPort,
+                (unsigned)rc, (unsigned)rcJoin);
+        if (rc < 0 && udp >= 0) {
+            netFn<FnClose>(kNetClose)(udp);
+            udp = -1;
+        }
+        if (udp >= 0 && g_ctl.helloTo[0] && g_ctl.hello[0]) sendDatagram(udp, g_ctl.helloTo, g_ctl.hello);
+    }
+    if (ok && g_ctl.pushUrl[0]) {
+        if (!g_netFound) g_netFound = findLibraries("control");
+        if (g_netFound && httpStart("control", &rcSsl, &rcHttp)) tmpl = httpTemplate("control", true);
+    }
+    const uint32_t every = g_ctl.pushEveryMs >= 500 ? g_ctl.pushEveryMs : 1000;
+    SceUInt64 pushedUs = 0;
+    uint32_t pushedSerial = 0;
+    static char dgram[1024];
+    while (ok && !ctlStopping()) {
+        NetAddrIn from;
+        unsigned fromLen = sizeof(from);
+        const int conn = netFn<FnAccept>(kNetAccept)(tcp, &from, &fromLen);
+        if (conn >= 0) {
+            handleConnection(conn, from.addr);
+            netFn<FnClose>(kNetClose)(conn);
+            continue;
+        }
+        if (udp >= 0) {
+            fromLen = sizeof(from);
+            const int got =
+                netFn<FnRecvfrom>(kNetRecvfrom)(udp, dgram, sizeof(dgram) - 1, 0, &from, &fromLen);
+            if (got > 0) {
+                dgram[got] = 0;
+                if (g_ctl.discoveryReply[0] && startsWith(dgram, g_ctl.discoveryMatch)) {
+                    ctlSnapshot();
+                    if (expand(g_ctl.discoveryReply, &g_ctlTrack, g_ctlTrackState, g_ctlPos, g_ctlDur,
+                               g_ctlBody, sizeof(g_ctlBody)))
+                        netFn<FnSendto>(kNetSendto)(udp, g_ctlBody,
+                                                    (unsigned)sceClibStrnlen(g_ctlBody, sizeof(g_ctlBody)),
+                                                    0, &from, fromLen);
+                }
+                continue;
+            }
+        }
+        const SceUInt64 now = sceKernelGetSystemTimeWide();
+        if (tmpl >= 0) {
+            lock();
+            const uint32_t serial = g_ctlState.serial;
+            unlock();
+            if (serial != pushedSerial || (uint32_t)((now - pushedUs) / 1000u) >= every) {
+                pushedSerial = serial;
+                pushedUs = now;
+                pushAll(tmpl);
+            }
+        }
+        sceKernelDelayThread(50 * 1000);
+    }
+    // The remotes told the queue has stopped, as a last push, and goodbye.
+    if (tmpl >= 0) {
+        lock();
+        g_ctlState.state = kStopped;
+        g_ctlState.serial++;
+        unlock();
+        pushAll(tmpl);
+        httpFn<FnId>(kHttpDeleteTemplate)(tmpl);
+    }
+    httpEnd(rcSsl, rcHttp);
+    if (udp >= 0 && g_ctl.helloTo[0] && g_ctl.bye[0]) sendDatagram(udp, g_ctl.helloTo, g_ctl.bye);
+    if (udp >= 0) netFn<FnClose>(kNetClose)(udp);
+    if (tcp >= 0) netFn<FnClose>(kNetClose)(tcp);
+    logLine("control: stopped");
+    lock();
+    g_ctlRunning = 0;
+    unlock();
+    return sceKernelExitDeleteThread(0);
+}
+
+// The listener begun for the queue just begun, if it asked for one.
+void startControl() {
+    if (!g_ctl.port) return;
+    lock();
+    const bool running = g_ctlRunning != 0;
+    if (!running) {
+        g_ctlRunning = 1;
+        g_ctlStop = 0;
+        sceClibMemset(&g_ctlState, 0, sizeof(g_ctlState));
+    }
+    unlock();
+    if (running) {
+        logLine("control: the last queue's listener has not stopped; none for this one");
+        return;
+    }
+    const SceUID thread = sceKernelCreateThread("ShellCompanion::Control", ctlThread, kThreadPriority,
+                                                kFetchStack, 0, 0, NULL);
+    const int rc = thread < 0 ? thread : sceKernelStartThread(thread, 0, NULL);
+    if (rc < 0) {
+        if (thread >= 0) sceKernelDeleteThread(thread);
+        logLine("control: no thread for it: 0x%08X", (unsigned)rc);
+        lock();
+        g_ctlRunning = 0;
+        unlock();
+    }
+}
+
+// The listener stopped, waited for up to 3 s (a push under way may take
+// two). The music thread's.
+void stopControl() {
+    lock();
+    const bool running = g_ctlRunning != 0;
+    g_ctlStop = 1;
+    unlock();
+    for (int i = 0; running && i < 60; i++) {
+        lock();
+        const bool still = g_ctlRunning != 0;
+        unlock();
+        if (!still) break;
+        sceKernelDelayThread(50 * 1000);
+    }
 }
 
 // ── An app's update ─────────────────────────────────────────────────────────
@@ -4622,12 +5602,6 @@ uint32_t msSince(SceUInt64 from) {
     return secs * 1000u + micros / 1000u;
 }
 
-// src, cut to fit, into dst, always ended with 0.
-void copyText(char* dst, const char* src, int cap) {
-    int n = 0;
-    for (; src[n] && n < cap - 1; n++) dst[n] = src[n];
-    dst[n] = 0;
-}
 
 bool dlStopped() {
     lock();

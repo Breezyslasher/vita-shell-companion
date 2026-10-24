@@ -113,6 +113,9 @@ index=<track to start with, from 0>
 positionMs=<where in it>
 repeat=<0 off, 1 one, 2 all>
 offlineSkip=<0/1: when a track cannot be fetched, skip to the next one on the card>
+buttons=<tracks (default) or seek: what the row's ⏮ ⏭ do, see "Buttons" below>
+seekBackMs=<with buttons=seek: how far ⏮ goes back, default 10000>
+seekForwardMs=<with buttons=seek: how far ⏭ goes forward, default 30000>
 headers=<encoded: header lines sent with every request below, "Name: value", \r\n between>
 report.state=<encoded, optional: URL template, see §4.3>
 report.state.method=<GET (default), POST, PUT, DELETE or PATCH>
@@ -121,6 +124,7 @@ report.state.type=<encoded, the body's Content-Type; application/json by default
 report.state.every=<seconds between repeats while playing, default 10, at least 2>
 report.played=<encoded, optional: URL template when a track plays to its end>
 report.played.method=..., report.played.body=..., report.played.type=...
+control.*=<encoded, optional: the remote control, see §4.4>
 track=<fields, '|'-separated, each encoded, below>
 ...                                         (up to 1000 tracks)
 end
@@ -163,6 +167,16 @@ to the fetch, the same in `altPrep` and `altUrl`.
 - **Missing tracks:** a track it can't get is skipped; three in a row stop the
   queue. When the server doesn't answer at all and `offlineSkip=1`, it skips
   to the next track on the card; with none, it holds paused.
+
+### Buttons
+
+While the shell plays the queue, the row's ⏮ and ⏭ either move between
+tracks (`buttons=tracks`, the default: ⏮ restarts a track past its first
+3 s) or, with `buttons=seek`, move within the track by `seekBackMs` and
+`seekForwardMs`, as an audiobook player does. Seeking forward past a track's
+end goes on to the next track; seeking back stops at its start. While the
+app itself plays, the presses go to the app, which does what it likes with
+them.
 
 ### 4.3 Report templates
 
@@ -222,6 +236,103 @@ Examples:
   the exact position, and the app continues from there. A queue handed over
   and not yet begun is not begun. Only the app whose queue it is can take it
   back.
+
+### 4.4 Remote control
+
+A queue can have the plugin listen for a remote while the shell plays it:
+the app's server, or another app on the network, then skips, pauses, seeks
+or starts a track of the queue with the app closed. The plugin knows no
+remote protocol: the app writes the paths to answer, what each means, and
+the replies, as templates like the reports'. The listener runs only while
+the shell plays the queue, and stops with it.
+
+```
+control.port=<TCP port to answer HTTP on>
+control.headers=<header lines on every reply, and on the pushes>
+control.reply.<name>=<a reply body template; up to 4, up to 1535 bytes>
+control.route=<path>|<commands>|<reply name>      (up to 20 routes)
+control.notFound=<reply name for any other path; a plain 404 without>
+control.discovery.port=<UDP port to answer discovery searches on>
+control.discovery.group=<a multicast group to join for them, or none>
+control.discovery.match=<what a search begins with>
+control.discovery.reply=<the answer, a template>
+control.discovery.hello=<a.b.c.d:port>|<sent there as the listener starts>
+control.discovery.bye=<sent there as it stops>
+control.push=<URL template>|<method, POST by default>|<reply name for the body>|<Content-Type>
+control.push.every=<seconds between pushes to subscribers, default 1>
+```
+
+- **Paths** match exactly, without the query. `OPTIONS` requests (browser
+  preflights) are answered with permissive CORS headers.
+- **Commands**, `,` between, each `name` or `name:param` where `param` names
+  the query parameter that carries its value:
+
+  | Command | Does |
+  |---|---|
+  | `play`, `pause`, `toggle` | play, pause, or switch |
+  | `next`, `previous` | the next track; the previous one, or this one's start past 3 s (whatever `buttons` says) |
+  | `stop` | stop the queue, as at its end; the listener stops too |
+  | `seekTo:p` | to `p` ms in the track |
+  | `forward[:p]`, `back[:p]` | by `p` ms, or the queue's `seekForwardMs`/`seekBackMs` |
+  | `skipTo:p` | to the track whose `id` is `p`, or whose `id` `p` ends with after a `/` (`/library/metadata/123`). With `seekTo` in the same route, it begins at that place |
+  | `subscribe:p` | the asker's address, with port `p`, gets `control.push` every `control.push.every` seconds and at every change; its `commandID` parameter, on this and its later requests, is `{commandID}` |
+  | `unsubscribe` | stops that |
+  | `wait` | the reply waits up to 1 s for the state to change (a long poll) |
+
+- **Replies** are sent with status 200 and the template filled in: the
+  report placeholders (§4.3) for the track playing, plus `{param:NAME}` (a
+  query parameter of the request) and `{commandID}`. `{state}` is `playing`,
+  `paused`, `buffering` or `stopped`.
+- **Pushes** go to each subscriber, with `{subscriberIp}`,
+  `{subscriberPort}` and `{commandID}` filled in too. A subscriber is
+  dropped after 90 s without a request from it, or three pushes in a row it
+  didn't take; it is sent one last push, `stopped`, as the listener stops.
+- **Discovery:** a datagram on `control.discovery.port` that begins with
+  `control.discovery.match` is answered with `control.discovery.reply`.
+
+**Plex** (VitaPlex), as a Plex player that Plex's apps can control
+(the companion protocol: HTTP on 32500, GDM discovery on 32412):
+
+```
+control.port=32500
+control.headers=Content-Type: text/xml\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: X-Plex-Client-Identifier\r\nX-Plex-Client-Identifier: <the app's id>
+control.reply.ok=<Response code="200" status="OK"/>
+control.reply.resources=<MediaContainer><Player title="<name>" protocol="plex" protocolVersion="1" protocolCapabilities="timeline,playback" machineIdentifier="<the app's id>" product="VitaPlex" platform="PlayStation Vita" deviceClass="handheld"/></MediaContainer>
+control.reply.timeline=<MediaContainer commandID="{param:commandID}" location="fullScreenMusic"><Timeline type="music" state="{state}" time="{positionMs}" duration="{durationMs}" ratingKey="{id}" key="/library/metadata/{id}" machineIdentifier="<server id>" address="<server host>" port="<server port>" protocol="<http or https>"/><Timeline type="video" state="stopped"/><Timeline type="photo" state="stopped"/></MediaContainer>
+control.route=/resources||resources
+control.route=/player/playback/play|play|ok
+control.route=/player/playback/pause|pause|ok
+control.route=/player/playback/stop|stop|ok
+control.route=/player/playback/skipNext|next|ok
+control.route=/player/playback/skipPrevious|previous|ok
+control.route=/player/playback/stepForward|forward|ok
+control.route=/player/playback/stepBack|back|ok
+control.route=/player/playback/seekTo|seekTo:offset|ok
+control.route=/player/playback/skipTo|skipTo:key|ok
+control.route=/player/playback/playMedia|skipTo:key,seekTo:offset|ok
+control.route=/player/timeline/subscribe|subscribe:port|ok
+control.route=/player/timeline/unsubscribe|unsubscribe|ok
+control.route=/player/timeline/poll|wait|timeline
+control.notFound=ok
+control.discovery.port=32412
+control.discovery.group=239.0.0.250
+control.discovery.match=M-SEARCH
+control.discovery.reply=HTTP/1.0 200 OK\r\nContent-Type: plex/media-player\r\nResource-Identifier: <the app's id>\r\nName: <name>\r\nPort: 32500\r\nProduct: VitaPlex\r\nProtocol: plex\r\nProtocol-Version: 1\r\nProtocol-Capabilities: timeline,playback\r\nDevice-Class: handheld\r\n\r\n
+control.discovery.hello=239.0.0.250:32413|HELLO * HTTP/1.0\r\n<the same lines as the reply>\r\n
+control.discovery.bye=BYE * HTTP/1.0\r\nResource-Identifier: <the app's id>\r\n\r\n
+control.push=http://{subscriberIp}:{subscriberPort}/:/timeline|POST|timeline|text/xml
+```
+
+(`\r\n` stands for the line breaks the encoding carries.) Only tracks in the
+queue can be played: a `playMedia` for anything else is answered, and does
+nothing. This follows the companion protocol as open players implement it
+(plex-mpv-shim); it is untested against Plex's apps.
+
+**Sendspin** (Music Assistant) can't be served this way: a Sendspin player
+keeps a WebSocket open to the server, the server streams the audio over it
+and controls playback by changing the stream, and current Sendspin encrypts
+the connection end to end (Noise). Remote control of a queue the shell plays
+from files isn't what Music Assistant's server does.
 
 ## 5. Background downloads
 

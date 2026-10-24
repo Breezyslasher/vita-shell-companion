@@ -11,6 +11,12 @@ going after it closes:
   and a "Pause downloads?" question.
 - **Self-update:** the plugin installs the app's update once it has closed,
   then launches it again.
+- **Remote control:** while the shell plays an app's queue, the app's server
+  or remote apps on the network can play, pause, skip, seek and start tracks,
+  through an HTTP listener the app describes (a Plex player's companion
+  protocol, for one).
+- **Skip or seek:** an app chooses whether the row's ⏮ ⏭ skip tracks or seek
+  within them, as an audiobook app wants.
 
 Each app turns on only the features it wants, and describes its work with
 plain URLs, headers and report templates. The plugin knows nothing about any

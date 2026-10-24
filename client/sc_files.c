@@ -95,6 +95,17 @@ int scWriteQueue(const ScQueue* q, const ScTrack* tracks, uint32_t count) {
     if (q->state.url && q->state.url[0] && q->stateEveryS)
         fprintf(f, "report.state.every=%u\n", (unsigned)q->stateEveryS);
     putReport(f, "report.played", &q->played);
+    if (q->seekButtons) {
+        fputs("buttons=seek\n", f);
+        if (q->seekBackMs) fprintf(f, "seekBackMs=%u\n", (unsigned)q->seekBackMs);
+        if (q->seekForwardMs) fprintf(f, "seekForwardMs=%u\n", (unsigned)q->seekForwardMs);
+    }
+    for (uint32_t i = 0; q->extra && i < q->extraCount; i++) {
+        if (!q->extra[i].key || !q->extra[i].key[0]) continue;
+        fprintf(f, "%s=", q->extra[i].key);
+        putEncoded(f, q->extra[i].value);
+        fputc('\n', f);
+    }
     for (uint32_t i = 0; i < count; i++) {
         const ScTrack* t = &tracks[i];
         const char* const fields[SC_TRACK_FIELDS] = {

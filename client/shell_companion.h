@@ -128,15 +128,29 @@ typedef struct ScReport {
     const char* type;      // the body's Content-Type, application/json when NULL
 } ScReport;
 
+// A line of the queue's head the app writes as it is, its value encoded:
+// the remote control's control.* lines (docs/PROTOCOL.md §4.4).
+typedef struct ScHeadLine {
+    const char* key;
+    const char* value;
+} ScHeadLine;
+
 typedef struct ScQueue {
     uint32_t index;        // the track to start with
     uint32_t positionMs;   // where in it
     int repeat;            // SC_REPEAT_*
     int offlineSkip;       // 1: a track that cannot be fetched skips to the next on the card
+    // What the row's ⏮ ⏭ do while the shell plays the queue: 0 skip tracks;
+    // 1 seek back and forward within the track by these (0 for 10 s and
+    // 30 s), on to the next track past its end, as for an audiobook.
+    int seekButtons;
+    uint32_t seekBackMs, seekForwardMs;
     const char* headers;   // "Name: value" lines, \r\n between, sent with every request
     ScReport state;        // where the music is
     uint32_t stateEveryS;  // how often it is repeated while it plays; 0 for 10
     ScReport played;       // a track played to its end
+    const ScHeadLine* extra;  // more head lines, such as control.*; NULL for none
+    uint32_t extraCount;
 } ScQueue;
 
 int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
