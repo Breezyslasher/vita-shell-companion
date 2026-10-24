@@ -1,0 +1,45 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  plugin:
+    name: shell_companion.suprx
+    runs-on: ubuntu-latest
+    container:
+      image: vitasdk/vitasdk:2026.08
+    steps:
+      - name: Install build requirements
+        run: |
+          set -eu
+          if command -v apk >/dev/null 2>&1; then apk update && apk add cmake ninja git patch
+          elif command -v apt-get >/dev/null 2>&1; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cmake ninja-build git patch ca-certificates
+          elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm cmake ninja git patch
+          fi
+          for tool in cmake ninja git patch; do command -v "$tool" >/dev/null || { echo "::error::$tool missing"; exit 1; }; done
+      - uses: actions/checkout@v4
+      - name: Trust the checkout
+        run: git config --system --add safe.directory "$GITHUB_WORKSPACE"
+      # Two GitHub repositories at pinned commits. Tried three times: a clone
+      # that fails once is the network.
+      - name: Fetch PAF headers
+        run: |
+          for try in 1 2 3; do
+            sh scripts/fetch_paf_headers.sh "$GITHUB_WORKSPACE/build-paf" && exit 0
+            echo "fetch failed (try $try)"; sleep $((try * 10))
+          done
+          exit 1
+      - name: Build
+        run: |
+          cmake -B build -G Ninja -DSC_PAF_INCLUDE_DIR="$GITHUB_WORKSPACE/build-paf/include"
+          cmake --build build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shell_companion-${{ github.run_number }}
+          path: |
+            build/shell_companion.suprx
+            LICENSE
+            NOTICE.txt
