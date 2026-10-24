@@ -101,6 +101,13 @@ int scDownloadPauseAsked(void);
 // scReadUpdateResult.
 int scUpdateInstall(void);
 
+// ── Debug ────────────────────────────────────────────────────────────────────
+// SC_CMD_PROBE_STREAM (SC_FEAT_MUSIC): the plugin streams a growing WAV
+// through the shell's music player and logs what the player makes of it
+// (docs/PROTOCOL.md §9). mode SC_PROBE_*; sourceWav a 44.1 kHz 16-bit stereo
+// WAV on the card to stream, NULL or "" for a tone.
+int scProbeStream(int mode, const char* sourceWav);
+
 // ── The files ────────────────────────────────────────────────────────────────
 // Each written whole beside its name and moved in, with its "end" line, its
 // fields URL-encoded where docs/PROTOCOL.md says: 0, or -1 when it could not

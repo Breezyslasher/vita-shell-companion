@@ -4646,13 +4646,16 @@ void carryTick() {
     if ((uint32_t)(now - g_c.statusUs) >= 2000000u) carryStatus(SC_STATE_PLAYING, time);
 }
 
+bool probeHolds();
+
 // One look of the music thread's: a queue an app handed over begun, once a
-// queue carried on before has stopped; the queue carried on, looked at.
+// queue carried on before has stopped, and the probe (probeStep); the queue
+// carried on, looked at.
 void musicStep() {
     lock();
     const int carry = g_carry;
     // Once a queue carried on before has stopped (SC_CMD_MUSIC_PLAY stops it).
-    const bool handed = g_playQueueDue && carry != 2;
+    const bool handed = g_playQueueDue && carry != 2 && !probeHolds();
     const int app = g_playQueueApp;
     if (handed) {
         g_playQueueDue = 0;
@@ -4720,6 +4723,574 @@ void stopCarry(const char* why, int how) {
     g_carryStopHow = how;
     logLine("carry on: to stop: %s", why);
     if (g_musicSema >= 0) sceKernelSignalSema(g_musicSema, 1);
+}
+
+// ── Probe: does the shell play a WAV that is still being written? ───────────
+// (docs/PROTOCOL.md §9) A debug run, for Music Assistant in the background:
+// a Sendspin player gets its audio as a stream, and the shell's music
+// service plays only files. So the probe writes 44.1 kHz 16-bit stereo PCM
+// into a WAV at the clock's pace, kProbeLeadMs ahead of the start, hands the
+// file to the service as the queue's songs are handed (carryPlay), and logs
+// each second what it has written beside what the service says: its state,
+// its clock and the length it gives the song. Then it pauses, plays, seeks
+// back, seeks to near the end of what is written (past what the file held
+// as it was opened), and skips to a second file, timing each. Its lines in
+// the log begin "probe:". It runs only while no queue is carried on, and a
+// queue handed over waits for it to stop.
+//
+// The WAV's header gives either a huge size (SC_PROBE_HUGE), or the size
+// written so far, rewritten as it grows (SC_PROBE_GROWING, SC_PROBE_REOPEN);
+// SC_PROBE_REOPEN has the shell open the file again where it was each time
+// it stops, and every kProbeReopenS, to time the gap. Each write appends with
+// the file opened and closed again, so the card's entry has its size.
+const uint32_t kProbeLeadMs = 3000;      // written before the shell is given the file
+const uint32_t kProbeHugeBytes = 0x7FFFF000u;  // the huge header's data size, 3 h 22 min
+const uint32_t kProbeDelayMs = 10000;    // from the command to the first file, to close the app
+const uint32_t kProbeEndS = 80;          // a run's length
+const uint32_t kProbeReopenS = 10;
+const uint32_t kProbeTookMaxMs = 10000;  // a step not seen taking effect by then is logged so
+const uint32_t kProbeWavHead = 44;
+const uint32_t kProbeBytesPer10Ms = 1764;  // 44100 * 4 / 100
+
+// Under g_lock: the run asked for (SC_PROBE_*, -1 for none), and for whom;
+// running; and to stop, which the probe thread reads without it.
+int g_probeWant = -1;
+int g_probeWantApp;
+char g_probeWantSource[160];
+int g_probeRunning;
+int g_probeStop;  // atomic
+SceUID g_probeSema = -1;
+int g_probeThread;
+
+// The probe thread's alone.
+struct Probe {
+    int mode;              // the run's SC_PROBE_*
+    char name[48];
+    char path[2][120];     // its two files, in the app's folder
+    int file;              // the one written now and with the shell
+    int huge;              // its header gives kProbeHugeBytes, not what is written
+    uint32_t bytes;        // PCM written to it
+    uint32_t openMs;       // audio in it as the shell was given it
+    SceUInt64 beganUs;     // its writing began: kProbeLeadMs is written then, and the clock's
+                           // pace after
+    int writeErrors;
+    // Where the PCM comes from: a WAV on the card (source), looped, or a tone.
+    char source[160];
+    SceUID src;
+    uint32_t srcLeft;      // of its data chunk
+    uint32_t pendOff, pendN;  // its PCM read with its header, in g_probeHead, not yet used
+    int srcLoops;
+    uint32_t samples;      // the tone's so far
+    uint16_t phase;
+    // What the shell said last, and since when its clock has not moved.
+    int state;
+    uint32_t timeMs, lenMs;
+    SceUInt64 stillUs;
+    int stalled;           // logged as stalled, until it moves again
+    int paused;            // paused by the probe
+    // A step asked of the shell, timed until it plays at its place: what,
+    // where it is to play from (within 1 s back, 3 s on), and since when.
+    const char* mark;
+    uint32_t markMs;
+    SceUInt64 markUs;
+};
+Probe g_p;
+uint8_t g_probeBuf[4096];
+uint8_t g_probeHead[512];
+
+uint32_t le32(const uint8_t* p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+uint32_t le16(const uint8_t* p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8;
+}
+void putLe32(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+void putLe16(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+// A WAV's 44-byte header for `data` bytes of 44.1 kHz 16-bit stereo PCM.
+void probeHeader(uint8_t* h, uint32_t data) {
+    sceClibMemcpy(h, "RIFF", 4);
+    putLe32(h + 4, data + 36);
+    sceClibMemcpy(h + 8, "WAVEfmt ", 8);
+    putLe32(h + 16, 16);
+    putLe16(h + 20, 1);  // PCM
+    putLe16(h + 22, 2);
+    putLe32(h + 24, 44100);
+    putLe32(h + 28, 44100 * 4);
+    putLe16(h + 32, 4);
+    putLe16(h + 34, 16);
+    sceClibMemcpy(h + 36, "data", 4);
+    putLe32(h + 40, data);
+}
+
+// Audio as ms, and ms as audio's bytes, a whole frame each.
+uint32_t probeMsOf(uint32_t bytes) {
+    return bytes / kProbeBytesPer10Ms * 10u;
+}
+uint32_t probeBytesOf(uint32_t ms) {
+    return ms / 10u * kProbeBytesPer10Ms;
+}
+
+// The source WAV opened at its data's start: true when it is 44.1 kHz
+// 16-bit stereo PCM, its PCM read with the header kept in g_probeHead.
+bool probeSourceOpen() {
+    if (g_p.src >= 0) sceIoClose(g_p.src);
+    g_p.pendN = 0;
+    g_p.src = sceIoOpen(g_p.source, SCE_O_RDONLY, 0);
+    if (g_p.src < 0) {
+        logLine("probe: %s: open 0x%08X", g_p.source, (unsigned)g_p.src);
+        return false;
+    }
+    const int n = sceIoRead(g_p.src, g_probeHead, sizeof(g_probeHead));
+    const uint8_t* h = g_probeHead;
+    if (n < 12 || sceClibMemcmp(h, "RIFF", 4) != 0 || sceClibMemcmp(h + 8, "WAVE", 4) != 0) {
+        logLine("probe: %s is not a WAV (read %d)", g_p.source, n);
+        return false;
+    }
+    bool fmt = false;
+    for (uint32_t off = 12; off + 8 <= (uint32_t)n;) {
+        const uint32_t size = le32(h + off + 4);
+        if (sceClibMemcmp(h + off, "fmt ", 4) == 0 && off + 24 <= (uint32_t)n) {
+            const uint32_t tag = le16(h + off + 8), ch = le16(h + off + 10);
+            const uint32_t rate = le32(h + off + 12), bits = le16(h + off + 22);
+            if (tag != 1 || ch != 2 || rate != 44100 || bits != 16) {
+                logLine("probe: %s is format %u, %u channels, %u Hz, %u bits, not PCM 2, 44100, "
+                        "16",
+                        g_p.source, (unsigned)tag, (unsigned)ch, (unsigned)rate, (unsigned)bits);
+                return false;
+            }
+            fmt = true;
+        } else if (sceClibMemcmp(h + off, "data", 4) == 0) {
+            if (!fmt) break;
+            g_p.pendOff = off + 8;
+            g_p.pendN = (uint32_t)n - g_p.pendOff;
+            // An unknown size (0 or all ones) reads to the file's end.
+            g_p.srcLeft = size == 0 || size == 0xFFFFFFFFu ? 0xFFFFFFFFu : size & ~3u;
+            if (g_p.pendN > g_p.srcLeft) g_p.pendN = g_p.srcLeft;
+            return true;
+        }
+        if (size > (uint32_t)n) break;
+        off += 8 + size + (size & 1);
+    }
+    logLine("probe: %s: no %s in its first %d bytes", g_p.source, fmt ? "data chunk" : "fmt chunk",
+            n);
+    return false;
+}
+
+void probeSourceClose() {
+    if (g_p.src >= 0) sceIoClose(g_p.src);
+    g_p.src = -1;
+}
+
+// n bytes of the tone: 440 Hz, 880 Hz each tenth second, each second's last
+// 100 ms silent, so that where it plays can be heard.
+void probeTone(uint8_t* out, uint32_t n) {
+    for (uint32_t i = 0; i + 4 <= n; i += 4) {
+        const uint32_t inSecond = g_p.samples % 44100u, second = g_p.samples / 44100u;
+        int v = 0;
+        if (inSecond < 39690u) {
+            g_p.phase = (uint16_t)(g_p.phase + (second % 10u == 0 ? 1307u : 653u));
+            const int tri = g_p.phase < 32768u ? g_p.phase : 65535 - g_p.phase;
+            v = (tri - 16384) / 4;
+        }
+        putLe16(out + i, (uint32_t)v);
+        putLe16(out + i + 2, (uint32_t)v);
+        g_p.samples++;
+    }
+}
+
+// n bytes of PCM into out (a multiple of 4): from the source, round again
+// at its end, else the tone.
+void probeFill(uint8_t* out, uint32_t n) {
+    uint32_t got = 0;
+    int empty = 0;
+    while (g_p.src >= 0 && got < n) {
+        if (g_p.pendN) {
+            uint32_t k = n - got < g_p.pendN ? n - got : g_p.pendN;
+            sceClibMemcpy(out + got, g_probeHead + g_p.pendOff, k);
+            g_p.pendOff += k;
+            g_p.pendN -= k;
+            g_p.srcLeft -= k;
+            got += k;
+            empty = 0;
+            continue;
+        }
+        uint32_t want = n - got < g_p.srcLeft ? n - got : g_p.srcLeft;
+        const int r = want ? sceIoRead(g_p.src, out + got, want) : 0;
+        if (r > 0) {
+            got += (uint32_t)r;
+            g_p.srcLeft -= (uint32_t)r;
+            empty = 0;
+            continue;
+        }
+        // Its end: round again, unless it has no PCM to give.
+        g_p.srcLoops++;
+        if (++empty > 1 || !probeSourceOpen()) {
+            logLine("probe: %s gives nothing more; the tone instead", g_p.source);
+            probeSourceClose();
+        }
+    }
+    got &= ~3u;
+    if (got < n) probeTone(out + got, n - got);
+}
+
+// The file written up to its clock: kProbeLeadMs and the time since its
+// writing began. Its header rewritten after with the size, unless huge.
+void probeWrite(SceUInt64 now) {
+    const uint32_t want = probeBytesOf(kProbeLeadMs + (uint32_t)(now - g_p.beganUs) / 1000u);
+    if (want <= g_p.bytes) return;
+    const char* path = g_p.path[g_p.file];
+    const SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_APPEND, 0);
+    int rc = fd;
+    while (fd >= 0 && g_p.bytes < want) {
+        const uint32_t n = want - g_p.bytes < sizeof(g_probeBuf) ? want - g_p.bytes
+                                                                 : (uint32_t)sizeof(g_probeBuf);
+        probeFill(g_probeBuf, n);
+        rc = sceIoWrite(fd, g_probeBuf, n);
+        if (rc != (int)n) break;
+        g_p.bytes += n;
+        rc = 0;
+    }
+    if (fd >= 0) sceIoClose(fd);
+    if (rc >= 0 && !g_p.huge) {
+        uint8_t h[kProbeWavHead];
+        probeHeader(h, g_p.bytes);
+        rc = writeAtStart(path, h, sizeof(h));
+    }
+    if (rc < 0 && g_p.writeErrors++ < 5)
+        logLine("probe: writing %s at %u bytes: 0x%08X", path, (unsigned)g_p.bytes, (unsigned)rc);
+}
+
+// A file begun: its header, then kProbeLeadMs of audio.
+bool probeBegin(int file) {
+    g_p.file = file;
+    g_p.bytes = 0;
+    const char* path = g_p.path[file];
+    uint8_t h[kProbeWavHead];
+    probeHeader(h, g_p.huge ? kProbeHugeBytes : 0);
+    const SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+    const int w = fd >= 0 ? sceIoWrite(fd, h, sizeof(h)) : fd;
+    if (fd >= 0) sceIoClose(fd);
+    if (w != (int)sizeof(h)) {
+        logLine("probe: %s not made: 0x%08X", path, (unsigned)w);
+        return false;
+    }
+    g_p.beganUs = sceKernelGetSystemTimeWide();
+    probeWrite(g_p.beganUs);
+    return true;
+}
+
+// A step timed from now until the shell plays from atMs.
+void probeMark(const char* what, uint32_t atMs) {
+    g_p.mark = what;
+    g_p.markMs = atMs;
+    g_p.markUs = sceKernelGetSystemTimeWide();
+    g_p.stalled = 0;
+    g_p.stillUs = 0;
+}
+
+// The file written now, to the shell: stop, open and play, as carryPlay
+// hands a song over, and from atMs when it is not 0.
+void probePlay(const char* why, uint32_t atMs) {
+    const char* path = g_p.path[g_p.file];
+    const int rcStop = musicEvent(kEventStop), rcOpen = musicOpen(path);
+    const int rcTime = atMs ? musicSeekTime(atMs) : 0;
+    const int rcPlay = musicEvent(kEventPlay);
+    int rcSeek = 0;
+    if (atMs) rcSeek = musicEvent(kEventSeek);
+    g_p.openMs = probeMsOf(g_p.bytes);
+    g_p.paused = 0;
+    logLine("probe: %s: %s, %u ms written, from %u ms: stop 0x%08X, open 0x%08X, seek time "
+            "0x%08X, play 0x%08X, seek 0x%08X",
+            why, path, (unsigned)g_p.openMs, (unsigned)atMs, (unsigned)rcStop, (unsigned)rcOpen,
+            (unsigned)rcTime, (unsigned)rcPlay, (unsigned)rcSeek);
+    probeMark(why, atMs);
+}
+
+void probeSeek(const char* why, uint32_t ms) {
+    const int rcTime = musicSeekTime(ms), rcSeek = musicEvent(kEventSeek);
+    logLine("probe: %s: to %u ms, %u ms written: seek time 0x%08X, seek 0x%08X", why,
+            (unsigned)ms, (unsigned)probeMsOf(g_p.bytes), (unsigned)rcTime, (unsigned)rcSeek);
+    probeMark(why, ms);
+}
+
+// The shell looked at: a change of state logged, a step timed, and a clock
+// that stops while it plays logged as a stall. true when it stalled now.
+bool probeLook(SceUInt64 now) {
+    int state = 0;
+    uint32_t time = 0;
+    const int rc = musicStatus(&state, &time);
+    if (rc < 0) {
+        if (g_p.writeErrors++ < 5) logLine("probe: status 0x%08X", (unsigned)rc);
+        return false;
+    }
+    const int was = g_p.state;
+    const uint32_t before = g_p.timeMs;
+    g_p.state = state;
+    g_p.timeMs = time;
+    if (state != was)
+        logLine("probe: state %d to %d at %u ms%s", was, state, (unsigned)time,
+                g_p.mark || g_p.paused ? "" : ", not asked for");
+    if (g_p.mark) {
+        const uint32_t since = (uint32_t)(now - g_p.markUs) / 1000u;
+        if (state == 1 && time > before && time + 1000 >= g_p.markMs && time <= g_p.markMs + 3000) {
+            logLine("probe: %s: playing at %u ms, %u ms after it was asked", g_p.mark,
+                    (unsigned)time, (unsigned)since);
+            g_p.mark = NULL;
+        } else if (since >= kProbeTookMaxMs) {
+            logLine("probe: %s: not playing from %u ms %u ms after it was asked: state %d at %u ms",
+                    g_p.mark, (unsigned)g_p.markMs, (unsigned)since, state, (unsigned)time);
+            g_p.mark = NULL;
+        }
+        return false;
+    }
+    if (g_p.paused) return false;
+    if (state == 1 && time != before) {
+        if (g_p.stalled)
+            logLine("probe: moving again at %u ms, %u ms written", (unsigned)time,
+                    (unsigned)probeMsOf(g_p.bytes));
+        g_p.stalled = 0;
+        g_p.stillUs = 0;
+        return false;
+    }
+    if (!g_p.stillUs) g_p.stillUs = now;
+    if (g_p.stalled || (uint32_t)(now - g_p.stillUs) < 1500000u) return false;
+    g_p.stalled = 1;
+    logLine("probe: STALL: state %d at %u ms, its clock still for 1.5 s; %u ms written, %u ms as "
+            "the shell opened it",
+            state, (unsigned)time, (unsigned)probeMsOf(g_p.bytes), (unsigned)g_p.openMs);
+    return true;
+}
+
+void probeSecond(uint32_t second) {
+    uint32_t len = 0;
+    const int rcLen = musicLength(&len);
+    g_p.lenMs = len;
+    logLine("probe: %u s: %u ms written (%u KB), shell state %d at %u ms, length %u ms (0x%08X)%s",
+            (unsigned)second, (unsigned)probeMsOf(g_p.bytes),
+            (unsigned)((g_p.bytes + kProbeWavHead) / 1024u), g_p.state, (unsigned)g_p.timeMs,
+            (unsigned)len, (unsigned)rcLen, g_p.paused ? ", paused" : "");
+}
+
+bool probeStopAsked() {
+    return __atomic_load_n(&g_probeStop, __ATOMIC_SEQ_CST) != 0;
+}
+
+const char* probeModeName(int mode) {
+    return mode == SC_PROBE_HUGE      ? "huge header"
+         : mode == SC_PROBE_GROWING   ? "header of the size written"
+         : mode == SC_PROBE_REOPEN    ? "reopened"
+                                      : "?";
+}
+
+// One run of a mode, for kProbeEndS from the first play. Its script, by the
+// second: SC_PROBE_HUGE and SC_PROBE_GROWING pause at 15, play at 20, seek
+// back to 5 s at 30, seek to 2 s short of what is written at 40, and skip to
+// the second file at 55; SC_PROBE_REOPEN opens the file again where it was
+// each time it stalls and every kProbeReopenS.
+void probeRun(int mode) {
+    g_p.mode = mode;
+    g_p.huge = mode == SC_PROBE_HUGE;
+    g_p.state = -1;
+    g_p.timeMs = 0;
+    g_p.mark = NULL;
+    g_p.stalled = 0;
+    g_p.stillUs = 0;
+    g_p.paused = 0;
+    g_p.samples = 0;
+    g_p.phase = 0;
+    if (g_p.source[0] && !probeSourceOpen()) probeSourceClose();
+    const int rcStart = musicTracked(0x30000);
+    logLine("probe: run \"%s\" (mode %d), from %s, %u ms ahead; music service started: 0x%08X",
+            probeModeName(mode), mode, g_p.src >= 0 ? g_p.source : "the tone",
+            (unsigned)kProbeLeadMs, (unsigned)rcStart);
+    if (!probeBegin(0)) {
+        musicTracked(0x30001);
+        probeSourceClose();
+        return;
+    }
+    probePlay("first play", 0);
+    const SceUInt64 playUs = sceKernelGetSystemTimeWide();
+    uint32_t nextSecond = 1, lastReopenS = 0;
+    int step = 0;
+    while (!probeStopAsked()) {
+        SceUInt timeout = 100 * 1000;
+        sceKernelWaitSema(g_probeSema, 1, &timeout);
+        const SceUInt64 now = sceKernelGetSystemTimeWide();
+        probeWrite(now);
+        const bool stalled = probeLook(now);
+        const uint32_t ms = (uint32_t)(now - playUs) / 1000u, s = ms / 1000u;
+        if (ms >= nextSecond * 1000u) probeSecond(nextSecond++);
+        if (s >= kProbeEndS) break;
+        if (mode == SC_PROBE_REOPEN) {
+            if ((stalled || s >= lastReopenS + kProbeReopenS) && !g_p.mark) {
+                lastReopenS = s;
+                probePlay(stalled ? "reopened, stalled" : "reopened, on time", g_p.timeMs);
+            }
+            continue;
+        }
+        static const uint32_t kAt[] = {15, 20, 30, 40, 55};
+        if (step >= 5 || s < kAt[step]) continue;
+        switch (step++) {
+        case 0: {
+            const int rc = musicEvent(kEventStop);
+            g_p.paused = 1;
+            g_p.mark = NULL;
+            logLine("probe: pause at %u ms: stop 0x%08X", (unsigned)g_p.timeMs, (unsigned)rc);
+            break;
+        }
+        case 1: {
+            const uint32_t at = g_p.timeMs;
+            const int rc = musicEvent(kEventPlay);
+            g_p.paused = 0;
+            logLine("probe: play again from %u ms: play 0x%08X", (unsigned)at, (unsigned)rc);
+            probeMark("play again", at);
+            break;
+        }
+        case 2:
+            probeSeek("seek back", 5000);
+            break;
+        case 3:
+            probeSeek("seek to near what is written", probeMsOf(g_p.bytes) - 2000);
+            break;
+        case 4: {
+            const int old = g_p.file;
+            if (probeBegin(1 - old)) {
+                probePlay("skip to the second file", 0);
+                sceIoRemove(g_p.path[old]);
+            }
+            break;
+        }
+        }
+    }
+    const int rcStop = musicEvent(kEventStop), rcEnd = musicTracked(0x30001);
+    probeSourceClose();
+    sceIoRemove(g_p.path[0]);
+    sceIoRemove(g_p.path[1]);
+    logLine("probe: run \"%s\" %s at %u ms, %u ms written: stop 0x%08X, end 0x%08X",
+            probeModeName(mode), probeStopAsked() ? "stopped" : "over", (unsigned)g_p.timeMs,
+            (unsigned)probeMsOf(g_p.bytes), (unsigned)rcStop, (unsigned)rcEnd);
+}
+
+// The run asked for: SC_PROBE_ALL runs the other three in turn.
+void probeStep() {
+    lock();
+    const int mode = g_probeWant;
+    const int app = g_probeWantApp;
+    const App* a = appAt(app);
+    const bool carry = g_carry != 0;
+    const bool go = mode > 0 && a && !carry;
+    g_probeWant = -1;
+    if (go) {
+        g_probeRunning = 1;
+        sceClibSnprintf(g_p.path[0], sizeof(g_p.path[0]), "%s/sc-probe-a.wav", a->folder);
+        sceClibSnprintf(g_p.path[1], sizeof(g_p.path[1]), "%s/sc-probe-b.wav", a->folder);
+        copyText(g_p.name, a->name, sizeof(g_p.name));
+        copyText(g_p.source, g_probeWantSource, sizeof(g_p.source));
+    }
+    unlock();
+    if (mode < 0) return;
+    if (!go) {
+        logLine("probe: mode %d not run%s", mode, carry ? ": a queue is carried on" : "");
+        return;
+    }
+    g_p.src = -1;
+    g_p.writeErrors = 0;
+    if (findSvcObj("probe") && g_getSvcObj()) {
+        logLine("probe: for %s, mode %d, in %u s", g_p.name, mode, (unsigned)(kProbeDelayMs / 1000));
+        SceUInt timeout = kProbeDelayMs * 1000u;
+        sceKernelWaitSema(g_probeSema, 1, &timeout);
+        const int first = mode == SC_PROBE_ALL ? SC_PROBE_HUGE : mode;
+        const int last = mode == SC_PROBE_ALL ? SC_PROBE_REOPEN : mode;
+        for (int m = first; m <= last && !probeStopAsked(); m++) {
+            probeRun(m);
+            SceUInt pause = 3000 * 1000;
+            if (m < last) sceKernelWaitSema(g_probeSema, 1, &pause);
+        }
+    } else {
+        logLine("probe: no client for SceShell's music service");
+    }
+    lock();
+    g_probeRunning = 0;
+    __atomic_store_n(&g_probeStop, 0, __ATOMIC_SEQ_CST);
+    // A queue handed over meanwhile goes now.
+    if (g_playQueueDue && g_musicSema >= 0) sceKernelSignalSema(g_musicSema, 1);
+    unlock();
+    logLine("probe: done");
+}
+
+class ProbeThread : public paf::thread::Thread {
+public:
+    using paf::thread::Thread::Thread;
+
+    void EntryFunction() override {
+        while (!IsCanceled()) {
+            sceKernelWaitSema(g_probeSema, 1, NULL);
+            probeStep();
+        }
+    }
+};
+
+// The probe runs, or is about to: a queue handed over waits. Under g_lock.
+bool probeHolds() {
+    return g_probeRunning || g_probeWant >= 0;
+}
+
+// Has the probe stop, if it runs, or not begin. Under g_lock.
+void probeStop(const char* why) {
+    if (g_probeWant >= 0) {
+        g_probeWant = -1;
+        logLine("probe: not to run: %s", why);
+    }
+    if (!g_probeRunning || __atomic_load_n(&g_probeStop, __ATOMIC_SEQ_CST)) return;
+    __atomic_store_n(&g_probeStop, 1, __ATOMIC_SEQ_CST);
+    logLine("probe: to stop: %s", why);
+    sceKernelSignalSema(g_probeSema, 1);
+}
+
+// SC_CMD_PROBE_STREAM from an app. Under g_lock.
+void probeAsk(int app, uint32_t mode, const char* source) {
+    if (mode == SC_PROBE_STOP) {
+        probeStop("asked");
+        return;
+    }
+    if (mode > SC_PROBE_ALL) {
+        logLine("probe: no mode %u", (unsigned)mode);
+        return;
+    }
+    if (g_probeRunning || g_probeWant >= 0) {
+        logLine("probe: one runs already");
+        return;
+    }
+    if (g_carry || g_playQueueDue) {
+        logLine("probe: not while a queue is carried on");
+        return;
+    }
+    if (g_probeSema < 0) g_probeSema = sceKernelCreateSema("ShellCompanion::Probe", 0, 0, 1, NULL);
+    if (g_probeSema < 0) {
+        logLine("probe: its semaphore: 0x%08X", (unsigned)g_probeSema);
+        return;
+    }
+    if (!g_probeThread) {
+        const int rc = (new ProbeThread(kThreadPriority, 0x4000, "ShellCompanion::Probe"))->Start();
+        if (rc < 0) {
+            logLine("probe: its thread not started: 0x%08X", (unsigned)rc);
+            return;
+        }
+        g_probeThread = 1;
+    }
+    g_probeWant = (int)mode;
+    g_probeWantApp = app;
+    copyText(g_probeWantSource, source, sizeof(g_probeWantSource));
+    sceKernelSignalSema(g_probeSema, 1);
 }
 
 // ── Remote control: the listener ────────────────────────────────────────────
@@ -5116,7 +5687,7 @@ void pushAll(int tmpl) {
         if (!sub->addr) continue;
         char ip[16];
         ipText(sub->addr, ip, sizeof(ip));
-        if ((uint32_t)((now - sub->seenUs) / 1000u) > kSubscriberIdleMs || sub->failures >= 3) {
+        if ((uint32_t)(now - sub->seenUs) / 1000u > kSubscriberIdleMs || sub->failures >= 3) {
             logLine("control: %s dropped (%s)", ip, sub->failures >= 3 ? "it took no pushes" : "idle");
             sub->addr = 0;
             continue;
@@ -5234,7 +5805,7 @@ int ctlThread(SceSize, void*) {
             lock();
             const uint32_t serial = g_ctlState.serial;
             unlock();
-            if (serial != pushedSerial || (uint32_t)((now - pushedUs) / 1000u) >= every) {
+            if (serial != pushedSerial || (uint32_t)(now - pushedUs) / 1000u >= every) {
                 pushedSerial = serial;
                 pushedUs = now;
                 pushAll(tmpl);
@@ -6902,6 +7473,7 @@ uint32_t featureOf(uint32_t cmd) {
         return SC_FEAT_ROW;
     case SC_CMD_MUSIC_PLAY:
     case SC_CMD_MUSIC_TAKE_BACK:
+    case SC_CMD_PROBE_STREAM:
         return SC_FEAT_MUSIC;
     case SC_CMD_DL_START:
     case SC_CMD_DL_TAKE_BACK:
@@ -7020,6 +7592,7 @@ private:
                 g_artSerial = 0;
             }
             stopCarry("an app hands a queue over", kEndYield);
+            probeStop("a queue handed over");
             if (startMusicThread()) {
                 g_playQueueDue = 1;
                 g_playQueueApp = app;
@@ -7038,6 +7611,14 @@ private:
         case SC_CMD_UPDATE_INSTALL:
             startUpdate(app);
             break;
+        case SC_CMD_PROBE_STREAM: {
+            char source[160];
+            toUtf8(m.text1, 256, source, sizeof(source));
+            logLine("probe: %s asks for mode %u%s", appName(app), (unsigned)m.arg,
+                    source[0] ? ", from a WAV" : "");
+            probeAsk(app, m.arg, source);
+            break;
+        }
         case SC_CMD_DL_START:
             startDownloads(app);
             break;

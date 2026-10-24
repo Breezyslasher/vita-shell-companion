@@ -466,6 +466,8 @@ int scDownloadProgressEnd(const char* l1, const char* l2);
 int scDownloadPauseAsked(void);
 // update
 int scUpdateInstall(void);
+// debug (§9)
+int scProbeStream(int mode, const char* sourceWav);
 // the files
 int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
 int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count);
@@ -488,3 +490,50 @@ on.
 `ux0:data/ShellCompanion/plugin.log` holds the current boot, and
 `plugin.prev.log` the boot before. Lines about an app's work name the app.
 URLs and header lines are never logged, as they may carry tokens.
+
+## 9. Debug: the streaming probe (`SC_CMD_PROBE_STREAM`)
+
+A test for Music Assistant in the background: can the shell's music player
+play a WAV that is still being written? The plugin writes 44.1 kHz 16-bit
+stereo PCM into `<folder>/sc-probe-a.wav` at real-time pace, starting 3 s
+ahead, gives the file to the player the way it gives it a queue's songs, and
+logs what the player makes of it. It may change or go once that is answered.
+
+```c
+scProbeStream(SC_PROBE_ALL, NULL);   // or a WAV: "ux0:music/test.wav"
+scProbeStream(SC_PROBE_STOP, NULL);  // stop it early
+```
+
+- **Feature:** needs `SC_FEAT_MUSIC`. It is refused while a queue is carried
+  on; a queue handed over stops it and waits for it to finish.
+- **`arg`, the mode:**
+
+  | Mode | Value | The WAV's header |
+  |---|---|---|
+  | `SC_PROBE_STOP` | 0 | stops the run |
+  | `SC_PROBE_HUGE` | 1 | a data size of `0x7FFFF000` (3 h 22 min) |
+  | `SC_PROBE_GROWING` | 2 | the size written so far, rewritten after each write |
+  | `SC_PROBE_REOPEN` | 3 | as 2; the file is reopened where it was at each stall and every 10 s |
+  | `SC_PROBE_ALL` | 4 | 1, 2 and 3 in turn, about 4 min 20 s |
+
+- **`text1`:** a WAV on the card to stream (PCM, 44.1 kHz, 16-bit, stereo),
+  looped. Empty for a tone: 440 Hz, 880 Hz every tenth second, and the last
+  100 ms of each second silent, so a jump can be heard.
+- **When:** the first file is played 10 s after the command, so the app can be
+  closed first. An app holding the audio may keep the shell's music silent.
+- **Script:** each run lasts 80 s from its first play. Modes 1 and 2 pause at
+  15 s, play again at 20 s, seek back to 5 s at 30 s, seek to 2 s short of
+  what is written at 40 s, and skip to a second file (`sc-probe-b.wav`) at
+  55 s. Both files are removed at the end.
+
+What the log (`plugin.log`, lines beginning `probe:`) shows:
+
+| Line | Meaning |
+|---|---|
+| `N s: X ms written …, shell state S at T ms, length L ms` | every second. With state 1 the player plays; T should keep climbing past 3000, the size the file had as it was opened. L is the length the player gives the song |
+| `STALL: …` | the player's clock stopped for 1.5 s while nothing was asked of it: the last line before it says how much was written, and `as the shell opened it` how much it saw |
+| `state A to B …, not asked for` | the player changed state by itself |
+| `<step>: playing at T ms, N ms after it was asked` | how long a play, seek, skip or reopen took to be heard |
+| `<step>: not playing from … after it was asked` | that step never took effect within 10 s |
+| `open 0x8…` on `first play` | the player refused the file, probably its header |
+

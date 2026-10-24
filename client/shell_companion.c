@@ -389,3 +389,12 @@ int scDownloadPauseAsked(void) {
 int scUpdateInstall(void) {
     return sendCommand(SC_CMD_UPDATE_INSTALL, 0);
 }
+
+int scProbeStream(int mode, const char* sourceWav) {
+    lock();
+    beginLocked(SC_CMD_PROBE_STREAM, (uint32_t)mode);
+    toUtf16(sourceWav, g_message.text1, 256);
+    const int rc = sendLocked();
+    unlock();
+    return rc;
+}
