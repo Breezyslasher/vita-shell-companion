@@ -4,9 +4,7 @@
 #   cmake -B build -G Ninja -DSC_PAF_INCLUDE_DIR=$PWD/build-paf/include
 #   cmake --build build
 #
-# Starting point: VitaPlex's quick menu plugin (protocol 17), moved here as it
-# is. docs/PROTOCOL.md describes the shared protocol it is being turned into;
-# until then it still serves VitaPlex only (SC_LEGACY_TITLEID).
+# The plugin speaks protocol 1 (docs/PROTOCOL.md); client/ is what apps link.
 cmake_minimum_required(VERSION 3.16)
 
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
@@ -25,9 +23,6 @@ if(NOT SC_PAF_INCLUDE_DIR OR NOT EXISTS "${SC_PAF_INCLUDE_DIR}/paf.h")
                         "and configure with -DSC_PAF_INCLUDE_DIR=<dir>/include")
 endif()
 
-# The app the VitaPlex-era code still serves (updates, notification icon).
-set(SC_LEGACY_TITLEID "VPLEX0001" CACHE STRING "title the VitaPlex-era code serves")
-
 add_executable(shell_companion
     plugin/main.cpp
     plugin/paf_stubs.S
@@ -41,7 +36,6 @@ target_include_directories(shell_companion PRIVATE
 target_compile_options(shell_companion PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-O2;-fno-rtti;-fno-exceptions;-fno-builtin;-fshort-wchar;-fno-threadsafe-statics;-fno-sized-deallocation;-Wno-unused-function;-Wno-sign-compare;-Wno-template-body;-D__declspec(x)=>")
 target_link_options(shell_companion PRIVATE -nostartfiles -nostdlib)
-target_compile_definitions(shell_companion PRIVATE VITAPLEX_TITLEID=\"${SC_LEGACY_TITLEID}\")
 target_link_libraries(shell_companion
     SceLibKernel_stub
     SceAppMgr_stub
@@ -57,3 +51,15 @@ add_custom_command(TARGET shell_companion POST_BUILD
     VERBATIM)
 vita_create_self(shell_companion.suprx shell_companion
     CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/plugin/exports.yml UNSAFE STRIPPED)
+
+# The client library, built here too so that it is known to compile; apps
+# usually build client/*.c with their own sources instead. sc_cover.c is left
+# out: it needs the app's stb_image.
+add_library(shell_companion_client STATIC
+    client/shell_companion.c
+    client/sc_files.c
+    client/sc_link_stub.S)
+target_include_directories(shell_companion_client PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/client)
+target_compile_options(shell_companion_client PRIVATE -Wall -Wextra)

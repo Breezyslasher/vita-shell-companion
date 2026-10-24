@@ -1,11 +1,12 @@
 /**
- * The song's cover for VitaPlex's quick menu plugin: qm_cover.h. stb_image
- * comes with nanovg in VitaPlex (borealis).
+ * Covers for the plugin: sc_cover.h. stb_image is the app's: borealis apps
+ * have it with nanovg, others add it (github.com/nothings/stb).
  */
 
-#include "qm_cover.h"
+#include "sc_cover.h"
 
-#include "qm_protocol.h"
+#include "sc_protocol.h"
+#include "shell_companion.h"
 
 #include "stb_image.h"
 
@@ -14,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-void qmCoverSquare(const uint8_t* rgb, int width, int height, int size, uint8_t* out) {
+void scCoverSquare(const uint8_t* rgb, int width, int height, int size, uint8_t* out) {
     const int side = width < height ? width : height;
     const int left = (width - side) / 2, top = (height - side) / 2;
     for (int dy = 0; dy < size; dy++) {
@@ -70,7 +71,7 @@ static uint8_t* chunk(uint8_t* p, const char* type, const uint8_t* data, size_t 
     return put32(p, crc32(from, (size_t)(p - from)));
 }
 
-uint8_t* qmCoverPng(const uint8_t* rgb, int size, size_t* len) {
+uint8_t* scCoverPng(const uint8_t* rgb, int size, size_t* len) {
     // The rows, each after its filter type: 0, none.
     const size_t row = 1 + (size_t)size * 3, raw = (size_t)size * row;
     uint8_t* rows = (uint8_t*)malloc(raw ? raw : 1);
@@ -133,7 +134,7 @@ uint8_t* qmCoverPng(const uint8_t* rgb, int size, size_t* len) {
     return png;
 }
 
-uint32_t qmCoverNextSerial(uint32_t last, uint64_t nowUs) {
+uint32_t scCoverNextSerial(uint32_t last, uint64_t nowUs) {
     uint32_t serial = (uint32_t)(nowUs / 1000);
     if (serial <= last) serial = last + 1;
     if (last != 0 && (serial & 1) == (last & 1)) serial++;
@@ -156,12 +157,12 @@ static int writeCover(const void* image, size_t len, const char* path, char* why
         snprintf(why, whySize, "not decoded (%u bytes): %s", (unsigned)len, reason ? reason : "?");
         return -1;
     }
-    uint8_t* square = (uint8_t*)malloc((size_t)QM_ART_SIZE * QM_ART_SIZE * 3);
+    uint8_t* square = (uint8_t*)malloc((size_t)SC_ART_SIZE * SC_ART_SIZE * 3);
     uint8_t* png = NULL;
     size_t pngLen = 0;
     if (square) {
-        qmCoverSquare(px, width, height, QM_ART_SIZE, square);
-        png = qmCoverPng(square, QM_ART_SIZE, &pngLen);
+        scCoverSquare(px, width, height, SC_ART_SIZE, square);
+        png = scCoverPng(square, SC_ART_SIZE, &pngLen);
     }
     stbi_image_free(px);
     free(square);
@@ -185,8 +186,25 @@ static int writeCover(const void* image, size_t len, const char* path, char* why
     return 0;
 }
 
-int qmCoverWrite(const void* image, size_t len, uint32_t serial, char* why, size_t whySize) {
-    char path[64];
-    snprintf(path, sizeof(path), QM_ART_PATH_FMT, (unsigned)(serial & 1));
+int scCoverWriteTo(const void* image, size_t len, const char* path, char* why, size_t whySize) {
+    char part[300];
+    snprintf(part, sizeof(part), "%s.tmp", path);
+    if (writeCover(image, len, part, why, whySize) < 0) return -1;
+    remove(path);
+    if (rename(part, path) != 0) {
+        remove(part);
+        snprintf(why, whySize, "not moved in to %s", path);
+        return -1;
+    }
+    return 0;
+}
+
+int scCoverWrite(const void* image, size_t len, uint32_t serial, char* why, size_t whySize) {
+    char name[24], path[256];
+    snprintf(name, sizeof(name), SC_ART_FMT, (unsigned)(serial & 1));
+    if (scPath(name, path, sizeof(path)) < 0) {
+        snprintf(why, whySize, "scInit has not run");
+        return -1;
+    }
     return writeCover(image, len, path, why, whySize);
 }

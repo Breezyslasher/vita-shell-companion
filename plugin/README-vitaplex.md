@@ -1,3 +1,8 @@
+> **History.** This is the README of VitaPlex's quick menu plugin, which
+> this plugin was generalised from. It records what was found out about
+> SceShell along the way, by VitaPlex build; the names it uses
+> (`vitaplex_qm.suprx`, `qm_protocol.h`) are the old ones.
+
 # VitaPlex's quick menu plugin
 
 `vitaplex_qm.suprx`: the song and its cover, and play/pause, next and

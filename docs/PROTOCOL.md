@@ -1,4 +1,4 @@
-# vita-shell-companion — protocol 1 (draft for review)
+# vita-shell-companion — protocol 1
 
 `shell_companion.suprx` runs inside SceShell, which no app or game closes.
 Any app loads it once per boot and uses only the features it wants:
@@ -11,29 +11,42 @@ Any app loads it once per boot and uses only the features it wants:
 | Self-update | `SC_FEAT_UPDATE` | its update is installed after it closes, and it is launched again |
 
 Nothing in the plugin knows about Plex, Audiobookshelf, Music Assistant or
-Suwayomi. Everything server-specific is in plain URLs, request headers and
-report templates that the app writes.
+Suwayomi. Everything server-specific is in plain URLs, request header lines
+and report templates that the app writes. The one exception is the
+`plexqueue`/`plexadd` download kinds (§5.2), which drive Plex's server-side
+download queue for VitaPlex.
+
+`include/sc_protocol.h` holds the constants and structures below;
+`client/` is a C library that does all of it for an app (§7).
+
+> **Status:** implemented, not yet tested on a console. It is VitaPlex's
+> quick menu plugin generalised; the parts that talk to SceShell are
+> unchanged from it.
 
 ## 1. Transport
 
 - **Pipes:** `"ShellCompanion1::ToPlugin"` and `"ShellCompanion1::FromPlugin"`.
   The `1` is the protocol version.
-  - **Compatibility:** a plugin of protocol N also serves apps of every lower
-    version. An app's client library looks for its own version's pipes first,
-    then any higher version's. Only if it finds none does it load the copy it
-    ships in its own VPK.
+  - **Compatibility:** a plugin of protocol N will also serve apps of every
+    lower version. The client library looks for its own version's pipes
+    first, then up to 7 versions higher. Only if it finds none does it load
+    the copy the app ships in its own package.
 - **One app at a time:** only one app or game runs at a time on the Vita, so
   the shared pipe pair carries only that app's messages. The plugin may still
   be working for an app that has closed, playing its music or finishing its
   downloads.
 - **Files:** larger data goes through files in the app's own data folder,
   which the app registers with `SC_CMD_HELLO`.
-  - **Writing:** write each file in full to `<name>.tmp`, then rename it into
-    place.
+  - **Writing:** each file is written in full beside its name (`<name>.tmp`),
+    then renamed into place.
   - **Completeness:** each file ends with an `end` line, and a file without one
     is ignored.
   - **Format:** one `key=value` per line. Unknown keys are skipped, so newer
     writers stay readable.
+  - **Encoding:** where a value below is marked *encoded*, the characters
+    `%`, `|`, tab and every control character (line ends included) are
+    written as `%XX`. Any other `%XX` is decoded too, so fully URL-encoded
+    values also work.
 
 ```c
 typedef struct ScMessage {
@@ -43,25 +56,28 @@ typedef struct ScMessage {
     uint16_t text1[256];    // UTF-16, NUL-terminated (meaning depends on cmd)
     uint16_t text2[256];
     uint16_t text3[256];
-} ScMessage;               // 1548 bytes
+} ScMessage;               // 1556 bytes
 
 typedef struct ScPress {   // plugin -> app: a press on the Music row
     uint32_t press;        // SC_PRESS_PLAY_PAUSE, SC_PRESS_NEXT, SC_PRESS_PREVIOUS
     char     titleId[12];  // the row's owner the press was for
-} ScPress;
+} ScPress;                 // 16 bytes
 ```
 
 ## 2. Registering: `SC_CMD_HELLO`
 
-Send this first, every time the app starts.
+Send this first, every time the app opens the pipes (the client library does).
 
 - `arg`: the `SC_FEAT_*` bits the app wants.
 - `text1`: its data folder, for example `ux0:data/VitaPlex`. All files below
-  live there.
-- `text2`: its display name, used in the plugin's log.
+  live there. It must name a device (`ux0:` …) and have no `..` in it. The
+  plugin makes it if it is missing.
+- `text2`: its display name, used in the plugin's log and notification.
 
-The plugin keeps a record for up to 16 apps (title ID, folder, features). A
-command for a feature the app didn't ask for is ignored and logged.
+The plugin keeps a record of up to 16 apps a boot (title ID, folder, name,
+features); a second HELLO from the same title updates it. A command from an
+app that has not said HELLO this boot, or for a feature it didn't ask for,
+is ignored and logged.
 
 ## 3. Music row
 
@@ -73,17 +89,23 @@ command for a feature the app didn't ask for is ignored and logged.
 | `SC_CMD_ROW_PLAYING` | `arg` 1 playing (⏸ shown), 0 paused |
 | `SC_CMD_ROW_ART` | `arg` serial, 0 for none: a 64×64 PNG at `<folder>/sc-art-<serial & 1>.png` |
 
-- **Ownership:** the latest app to send `ROW_ACTIVATE` owns the row. A press
-  goes to the owner as an `ScPress` on the FromPlugin pipe.
+- **Ownership:** the latest app to send `ROW_ACTIVATE` owns the row; the
+  other row commands are ignored from any other app. A press goes to the
+  owner as an `ScPress` on the FromPlugin pipe; the client drops presses
+  meant for another title.
+- **Taking the row stops background music:** an app that takes the row plays
+  its own music, so a queue the shell was playing stops.
 - **When the shell is playing an app's queue:** the presses act on that queue
   directly, and nothing is sent.
+- **Art serials** must only grow during a boot, from one run of the app to the
+  next, and alternate between the two files. `scCoverNextSerial` makes them.
 
 ## 4. Background music
 
 ### Handing over (`SC_CMD_MUSIC_PLAY`)
 
-When the app closes, it writes `<folder>/sc-queue.txt`, then sends
-`SC_CMD_MUSIC_PLAY`:
+When the app closes, it writes `<folder>/sc-queue.txt`, gives the row back,
+then sends `SC_CMD_MUSIC_PLAY`:
 
 ```
 written=<sceKernelGetSystemTimeWide()/1e6, %.6f>
@@ -91,14 +113,15 @@ index=<track to start with, from 0>
 positionMs=<where in it>
 repeat=<0 off, 1 one, 2 all>
 offlineSkip=<0/1: when a track cannot be fetched, skip to the next one on the card>
-headers=<header lines sent with every request below, "Name: value" separated by \r\n, URL-encoded>
-report.state=<optional: URL template, see §4.3>
-report.state.method=<GET (default), POST, PUT or PATCH>
-report.state.body=<optional body template>
-report.state.every=<seconds between repeats while playing, default 10>
-report.played=<optional: URL template when a track plays to its end>
-report.played.method=..., report.played.body=...
-track=<fields, '|'-separated, URL-encoded, below>
+headers=<encoded: header lines sent with every request below, "Name: value", \r\n between>
+report.state=<encoded, optional: URL template, see §4.3>
+report.state.method=<GET (default), POST, PUT, DELETE or PATCH>
+report.state.body=<encoded, optional body template>
+report.state.type=<encoded, the body's Content-Type; application/json by default>
+report.state.every=<seconds between repeats while playing, default 10, at least 2>
+report.played=<encoded, optional: URL template when a track plays to its end>
+report.played.method=..., report.played.body=..., report.played.type=...
+track=<fields, '|'-separated, each encoded, below>
 ...                                         (up to 1000 tracks)
 end
 ```
@@ -107,58 +130,71 @@ A `track=` line has these fields:
 
 | # | Field | Meaning |
 |---|---|---|
-| 0 | `id` | the app's own ID for the track (used in file names and reports) |
-| 1 | `durationMs` | its length |
-| 2 | `local` | a file on the card to play as-is, or empty |
+| 0 | `id` | the app's own ID for the track: `{id}` in reports, and its files' names (with anything but letters, digits, `-`, `_` and `.` made `_`) |
+| 1 | `durationMs` | its length, or 0 |
+| 2 | `local` | a file on the card to play as it is, or empty |
 | 3 | `url` | where to fetch it in its own format, or empty |
-| 4 | `ext` | its extension (`mp3`, `m4a`, `aac`, `ogg`, `wav`, `at9`), or empty to take it from the URL |
-| 5 | `altUrl` | used when `ext` is a format the shell doesn't play, such as FLAC: a URL that returns MP3, or empty to skip such tracks |
-| 6 | `altPrep` | an optional URL fetched (and discarded) just before `altUrl`, for example Plex's transcode decision |
+| 4 | `ext` | that format's extension, or empty to take it from the URL |
+| 5 | `altUrl` | a URL that answers with the track as MP3, used when `ext` is a format the shell doesn't play (anything but `mp3`, `m4a`/`mp4`, `aac`, `wav`), or when there is no `url`. Empty: such tracks are skipped |
+| 6 | `altPrep` | an optional URL fetched (and its answer discarded) just before `altUrl`, for example Plex's transcode decision |
 | 7 | `title` | for the Music row |
 | 8 | `artist` | for the Music row |
 | 9 | `album` | for the Music row |
-| 10 | `coverUrl` | the cover for the row, fetched and scaled to 64×64, or empty |
-| 11 | `coverPng` | a 64×64 PNG on the card already, or empty |
+| 10 | `coverUrl` | the cover for the row: must answer with a PNG, ideally 64×64 (the plugin can't decode or scale anything else), or empty |
+| 11 | `coverPng` | the same, on the card already, or empty |
 
-`{session}` in `altUrl` and `altPrep` is replaced by a number unique to the
-fetch.
+`{session}` in `url`, `altUrl` and `altPrep` is replaced by a number unique
+to the fetch, the same in `altPrep` and `altUrl`.
 
 ### Playback
 
 - **Order:** the plugin plays the queue in order, starting from `index` at
   `positionMs`.
-- **Sources:** for each track it uses `local` if present, otherwise a fetched
-  copy at `<folder>/sc-songs/<id>.<ext>` (from `url`, or from `altUrl` as
-  `.mp3`).
-- **Fetching ahead:** it fetches the next track while the current one plays.
-- **On the card:** it keeps the previous, current and next tracks' files.
-- **Missing tracks:** a track it can't get is skipped. With `offlineSkip=1` it
-  skips to the next track on the card; with none, it holds paused.
+- **Sources:** for each track it uses `local` if the shell plays its format,
+  otherwise a copy it fetched into `<folder>/sc-songs/<id>.<ext>` (from
+  `url`, or from `altUrl` as `.mp3`, framed with a length header as it
+  comes). A file already there from an earlier queue is used as it is.
+- **Fetching ahead:** it fetches the next track while the current one plays,
+  and the covers of the current and next tracks into `sc-songs/<id>.png`.
+  A track with the same `coverUrl` as the one before reuses its cover.
+- **On the card:** it keeps the previous, current and next tracks' files, and
+  all of them when the app takes the music back, so the app can play on from
+  them.
+- **Missing tracks:** a track it can't get is skipped; three in a row stop the
+  queue. When the server doesn't answer at all and `offlineSkip=1`, it skips
+  to the next track on the card; with none, it holds paused.
 
 ### 4.3 Report templates
 
 Optional. They're how the app's server learns the playback position while
-the app is closed. Placeholders are filled in when the report is sent:
+the app is closed. Placeholders in the URL and body are filled in when the
+report falls due:
 
 | Placeholder | Value |
 |---|---|
-| `{id}` | the track's `id` |
+| `{id}` | the track's `id`, as the queue gave it |
 | `{state}` | `playing`, `paused`, `buffering` or `stopped` |
 | `{positionMs}` / `{positionS}` | position in ms / seconds (with 3 decimals) |
-| `{durationMs}` / `{durationS}` | duration in ms / seconds |
-| `{index}` | the track's place in the queue |
+| `{durationMs}` / `{durationS}` | duration in ms / seconds (with 3 decimals) |
+| `{index}` | the track's place in the queue, from 0 |
 
 - **When:** at every state change, and every `report.state.every` seconds while
-  playing.
-- **Order:** reports are sent one at a time, in order.
-- **Failures:** a server that doesn't answer is logged once and doesn't hold
-  up playback.
+  playing. `report.played` when a track ends, with `{state}` `stopped`.
+- **Order:** reports are sent one at a time, in order, with the queue's
+  `headers`. Only the latest state waits to be sent, and up to 4 played
+  reports.
+- **Failures:** anything but a 2xx answer is logged once, until one succeeds,
+  and never holds up playback.
+- **Limits:** a filled-in URL up to 1023 bytes, a body up to 511.
+- **PATCH** uses `sceHttpCreateRequestWithURL2`; on a firmware without it,
+  PATCH reports fail and the plugin's log says so.
 
 Examples:
 
 - **Plex:**
   `report.state=<server>/:/timeline?ratingKey={id}&key=/library/metadata/{id}&state={state}&time={positionMs}&duration={durationMs}`
-  and `report.played=<server>/:/scrobble?key={id}&identifier=com.plexapp.plugins.library`.
+  and `report.played=<server>/:/scrobble?key={id}&identifier=com.plexapp.plugins.library`,
+  with `headers` carrying `X-Plex-Token` and `X-Plex-Client-Identifier`.
 - **Audiobookshelf:** `report.state=<server>/api/me/progress/{id}`, with
   `report.state.method=PATCH` and
   `report.state.body={"currentTime":{positionS},"duration":{durationS}}`.
@@ -169,13 +205,23 @@ Examples:
   change:
 
   ```
-  written=, queue=<the queue's written>, index=, id=, positionMs=, durationMs=,
-  state=playing|over|stopped, fetching=0|1, paused=0|1, end
+  written=<as above>
+  queue=<the queue's written=>
+  index=<the track's place>
+  id=<its id>
+  positionMs=
+  durationMs=
+  state=playing|over|stopped
+  fetching=<1: waiting for that track; it plays from positionMs once fetched>
+  paused=<1: paused from the row>
+  end
   ```
 
 - **`SC_CMD_MUSIC_TAKE_BACK`:** the app sends it once its own player is ready.
-  The plugin stops, writes the status one last time with the exact position,
-  and the app continues from there.
+  The plugin stops the shell's music, writes the status one last time with
+  the exact position, and the app continues from there. A queue handed over
+  and not yet begun is not begun. Only the app whose queue it is can take it
+  back.
 
 ## 5. Background downloads
 
@@ -187,12 +233,12 @@ When the app closes, it writes `<folder>/sc-downloads.txt`, then sends
 ```
 written=...
 notify=<1: show the progress notification>
-headers=<sent with every request, as in §4>
-item=<fields, tab-separated, below>     (up to 2000 items, in order)
+headers=<encoded: header lines sent with every request, as in §4>
+item=<fields, tab-separated, each encoded, below>     (up to 200 items, in order)
 end
 ```
 
-Each item has these tab-separated fields:
+Each item has these fields:
 
 | # | Field | Meaning |
 |---|---|---|
@@ -203,89 +249,131 @@ Each item has these tab-separated fields:
 | 4 | `kind` | `url` (§5.1), or `plexqueue` / `plexadd` (§5.2) |
 | 5… | kind's own fields | see below |
 
+The plugin waits up to 30 s for the app to close before it begins, so it
+never writes a file the app is still writing.
+
 #### 5.1 `url`
 
-Field 5 is the URL. Field 6 is optional extra header lines for this item.
+Field 5 is the URL. Field 6 is optional extra header lines for this item,
+sent after the list's.
 
-- **Resuming:** a server that answers a Range request with the whole file has
-  it rewritten from the start.
+- **Resuming:** a server that answers a Range request with the whole file
+  (200) has it rewritten from the start; 416 counts as complete.
+- **Waiting:** 503 is waited for, every 10 s, for up to an hour.
 - **Retries:** after 5, 15 and 60 s; getting any bytes resets the count.
+- **Gone:** 404 and 410 mark the item `gone`.
 
 #### 5.2 `plexqueue` / `plexadd`
 
 These keep VitaPlex's existing behaviour: Plex's server-side download queue,
-which prepares a transcoded file before it can be fetched.
+which prepares a transcoded file before it can be fetched. The list's
+`headers` carry the token and client identity (`X-Plex-Token`,
+`X-Plex-Client-Identifier`, `X-Plex-Product`, `X-Plex-Platform`,
+`X-Plex-Device`), as the download queue belongs to the client.
 
 - **`plexqueue`:** server, queue ID, item ID.
-- **`plexadd`:** server, query, profile extra.
+- **`plexadd`:** server, the add's query (from `?`), profile extra. The item is
+  added to the client's download queue first.
 
 ### Status and taking back
 
 - **Status:** `<folder>/sc-downloads-status.txt` is written every 2 s:
 
   ```
-  written=, running=0|1, paused=0|1,
-  item=<id>\t<going|waiting|done|gone|failed>\t<bytes>\t<size>\t<kind's state>, end
+  written=
+  running=0|1
+  paused=0|1
+  item=<id>\t<going|waiting|done|gone|failed>\t<bytes>\t<size>\t<queue id>\t<item id>
+  ...
+  end
   ```
+
+  The last two fields are the Plex download queue's IDs the item used, and
+  empty for `url` items.
 
 - **`SC_CMD_DL_TAKE_BACK`:** the app sends it when it opens. The plugin stops
   after the piece it is writing and writes `running=0`. The app waits for
   that before touching the files.
 - **Several apps:** downloads from different apps run one app's list at a
-  time, in the order they were handed over.
+  time, in the order they were handed over. A list handed over again by the
+  app whose list runs replaces it. A list still waiting is dropped when its
+  app takes it back, and its status is written with `running=0` at once.
 
 ### 5.3 The notification
 
 | Command | Fields |
 |---|---|
 | `SC_CMD_DL_PROGRESS` | while the app itself downloads: `text1` first line, `text2` second line, `arg` progress 0–1000 or `SC_PROGRESS_UNKNOWN` |
-| `SC_CMD_DL_PROGRESS_END` | the notification's last two lines |
+| `SC_CMD_DL_PROGRESS_END` | `text1`, `text2`: the notification's last two lines |
 
 - **One notification:** the plugin owns it, so the same notification carries
-  on after the app closes.
-- **Icon:** it shows the app's own icon.
+  on after the app closes. Lines are cut to 63 UTF-16 units.
+- **Icon:** it shows the icon of the app it was last shown for.
 - **"Pause downloads?":** answering Yes pauses the plugin's own downloads
-  (`paused=1`). While the app is running, the plugin creates
-  `<folder>/sc-downloads-pause` instead, which the app checks for.
+  (`paused=1`). While the app is downloading itself, the plugin creates
+  `<folder>/sc-downloads-pause` instead, which the app checks for
+  (`scDownloadPauseAsked`).
+- **Left over:** a notification still showing 30 s after the downloads were
+  taken back, with no progress from the app, is ended.
 
 ## 6. Self-update: `SC_CMD_UPDATE_INSTALL`
 
 1. The app unpacks its update to `<folder>/sc-update/` and forges
-   `sce_sys/package/head.bin`. The client library includes `makeHeadBin`.
+   `sce_sys/package/head.bin` there. The client library doesn't do this: the
+   usual template is VitaShell's `head.bin` (GPL-3.0); VitaPlex's
+   `src/utils/vita_install.cpp` shows how.
 2. It sends `SC_CMD_UPDATE_INSTALL`, then quits.
 3. The plugin waits up to 30 s for the app to exit, installs the update
    (retrying while the title still counts as running), and writes
    `<folder>/sc-update-result.txt`: `result=0x…`, `why=…`, `end`.
-4. It relaunches the app either way.
+4. It relaunches the app either way. One update runs at a time.
 
 ## 7. Client library (`client/`)
 
-Plain C, for any app:
+Plain C, Apache-2.0, for any app. Build `client/shell_companion.c`,
+`client/sc_files.c` and `client/sc_link_stub.S` with the app, plus
+`client/sc_cover.c` for covers (it needs the app's `stb_image.h`), and ship
+`shell_companion.suprx` in the app's package.
 
 ```c
-int  scInit(const char* titleId, const char* dataDir, const char* name, uint32_t features,
-            const char* bundledPluginPath);   // finds or loads the plugin, sends HELLO
-int  scIsOpen(void);
+// setting up
+int scInit(const char* titleId, const char* dataDir, const char* name, uint32_t features,
+           const char* bundledPluginPath);           // who the app is; no I/O
+int scOpen(char* what, size_t size);                  // finds or loads the plugin, sends HELLO
+int scIsOpen(void);
+int scPath(const char* name, char* out, size_t size); // a file in the data folder
 // row
-int  scRowActivate(void);  int scRowRelease(void);
-int  scRowSong(const char* title, const char* artist, const char* album);
-int  scRowPlaying(int playing);  int scRowArt(uint32_t serial);  int scPoll(void);
+int scRowActivate(void);  int scRowRelease(void);
+int scRowSong(const char* title, const char* artist, const char* album);
+int scRowPlaying(int playing);  int scRowArt(uint32_t serial);  int scPoll(void);
 // music
-int  scMusicPlay(void);  int scMusicTakeBack(void);
+int scMusicPlay(void);  int scMusicTakeBack(void);
 // downloads
-int  scDownloadsStart(void);  int scDownloadsTakeBack(void);
-int  scDownloadProgress(const char* l1, const char* l2, uint32_t permille);
-int  scDownloadProgressEnd(const char* l1, const char* l2);
+int scDownloadsStart(void);  int scDownloadsTakeBack(void);
+int scDownloadProgress(const char* l1, const char* l2, uint32_t permille);
+int scDownloadProgressEnd(const char* l1, const char* l2);
+int scDownloadPauseAsked(void);
 // update
-int  scUpdateInstall(void);
+int scUpdateInstall(void);
+// the files
+int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
+int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count);
+int scReadQueueStatus(ScQueueStatus* out);
+int scReadDownloadsStatus(int* running, int* paused, ScDownloadStatus* items, uint32_t cap,
+                          uint32_t* count);
+int scReadUpdateResult(int* result, char* why, size_t whySize);
+// covers (sc_cover.h)
+int scCoverWrite(const void* image, size_t len, uint32_t serial, char* why, size_t whySize);
+int scCoverWriteTo(const void* image, size_t len, const char* path, char* why, size_t whySize);
+uint32_t scCoverNextSerial(uint32_t last, uint64_t nowUs);
 ```
 
-Plus small helpers to write the queue and download-list files correctly
-(temporary name, `end` line, URL-encoding), so no app has to get the format
-right by hand.
+`scMusicTakeBack` and `scDownloadsTakeBack` only reach a plugin that is in
+SceShell already, and never load one: with none there, nothing was carried
+on.
 
 ## 8. Logs
 
 `ux0:data/ShellCompanion/plugin.log` holds the current boot, and
-`plugin.prev.log` the boot before. Every line about an app's work names the
-app.
+`plugin.prev.log` the boot before. Lines about an app's work name the app.
+URLs and header lines are never logged, as they may carry tokens.
