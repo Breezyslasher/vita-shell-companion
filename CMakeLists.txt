@@ -14,7 +14,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "toolchain")
 endif()
 
-project(shell_companion LANGUAGES C CXX ASM)
+project(shell_companion VERSION 0.2.0 LANGUAGES C CXX ASM)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(SC_PAF_INCLUDE_DIR "" CACHE PATH "PAF headers (scripts/fetch_paf_headers.sh <dir>, then <dir>/include)")
@@ -36,6 +36,12 @@ target_include_directories(shell_companion PRIVATE
 target_compile_options(shell_companion PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-O2;-fno-rtti;-fno-exceptions;-fno-builtin;-fshort-wchar;-fno-threadsafe-statics;-fno-sized-deallocation;-Wno-unused-function;-Wno-sign-compare;-Wno-template-body;-D__declspec(x)=>")
 target_link_options(shell_companion PRIVATE -nostartfiles -nostdlib)
+# What it answers each HELLO with (SC_PLUGIN_INFO): the version as text, and
+# as a number to compare, major * 10000 + minor * 100 + patch.
+math(EXPR SC_VERSION_CODE
+     "${PROJECT_VERSION_MAJOR} * 10000 + ${PROJECT_VERSION_MINOR} * 100 + ${PROJECT_VERSION_PATCH}")
+target_compile_definitions(shell_companion PRIVATE
+    SC_PLUGIN_VERSION="${PROJECT_VERSION}" SC_PLUGIN_VERSION_CODE=${SC_VERSION_CODE})
 target_link_libraries(shell_companion
     SceLibKernel_stub
     SceAppMgr_stub
@@ -43,6 +49,7 @@ target_link_libraries(shell_companion
     SceKernelThreadMgr_stub
     SceRtc_stub
     SceSysmodule_stub
+    ScePower_stub
     gcc)
 # With no C runtime nothing runs static constructors: fail the build on any.
 add_custom_command(TARGET shell_companion POST_BUILD

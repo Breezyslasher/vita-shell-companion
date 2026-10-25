@@ -61,6 +61,7 @@
 #include <psp2/kernel/modulemgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/power.h>
 #include <psp2/rtc.h>
 #include <psp2/sysmodule.h>
 
@@ -7323,8 +7324,12 @@ int g_dlPendingCount;
 App g_dlFor;
 struct DlHead {
     int notify;
+    int battery;         // battery=: wait below this percent off power, 0 never
     char headers[2048];  // URL-decoded: "Name: value" lines
 };
+// Under g_lock: the battery's percent while the downloads wait for power
+// (dlBatteryHold), else -1.
+int g_dlBattery = -1;
 DlHead g_dlHead;
 // The download thread's: the list a line at a time, as the queue is read
 // (LineReader), with room for an add's profile; a piece of a file on its way
@@ -7469,6 +7474,7 @@ enum { kFKey, kFPath, kFSize, kFTitle, kFKind, kFArg1, kFArg2, kFArg3, kFMax };
 // waiting. false when it is not there or not whole.
 bool dlReadList() {
     sceClibMemset(&g_dlHead, 0, sizeof(g_dlHead));
+    g_dlHead.battery = SC_BATTERY_PAUSE_PERCENT;
     if (!dlOpenList()) return false;
     int count = 0;
     bool whole = false;
@@ -7480,6 +7486,9 @@ bool dlReadList() {
         }
         if (startsWith(g_dlLine, "notify=")) {
             g_dlHead.notify = g_dlLine[7] == '1';
+        } else if (startsWith(g_dlLine, "battery=")) {
+            const int pct = toInt(g_dlLine + 8);
+            g_dlHead.battery = pct < 0 ? 0 : pct > 100 ? 100 : pct;
         } else if (startsWith(g_dlLine, "headers=")) {
             urlDecode(g_dlLine + 8, (int)sceClibStrnlen(g_dlLine + 8, sizeof(g_dlLine)),
                       g_dlHead.headers, sizeof(g_dlHead.headers), true);
@@ -7517,10 +7526,15 @@ void dlStatus(bool running) {
         uint32_t secs, micros;
         splitUs(sceKernelGetSystemTimeWide(), &secs, &micros);
         lock();
-        const int paused = g_dlPaused;
+        const int battery = g_dlBattery;
+        const int paused = g_dlPaused       ? SC_PAUSED_ASKED
+                         : battery >= 0     ? SC_PAUSED_BATTERY
+                                            : 0;
         unlock();
         int n = sceClibSnprintf(text, sizeof(text), "written=%u.%06u\nrunning=%d\npaused=%d\n",
                                 (unsigned)secs, (unsigned)micros, running ? 1 : 0, paused);
+        if (battery >= 0)
+            n += sceClibSnprintf(text + n, sizeof(text) - n, "battery=%d\n", battery);
         rc = sceIoWrite(fd, text, (SceSize)n) == n ? 0 : -1;
         for (int i = 0; rc == 0; i++) {
             lock();
@@ -8008,6 +8022,66 @@ int dlPrepared(int tmpl, DlItem* d, const char* server, const char* title, int n
     }
 }
 
+// ── The battery ──
+// A download goes on only while the battery holds: below the list's
+// battery= percent with the Vita off power, it waits, the connection
+// closed, until the Vita is on power or the battery is 5 points above that,
+// and the notification says why. ScePower is imported as it is: a library
+// every process may call, which SceShell's own battery plugins (ShellBat)
+// import too.
+const uint32_t kDlBatteryLookMs = 5000;
+
+// The battery's percent, or -1 when it is on power or holds (or cannot be
+// read): what the downloads wait on.
+int dlBatteryLow(int resumeAbove = 0) {
+    const int limit = g_dlHead.battery;
+    if (limit <= 0) return -1;
+    if (scePowerIsPowerOnline() > 0 || scePowerIsBatteryCharging() > 0) return -1;
+    const int pct = scePowerGetBatteryLifePercent();
+    if (pct < 0) return -1;
+    return pct < limit + resumeAbove ? pct : -1;
+}
+
+// Waits while the battery is low (dlBatteryLow), the notification saying so
+// for download n of count. 0 when it was not, 1 when it waited and holds
+// now, -1 when the downloads were stopped meanwhile.
+int dlBatteryHold(int n, int count) {
+    int pct = dlBatteryLow();
+    if (pct < 0) return 0;
+    logLine("download: the battery at %d%%, off power: waiting for it (below %d%%)", pct,
+            g_dlHead.battery);
+    const SceUInt64 began = sceKernelGetSystemTimeWide();
+    int shownPct = -1;
+    while (pct >= 0) {
+        if (pct != shownPct) {
+            lock();
+            g_dlBattery = pct;
+            unlock();
+            char line[64], sub[96];
+            sceClibSnprintf(line, sizeof(line), "Paused: battery at %d%%", pct);
+            sceClibSnprintf(sub, sizeof(sub), "Charge the Vita to go on (%d of %d)", n + 1, count);
+            notifyShow(line, sub, -1.0f);
+            dlStatus(true);
+            shownPct = pct;
+        }
+        if (!dlWait(kDlBatteryLookMs)) {
+            lock();
+            g_dlBattery = -1;
+            unlock();
+            return -1;
+        }
+        pct = dlBatteryLow(5);
+    }
+    lock();
+    g_dlBattery = -1;
+    unlock();
+    logLine("download: going on after %s s waiting for power (battery %d%%%s)",
+            secsOf(msSince(began)).s, scePowerGetBatteryLifePercent(),
+            scePowerIsPowerOnline() > 0 ? ", on power" : "");
+    dlStatus(true);
+    return 1;
+}
+
 // kDl* of fetching url into path from where the file ends: the bytes and full
 // size in d as they come.
 int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* extra,
@@ -8017,6 +8091,7 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
     SceUInt64 prepareFrom = 0;
     for (;;) {
         if (dlStopped()) return kDlGoing;
+        if (dlBatteryHold(n, count) < 0) return kDlGoing;
         uint64_t have = fileSize(path);
         if (d->total > 0 && have == d->total) return kDlDone;
         if (have > 0) sceClibSnprintf(range, sizeof(range), "bytes=%s-", bigOf(have).s);
@@ -8113,6 +8188,10 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
                     }
                     have += (uint64_t)got;
                     const SceUInt64 now = sceKernelGetSystemTimeWide();
+                    if (now - shown >= kDlStatusEveryMs * 1000ull && dlBatteryLow() >= 0) {
+                        rc = 3;  // waited for with the connection closed, then gone on
+                        break;
+                    }
                     if (now - shown >= kDlStatusEveryMs * 1000ull) {
                         lock();
                         d->bytes = have;
@@ -8153,6 +8232,11 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
                 if (rc == 1) {
                     logLine("download: %s: stopped at %s MB", label, mb64Of(have).s);
                     return kDlGoing;
+                }
+                if (rc == 3) {
+                    logLine("download: %s: held at %s MB for the battery", label,
+                            mb64Of(have).s);
+                    continue;  // dlBatteryHold waits, then it goes on from there
                 }
                 if (rc == 0 && (d->total == 0 || have >= d->total)) {
                     logLine("download: %s: whole, %s MB, %s MB of it in %s s", label,
@@ -8596,6 +8680,51 @@ int appOf(const ScMessage& m) {
     return -1;
 }
 
+// The features this plugin has, and what else an app may look for in
+// SC_PLUGIN_INFO's caps= before it counts on it.
+const uint32_t kFeatures = SC_FEAT_ROW | SC_FEAT_MUSIC | SC_FEAT_DOWNLOADS | SC_FEAT_UPDATE |
+                           SC_FEAT_SENDSPIN;
+const char* const kCaps =
+    "queue.seek,queue.control,downloads.battery,sendspin.metadata,sendspin.controller,probe";
+// Under g_lock: the app a HELLO is to be answered for, -1 for none: answered
+// by the receiving thread once it has let the lock go (helloReply).
+int g_helloReplyApp = -1;
+
+// The answer to a HELLO: SC_PLUGIN_INFO in the app's folder, then
+// SC_REPLY_HELLO on the pipe for it. The receiving thread's, under nothing.
+void helloReply() {
+    lock();
+    const int i = g_helloReplyApp;
+    g_helloReplyApp = -1;
+    App a;
+    if (i >= 0) a = g_apps[i];
+    const int apps = g_appCount;
+    unlock();
+    if (i < 0) return;
+    static char text[512], path[160];
+    uint32_t secs, micros;
+    splitUs(sceKernelGetSystemTimeWide(), &secs, &micros);
+    const int n = sceClibSnprintf(
+        text, sizeof(text),
+        "written=%u.%06u\nprotocol=%d\nversion=%s\nversionCode=%d\nfeatures=0x%X\ngranted=0x%X\n"
+        "caps=%s\napps=%d\nend\n",
+        (unsigned)secs, (unsigned)micros, SC_PROTOCOL, SC_PLUGIN_VERSION, SC_PLUGIN_VERSION_CODE,
+        (unsigned)kFeatures, (unsigned)(a.features & kFeatures), kCaps, apps);
+    appPath(&a, SC_PLUGIN_INFO, path, sizeof(path));
+    const int rcFile = writeWhole(path, text, n);
+    ScPress msg;
+    sceClibMemset(&msg, 0, sizeof(msg));
+    msg.press = SC_REPLY_HELLO;
+    sceClibMemcpy(msg.titleId, a.titleId, sizeof(msg.titleId) - 1);
+    const int rcPipe = sceKernelTrySendMsgPipe(g_fromPlugin, &msg, sizeof(msg), kPipeModeFull, NULL);
+    if (rcFile < 0 || rcPipe < 0)
+        logLine("hello: %s answered: info 0x%08X, reply 0x%08X", a.name, (unsigned)rcFile,
+                (unsigned)rcPipe);
+    if (a.features & ~kFeatures)
+        logLine("hello: %s asked for features 0x%X this plugin does not have", a.name,
+                (unsigned)(a.features & ~kFeatures));
+}
+
 // An app registering itself, or again. Under g_lock.
 void hello(const ScMessage& m) {
     char title[12], folder[96], name[48];
@@ -8630,6 +8759,7 @@ void hello(const ScMessage& m) {
     copyText(a->name, name[0] ? name : title, sizeof(a->name));
     a->features = m.arg;
     sceIoMkdir(folder, 0777);
+    g_helloReplyApp = i;
     logLine("hello: %s (%s) %s, folder %s, features%s%s%s%s%s", a->name, a->titleId,
             fresh ? "registered" : "again", a->folder,
             (a->features & SC_FEAT_ROW) ? " row" : "", (a->features & SC_FEAT_MUSIC) ? " music" : "",
@@ -8683,6 +8813,7 @@ public:
             lock();
             handle(g_message);
             unlock();
+            helloReply();
             notifyAsked();
         }
     }
@@ -8902,7 +9033,8 @@ extern "C" int module_start(SceSize args, const void* argp) {
     (void)args;
     (void)argp;
     logOpen();
-    logLine("start: vita-shell-companion, protocol %d, pipes %s", SC_PROTOCOL, SC_PIPE_TO_PLUGIN);
+    logLine("start: vita-shell-companion %s, protocol %d, pipes %s", SC_PLUGIN_VERSION, SC_PROTOCOL,
+            SC_PIPE_TO_PLUGIN);
 
     // The quick menu's root, as ElevenMPV-A's plugin finds it: power_manage_
     // plugin's interface has a function giving it at 0x54.

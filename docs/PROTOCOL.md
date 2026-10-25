@@ -81,6 +81,37 @@ features); a second HELLO from the same title updates it. A command from an
 app that has not said HELLO this boot, or for a feature it didn't ask for,
 is ignored and logged.
 
+### The answer
+
+Several apps can ship the plugin, and whichever is loaded first in a boot is
+the one in SceShell until the Vita restarts. It may be older than the app's
+own copy. So, from version 0.2.0, the plugin answers each HELLO:
+
+1. It writes `<folder>/sc-plugin.txt`:
+
+   ```
+   written=...
+   protocol=1
+   version=0.2.0
+   versionCode=200               <major * 10000 + minor * 100 + patch>
+   features=0x1F                 <the SC_FEAT_* bits this plugin has>
+   granted=0x12                  <the ones this app asked for that it has>
+   caps=queue.seek,queue.control,downloads.battery,sendspin.metadata,sendspin.controller,probe
+   apps=<apps registered this boot>
+   end
+   ```
+
+2. It sends an `ScPress` on the FromPlugin pipe, with `press` set to
+   `SC_REPLY_HELLO` (`0x100`) and the app's title ID. A client that doesn't
+   know it skips it, as it does any press it doesn't know.
+
+`scOpen` waits up to half a second for the answer, and `scPluginInfo` then
+gives the file's contents. When it returns -1, the plugin in SceShell is
+older than 0.2.0 and has protocol 1's first features only. `caps=` names
+what came later, to check before counting on it (`scPluginHas`). An app
+whose own plugin is newer than the one answering can ask the user to
+restart the Vita.
+
 ## 3. Music row
 
 | Command | Fields |
@@ -345,6 +376,7 @@ When the app closes, it writes `<folder>/sc-downloads.txt`, then sends
 ```
 written=...
 notify=<1: show the progress notification>
+battery=<percent: wait below it while the Vita is off power; 15 by default, 0 never>
 headers=<encoded: header lines sent with every request, as in §4>
 item=<fields, tab-separated, each encoded, below>     (up to 200 items, in order)
 end
@@ -375,6 +407,16 @@ sent after the list's.
 - **Retries:** after 5, 15 and 60 s; getting any bytes resets the count.
 - **Gone:** 404 and 410 mark the item `gone`.
 
+#### The battery
+
+When the battery falls below `battery=` with the Vita off power, the download
+stops after the piece it is writing, its connection closed. The plugin waits
+and checks every 5 s. The notification says `Paused: battery at 12%` and
+`Charge the Vita to go on (3 of 5)`, and the status `paused=2`. Once the Vita
+is on power, or the battery is 5 points above `battery=`, the download goes
+on from where its file ends, as after a cut-off. A wait costs none of the
+item's tries.
+
 #### 5.2 `plexqueue` / `plexadd`
 
 These keep VitaPlex's existing behaviour: Plex's server-side download queue,
@@ -394,7 +436,8 @@ which prepares a transcoded file before it can be fetched. The list's
   ```
   written=
   running=0|1
-  paused=0|1
+  paused=0|1|2               <1: the notification's Yes; 2: waiting for power>
+  battery=<percent, while paused=2>
   item=<id>\t<going|waiting|done|gone|failed>\t<bytes>\t<size>\t<queue id>\t<item id>
   ...
   end
@@ -422,7 +465,8 @@ which prepares a transcoded file before it can be fetched. The list's
   on after the app closes. Lines are cut to 63 UTF-16 units.
 - **Icon:** it shows the icon of the app it was last shown for.
 - **"Pause downloads?":** answering Yes pauses the plugin's own downloads
-  (`paused=1`). While the app is downloading itself, the plugin creates
+  (`paused=1`), until the app takes them up again. A pause for the battery
+  (`paused=2`) ends by itself. While the app is downloading itself, the plugin creates
   `<folder>/sc-downloads-pause` instead, which the app checks for
   (`scDownloadPauseAsked`).
 - **Left over:** a notification still showing 30 s after the downloads were
@@ -453,6 +497,8 @@ int scInit(const char* titleId, const char* dataDir, const char* name, uint32_t 
            const char* bundledPluginPath);           // who the app is; no I/O
 int scOpen(char* what, size_t size);                  // finds or loads the plugin, sends HELLO
 int scIsOpen(void);
+int scPluginInfo(ScPluginInfo* out);                  // its answer to HELLO (§2), -1 for none
+int scPluginHas(const ScPluginInfo* info, const char* cap);
 int scPath(const char* name, char* out, size_t size); // a file in the data folder
 // row
 int scRowActivate(void);  int scRowRelease(void);
@@ -476,6 +522,7 @@ int scProbeStream(int mode, const char* sourceWav);
 // the files
 int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
 int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count);
+extern int scDownloadsBatteryPercent;                 // its battery=, 15 unless changed
 int scReadQueueStatus(ScQueueStatus* out);
 int scReadDownloadsStatus(int* running, int* paused, ScDownloadStatus* items, uint32_t cap,
                           uint32_t* count);

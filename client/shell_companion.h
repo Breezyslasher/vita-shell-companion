@@ -37,10 +37,32 @@ int scInit(const char* titleId, const char* dataDir, const char* name, uint32_t 
            const char* bundledPluginPath);
 
 // Finds the plugin in SceShell, or loads the bundled one, opens its pipes and
-// registers the app with it (SC_CMD_HELLO). 0 when open, else the code that
-// stopped it; what happened, for a log, in what. Loading needs taiHEN and the
-// app to be unsafe homebrew.
+// registers the app with it (SC_CMD_HELLO), waiting up to half a second for
+// its answer (scPluginInfo). 0 when open, else the code that stopped it;
+// what happened, for a log, in what. Loading needs taiHEN and the app to be
+// unsafe homebrew.
 int scOpen(char* what, size_t size);
+
+// The plugin that answered this app's HELLO: several apps ship a plugin,
+// and the first one loaded in a boot is the one in SceShell until the Vita
+// restarts, which may be older than the app's own. The features it has, the
+// app's that it took, and its caps, things an app checks before it counts on
+// them (scPluginHas: "downloads.battery", "sendspin.controller", ...). 0, or
+// -1 when it never answered: a plugin older than version 0.2.0, which has
+// the features of protocol 1 as it first was.
+typedef struct ScPluginInfo {
+    char written[32];
+    unsigned protocol;
+    char version[16];      // "0.2.0"
+    uint32_t versionCode;  // major * 10000 + minor * 100 + patch
+    uint32_t features;     // SC_FEAT_* it has
+    uint32_t granted;      // of those this app asked for
+    char caps[192];        // ',' between
+} ScPluginInfo;
+int scPluginInfo(ScPluginInfo* out);
+int scPluginHas(const ScPluginInfo* info, const char* cap);
+// The same, read from the file whether or not the answer has come.
+int scReadPluginInfo(ScPluginInfo* out);
 int scIsOpen(void);
 
 // A file in the app's data folder, into out. 0, or -1 before scInit or when
@@ -215,6 +237,11 @@ typedef struct ScDownload {
 } ScDownload;
 
 int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count);
+// The battery= scWriteDownloads writes: the plugin's downloads wait below
+// this percent while the Vita is off power, and go on by themselves once it
+// is on power or 5 points above it; 0 never waits. SC_BATTERY_PAUSE_PERCENT
+// unless changed.
+extern int scDownloadsBatteryPercent;
 
 // What the files the plugin writes say. 0 when the file is there and whole.
 typedef struct ScQueueStatus {
@@ -230,6 +257,8 @@ typedef struct ScQueueStatus {
 } ScQueueStatus;
 int scReadQueueStatus(ScQueueStatus* out);
 
+// paused: 0, SC_PAUSED_ASKED (the notification's Yes: the app goes on with
+// them), or SC_PAUSED_BATTERY (waiting for power: the plugin goes on).
 typedef struct ScDownloadStatus {
     char id[64];
     char state[12];        // going, waiting, done, gone or failed

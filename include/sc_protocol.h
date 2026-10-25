@@ -76,6 +76,7 @@ enum {
 #define SC_DOWNLOADS_PAUSE  "sc-downloads-pause"  // made when "Pause downloads?" is answered Yes
 #define SC_UPDATE_DIR       "sc-update"
 #define SC_UPDATE_RESULT    "sc-update-result.txt"
+#define SC_PLUGIN_INFO      "sc-plugin.txt"       // the plugin's version and features, at each HELLO
 #define SC_SENDSPIN         "sc-sendspin.txt"     // the Sendspin player handed over
 #define SC_SENDSPIN_STATUS  "sc-sendspin-status.txt"
 
@@ -84,6 +85,13 @@ enum {
 #define SC_MAX_APPS         16
 #define SC_MAX_TRACKS       1000
 #define SC_MAX_DOWNLOADS    200
+// The downloads' battery= by default: they wait below this percent while the
+// Vita is not on power.
+#define SC_BATTERY_PAUSE_PERCENT 15
+// The downloads status's paused=: by the notification's Yes (the app goes on
+// with them), or waiting for power (the plugin goes on by itself).
+#define SC_PAUSED_ASKED   1
+#define SC_PAUSED_BATTERY 2
 
 // The queue's repeat=.
 #define SC_REPEAT_OFF 0
@@ -122,8 +130,11 @@ typedef struct ScMessage {
     uint16_t text3[256];
 } ScMessage;
 
-// From the plugin: a press on the row, for the app that owns it.
+// From the plugin: a press on the row, for the app that owns it; or, with
+// SC_REPLY_HELLO, the answer to an app's SC_CMD_HELLO, its SC_PLUGIN_INFO
+// written first. A client that knows no SC_REPLY_HELLO passes it over.
 enum { SC_PRESS_PLAY_PAUSE = 1, SC_PRESS_NEXT, SC_PRESS_PREVIOUS };
+#define SC_REPLY_HELLO 0x100u
 typedef struct ScPress {
     uint32_t press;
     char titleId[12];

@@ -8,7 +8,11 @@ going after it closes:
 - **Background music:** the app's queue plays on through the shell's own music
   player, beside games.
 - **Background downloads:** downloads carry on, with one progress notification
-  and a "Pause downloads?" question.
+  and a "Pause downloads?" question. They wait while the battery is low and
+  the Vita is off power, and say so in the notification.
+- **Several apps, one plugin:** the plugin answers each app's hello with its
+  version and what it has, so an app can tell when the copy in SceShell is
+  older than its own.
 - **Self-update:** the plugin installs the app's update once it has closed,
   then launches it again.
 - **Remote control:** while the shell plays an app's queue, the app's server

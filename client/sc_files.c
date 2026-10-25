@@ -124,13 +124,15 @@ int scWriteQueue(const ScQueue* q, const ScTrack* tracks, uint32_t count) {
     return finish(f, path, part);
 }
 
+int scDownloadsBatteryPercent = SC_BATTERY_PAUSE_PERCENT;
+
 int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count) {
     char path[256], part[256];
     if (count > SC_MAX_DOWNLOADS) count = SC_MAX_DOWNLOADS;
     FILE* f = openPart(SC_DOWNLOADS, path, part, sizeof(path));
     if (!f) return -1;
     putWritten(f);
-    fprintf(f, "notify=%d\n", notify ? 1 : 0);
+    fprintf(f, "notify=%d\nbattery=%d\n", notify ? 1 : 0, scDownloadsBatteryPercent);
     if (headers && headers[0]) {
         fputs("headers=", f);
         putEncoded(f, headers);
@@ -250,7 +252,7 @@ int scReadDownloadsStatus(int* running, int* paused, ScDownloadStatus* items, ui
     value(text, "running", num, sizeof(num));
     *running = num[0] == '1';
     value(text, "paused", num, sizeof(num));
-    *paused = num[0] == '1';
+    *paused = atoi(num);
     for (const char* p = text; *p && *count < cap;) {
         if (strncmp(p, "item=", 5) == 0) {
             p += 5;
@@ -332,5 +334,37 @@ int scReadSendspinStatus(ScSendspinStatus* out) {
     value(text, "durationMs", num, sizeof(num));
     out->durationMs = (uint32_t)strtoul(num, NULL, 10);
     free(text);
+    return 0;
+}
+
+int scReadPluginInfo(ScPluginInfo* out) {
+    memset(out, 0, sizeof(*out));
+    char* text = readWhole(SC_PLUGIN_INFO);
+    if (!text) return -1;
+    char num[24];
+    value(text, "written", out->written, sizeof(out->written));
+    value(text, "protocol", num, sizeof(num));
+    out->protocol = (unsigned)strtoul(num, NULL, 10);
+    value(text, "version", out->version, sizeof(out->version));
+    value(text, "versionCode", num, sizeof(num));
+    out->versionCode = (uint32_t)strtoul(num, NULL, 10);
+    value(text, "features", num, sizeof(num));
+    out->features = (uint32_t)strtoul(num, NULL, 16);
+    value(text, "granted", num, sizeof(num));
+    out->granted = (uint32_t)strtoul(num, NULL, 16);
+    value(text, "caps", out->caps, sizeof(out->caps));
+    free(text);
+    return 0;
+}
+
+int scPluginHas(const ScPluginInfo* info, const char* cap) {
+    const size_t n = strlen(cap);
+    for (const char* p = info->caps; *p;) {
+        const char* end = strchr(p, ',');
+        const size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == n && strncmp(p, cap, n) == 0) return 1;
+        if (!end) break;
+        p = end + 1;
+    }
     return 0;
 }
