@@ -56,6 +56,8 @@ static char g_bundled[256];
 // Under g_lock: 1.5 KB, off the callers' stacks.
 static ScMessage g_message;
 static ScPress g_press;
+// Under g_lock: the plugin has answered this app's HELLO (SC_REPLY_HELLO).
+static int g_answered;
 
 static void lock(void) {
     if (g_lock >= 0) sceKernelLockMutex(g_lock, 1, NULL);
@@ -244,8 +246,34 @@ int scOpen(char* what, size_t size) {
     }
     g_to = to;
     g_from = from;
+    // Its answer, written first: up to half a second; a plugin before 0.2.0
+    // gives none. A press that comes meanwhile is for an app gone before.
+    g_answered = 0;
+    for (int i = 0; i < 25 && !g_answered; i++) {
+        memset(&g_press, 0, sizeof(g_press));
+        if (sceKernelTryReceiveMsgPipe(g_from, &g_press, sizeof(g_press), MSG_PIPE_MODE_FULL,
+                                       NULL) < 0) {
+            sceKernelDelayThread(20 * 1000);
+            continue;
+        }
+        g_answered = g_press.press == SC_REPLY_HELLO &&
+                     strncmp(g_press.titleId, g_titleId, sizeof(g_press.titleId)) == 0;
+    }
+    if (!g_answered && n >= 0 && (size_t)n < size)
+        snprintf(what + n, size - (size_t)n, "; it gave no answer to hello (before 0.2.0)");
     unlock();
     return 0;
+}
+
+int scPluginInfo(ScPluginInfo* out) {
+    lock();
+    const int answered = g_answered;
+    unlock();
+    if (!answered) {
+        memset(out, 0, sizeof(*out));
+        return -1;
+    }
+    return scReadPluginInfo(out);
 }
 
 // Under g_lock: g_message, as filled in, to the plugin this process opened.
@@ -326,6 +354,10 @@ int scPoll(void) {
             break;
         // A press for another app, one that had the row before, is dropped.
         if (strncmp(g_press.titleId, g_titleId, sizeof(g_press.titleId)) != 0) continue;
+        if (g_press.press == SC_REPLY_HELLO) {
+            g_answered = 1;  // late, or for a HELLO sent again
+            continue;
+        }
         press = g_press.press == SC_PRESS_PLAY_PAUSE ? SC_PLAY_PAUSE
               : g_press.press == SC_PRESS_NEXT       ? SC_NEXT
               : g_press.press == SC_PRESS_PREVIOUS   ? SC_PREVIOUS
@@ -388,4 +420,25 @@ int scDownloadPauseAsked(void) {
 
 int scUpdateInstall(void) {
     return sendCommand(SC_CMD_UPDATE_INSTALL, 0);
+}
+
+int scProbeStream(int mode, const char* sourceWav) {
+    lock();
+    beginLocked(SC_CMD_PROBE_STREAM, (uint32_t)mode);
+    toUtf16(sourceWav, g_message.text1, 256);
+    const int rc = sendLocked();
+    unlock();
+    return rc;
+}
+
+int scSendspinStart(void) {
+    return sendCommand(SC_CMD_SENDSPIN_START, 0);
+}
+
+int scSendspinTakeBack(void) {
+    lock();
+    beginLocked(SC_CMD_SENDSPIN_TAKE_BACK, 0);
+    const int rc = sendToPresentLocked();
+    unlock();
+    return rc;
 }

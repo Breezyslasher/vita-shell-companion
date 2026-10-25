@@ -61,6 +61,7 @@
 #include <psp2/kernel/modulemgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/power.h>
 #include <psp2/rtc.h>
 #include <psp2/sysmodule.h>
 
@@ -71,6 +72,7 @@
 #include <paf.h>
 
 #include "mp3_frames.h"
+#include "sendspin_wire.h"
 #include "sc_protocol.h"
 
 // ── taiHEN, by NID (taihen_stub.S) ──────────────────────────────────────────
@@ -4646,13 +4648,17 @@ void carryTick() {
     if ((uint32_t)(now - g_c.statusUs) >= 2000000u) carryStatus(SC_STATE_PLAYING, time);
 }
 
+bool probeHolds();
+bool ssHolds();
+
 // One look of the music thread's: a queue an app handed over begun, once a
-// queue carried on before has stopped; the queue carried on, looked at.
+// queue carried on before has stopped, and the probe (probeStep); the queue
+// carried on, looked at.
 void musicStep() {
     lock();
     const int carry = g_carry;
     // Once a queue carried on before has stopped (SC_CMD_MUSIC_PLAY stops it).
-    const bool handed = g_playQueueDue && carry != 2;
+    const bool handed = g_playQueueDue && carry != 2 && !probeHolds() && !ssHolds();
     const int app = g_playQueueApp;
     if (handed) {
         g_playQueueDue = 0;
@@ -4720,6 +4726,727 @@ void stopCarry(const char* why, int how) {
     g_carryStopHow = how;
     logLine("carry on: to stop: %s", why);
     if (g_musicSema >= 0) sceKernelSignalSema(g_musicSema, 1);
+}
+
+// ── Probe: does the shell play a WAV that is still being written? ───────────
+// (docs/PROTOCOL.md §10) A debug run, for Music Assistant in the background:
+// a Sendspin player gets its audio as a stream, and the shell's music
+// service plays only files. So the probe writes 44.1 kHz 16-bit stereo PCM
+// into a WAV at the clock's pace, kProbeLeadMs ahead of the start, hands the
+// file to the service as the queue's songs are handed (carryPlay), and logs
+// each second what it has written beside what the service says: its state,
+// its clock and the length it gives the song. Then it pauses, plays, seeks
+// back, seeks to near the end of what is written (past what the file held
+// as it was opened), and skips to a second file, timing each. Its lines in
+// the log begin "probe:". It runs only while no queue is carried on, and a
+// queue handed over waits for it to stop.
+//
+// The WAV's header gives either a huge size (SC_PROBE_HUGE), or the size
+// written so far, rewritten as it grows (SC_PROBE_GROWING, SC_PROBE_REOPEN);
+// SC_PROBE_REOPEN has the shell open the file again where it was each time
+// it stops, and every kProbeReopenS, to time the gap. Each write appends with
+// the file opened and closed again, so the card's entry has its size.
+const uint32_t kProbeLeadMs = 3000;      // written before the shell is given the file
+const uint32_t kProbeHugeBytes = 0x7FFFF000u;  // the huge header's data size, 3 h 22 min
+const uint32_t kProbeDelayMs = 10000;    // from the command to the first file, to close the app
+const uint32_t kProbeEndS = 80;          // a run's length
+const uint32_t kProbeReopenS = 10;
+const uint32_t kProbeTookMaxMs = 10000;  // a step not seen taking effect by then is logged so
+const uint32_t kProbeWavHead = 44;
+const uint32_t kProbeBytesPer10Ms = 1764;  // 44100 * 4 / 100
+
+// Under g_lock: the run asked for (SC_PROBE_*, -1 for none), and for whom;
+// running; and to stop, which the probe thread reads without it.
+int g_probeWant = -1;
+int g_probeWantApp;
+char g_probeWantSource[160];
+int g_probeRunning;
+int g_probeStop;  // atomic
+SceUID g_probeSema = -1;
+int g_probeThread;
+
+// The probe thread's alone.
+struct Probe {
+    int mode;              // the run's SC_PROBE_*
+    char name[48];
+    char path[2][160];     // its two files, in the app's folder; SC_PROBE_FILE's file
+    int file;              // the one written now and with the shell
+    int huge;              // its header gives kProbeHugeBytes, not what is written
+    uint32_t bytes;        // PCM written to it
+    uint32_t openMs;       // audio in it as the shell was given it
+    SceUInt64 beganUs;     // its writing began: kProbeLeadMs is written then, and the clock's
+                           // pace after
+    int writeErrors;
+    // Where the PCM comes from: a WAV on the card (source), looped, or a tone.
+    char source[160];
+    SceUID src;
+    uint32_t srcLeft;      // of its data chunk
+    uint32_t pendOff, pendN;  // its PCM read with its header, in g_probeHead, not yet used
+    int srcLoops;
+    uint32_t samples;      // the tone's so far
+    uint16_t phase;
+    // What the shell said last, and since when its clock has not moved.
+    int state;
+    uint32_t timeMs, lenMs;
+    SceUInt64 stillUs;
+    int stalled;           // logged as stalled, until it moves again
+    int paused;            // paused by the probe
+    // A step asked of the shell, timed until it plays at its place: what,
+    // where it is to play from (within 1 s back, 3 s on), and since when.
+    const char* mark;
+    uint32_t markMs;
+    SceUInt64 markUs;
+};
+Probe g_p;
+uint8_t g_probeBuf[4096];
+uint8_t g_probeHead[512];
+
+uint32_t le32(const uint8_t* p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+uint32_t le16(const uint8_t* p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8;
+}
+void putLe32(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+void putLe16(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+// A WAV's 44-byte header for `data` bytes of 44.1 kHz 16-bit stereo PCM.
+void probeHeader(uint8_t* h, uint32_t data) {
+    sceClibMemcpy(h, "RIFF", 4);
+    putLe32(h + 4, data + 36);
+    sceClibMemcpy(h + 8, "WAVEfmt ", 8);
+    putLe32(h + 16, 16);
+    putLe16(h + 20, 1);  // PCM
+    putLe16(h + 22, 2);
+    putLe32(h + 24, 44100);
+    putLe32(h + 28, 44100 * 4);
+    putLe16(h + 32, 4);
+    putLe16(h + 34, 16);
+    sceClibMemcpy(h + 36, "data", 4);
+    putLe32(h + 40, data);
+}
+
+// Audio as ms, and ms as audio's bytes, a whole frame each.
+uint32_t probeMsOf(uint32_t bytes) {
+    return bytes / kProbeBytesPer10Ms * 10u;
+}
+uint32_t probeBytesOf(uint32_t ms) {
+    return ms / 10u * kProbeBytesPer10Ms;
+}
+
+// The source WAV opened at its data's start: true when it is 44.1 kHz
+// 16-bit stereo PCM, its PCM read with the header kept in g_probeHead.
+bool probeSourceOpen() {
+    if (g_p.src >= 0) sceIoClose(g_p.src);
+    g_p.pendN = 0;
+    g_p.src = sceIoOpen(g_p.source, SCE_O_RDONLY, 0);
+    if (g_p.src < 0) {
+        logLine("probe: %s: open 0x%08X", g_p.source, (unsigned)g_p.src);
+        return false;
+    }
+    const int n = sceIoRead(g_p.src, g_probeHead, sizeof(g_probeHead));
+    const uint8_t* h = g_probeHead;
+    if (n < 12 || sceClibMemcmp(h, "RIFF", 4) != 0 || sceClibMemcmp(h + 8, "WAVE", 4) != 0) {
+        logLine("probe: %s is not a WAV (read %d)", g_p.source, n);
+        return false;
+    }
+    bool fmt = false;
+    for (uint32_t off = 12; off + 8 <= (uint32_t)n;) {
+        const uint32_t size = le32(h + off + 4);
+        if (sceClibMemcmp(h + off, "fmt ", 4) == 0 && off + 24 <= (uint32_t)n) {
+            const uint32_t tag = le16(h + off + 8), ch = le16(h + off + 10);
+            const uint32_t rate = le32(h + off + 12), bits = le16(h + off + 22);
+            if (tag != 1 || ch != 2 || rate != 44100 || bits != 16) {
+                logLine("probe: %s is format %u, %u channels, %u Hz, %u bits, not PCM 2, 44100, "
+                        "16",
+                        g_p.source, (unsigned)tag, (unsigned)ch, (unsigned)rate, (unsigned)bits);
+                return false;
+            }
+            fmt = true;
+        } else if (sceClibMemcmp(h + off, "data", 4) == 0) {
+            if (!fmt) break;
+            g_p.pendOff = off + 8;
+            g_p.pendN = (uint32_t)n - g_p.pendOff;
+            // An unknown size (0 or all ones) reads to the file's end.
+            g_p.srcLeft = size == 0 || size == 0xFFFFFFFFu ? 0xFFFFFFFFu : size & ~3u;
+            if (g_p.pendN > g_p.srcLeft) g_p.pendN = g_p.srcLeft;
+            return true;
+        }
+        if (size > (uint32_t)n) break;
+        off += 8 + size + (size & 1);
+    }
+    logLine("probe: %s: no %s in its first %d bytes", g_p.source, fmt ? "data chunk" : "fmt chunk",
+            n);
+    return false;
+}
+
+void probeSourceClose() {
+    if (g_p.src >= 0) sceIoClose(g_p.src);
+    g_p.src = -1;
+}
+
+// n bytes of the tone: 440 Hz, 880 Hz each tenth second, each second's last
+// 100 ms silent, so that where it plays can be heard.
+void probeTone(uint8_t* out, uint32_t n) {
+    for (uint32_t i = 0; i + 4 <= n; i += 4) {
+        const uint32_t inSecond = g_p.samples % 44100u, second = g_p.samples / 44100u;
+        int v = 0;
+        if (inSecond < 39690u) {
+            g_p.phase = (uint16_t)(g_p.phase + (second % 10u == 0 ? 1307u : 653u));
+            const int tri = g_p.phase < 32768u ? g_p.phase : 65535 - g_p.phase;
+            v = (tri - 16384) / 4;
+        }
+        putLe16(out + i, (uint32_t)v);
+        putLe16(out + i + 2, (uint32_t)v);
+        g_p.samples++;
+    }
+}
+
+// n bytes of PCM into out (a multiple of 4): from the source, round again
+// at its end, else the tone.
+void probeFill(uint8_t* out, uint32_t n) {
+    uint32_t got = 0;
+    int empty = 0;
+    while (g_p.src >= 0 && got < n) {
+        if (g_p.pendN) {
+            uint32_t k = n - got < g_p.pendN ? n - got : g_p.pendN;
+            sceClibMemcpy(out + got, g_probeHead + g_p.pendOff, k);
+            g_p.pendOff += k;
+            g_p.pendN -= k;
+            g_p.srcLeft -= k;
+            got += k;
+            empty = 0;
+            continue;
+        }
+        uint32_t want = n - got < g_p.srcLeft ? n - got : g_p.srcLeft;
+        const int r = want ? sceIoRead(g_p.src, out + got, want) : 0;
+        if (r > 0) {
+            got += (uint32_t)r;
+            g_p.srcLeft -= (uint32_t)r;
+            empty = 0;
+            continue;
+        }
+        // Its end: round again, unless it has no PCM to give.
+        g_p.srcLoops++;
+        if (++empty > 1 || !probeSourceOpen()) {
+            logLine("probe: %s gives nothing more; the tone instead", g_p.source);
+            probeSourceClose();
+        }
+    }
+    got &= ~3u;
+    if (got < n) probeTone(out + got, n - got);
+}
+
+// The file written up to its clock: kProbeLeadMs and the time since its
+// writing began. Its header rewritten after with the size, unless huge.
+void probeWrite(SceUInt64 now) {
+    const uint32_t want = probeBytesOf(kProbeLeadMs + (uint32_t)(now - g_p.beganUs) / 1000u);
+    if (want <= g_p.bytes) return;
+    const char* path = g_p.path[g_p.file];
+    const SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_APPEND, 0);
+    int rc = fd;
+    while (fd >= 0 && g_p.bytes < want) {
+        const uint32_t n = want - g_p.bytes < sizeof(g_probeBuf) ? want - g_p.bytes
+                                                                 : (uint32_t)sizeof(g_probeBuf);
+        probeFill(g_probeBuf, n);
+        rc = sceIoWrite(fd, g_probeBuf, n);
+        if (rc != (int)n) break;
+        g_p.bytes += n;
+        rc = 0;
+    }
+    if (fd >= 0) sceIoClose(fd);
+    if (rc >= 0 && !g_p.huge) {
+        uint8_t h[kProbeWavHead];
+        probeHeader(h, g_p.bytes);
+        rc = writeAtStart(path, h, sizeof(h));
+    }
+    if (rc < 0 && g_p.writeErrors++ < 5)
+        logLine("probe: writing %s at %u bytes: 0x%08X", path, (unsigned)g_p.bytes, (unsigned)rc);
+}
+
+// A file begun: its header, then kProbeLeadMs of audio.
+bool probeBegin(int file) {
+    g_p.file = file;
+    g_p.bytes = 0;
+    const char* path = g_p.path[file];
+    uint8_t h[kProbeWavHead];
+    probeHeader(h, g_p.huge ? kProbeHugeBytes : 0);
+    const SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+    const int w = fd >= 0 ? sceIoWrite(fd, h, sizeof(h)) : fd;
+    if (fd >= 0) sceIoClose(fd);
+    if (w != (int)sizeof(h)) {
+        logLine("probe: %s not made: 0x%08X", path, (unsigned)w);
+        return false;
+    }
+    g_p.beganUs = sceKernelGetSystemTimeWide();
+    probeWrite(g_p.beganUs);
+    return true;
+}
+
+// A step timed from now until the shell plays from atMs.
+void probeMark(const char* what, uint32_t atMs) {
+    g_p.mark = what;
+    g_p.markMs = atMs;
+    g_p.markUs = sceKernelGetSystemTimeWide();
+    g_p.stalled = 0;
+    g_p.stillUs = 0;
+}
+
+// The file written now, to the shell: stop, open and play, as carryPlay
+// hands a song over, and from atMs when it is not 0.
+void probePlay(const char* why, uint32_t atMs) {
+    const char* path = g_p.path[g_p.file];
+    const int rcStop = musicEvent(kEventStop), rcOpen = musicOpen(path);
+    const int rcTime = atMs ? musicSeekTime(atMs) : 0;
+    const int rcPlay = musicEvent(kEventPlay);
+    int rcSeek = 0;
+    if (atMs) rcSeek = musicEvent(kEventSeek);
+    g_p.openMs = probeMsOf(g_p.bytes);
+    g_p.paused = 0;
+    logLine("probe: %s: %s, %u ms written, from %u ms: stop 0x%08X, open 0x%08X, seek time "
+            "0x%08X, play 0x%08X, seek 0x%08X",
+            why, path, (unsigned)g_p.openMs, (unsigned)atMs, (unsigned)rcStop, (unsigned)rcOpen,
+            (unsigned)rcTime, (unsigned)rcPlay, (unsigned)rcSeek);
+    probeMark(why, atMs);
+}
+
+void probeSeek(const char* why, uint32_t ms) {
+    const int rcTime = musicSeekTime(ms), rcSeek = musicEvent(kEventSeek);
+    logLine("probe: %s: to %u ms, %u ms written: seek time 0x%08X, seek 0x%08X", why,
+            (unsigned)ms, (unsigned)probeMsOf(g_p.bytes), (unsigned)rcTime, (unsigned)rcSeek);
+    probeMark(why, ms);
+}
+
+// The shell looked at: a change of state logged, a step timed, and a clock
+// that stops while it plays logged as a stall. true when it stalled now.
+bool probeLook(SceUInt64 now) {
+    int state = 0;
+    uint32_t time = 0;
+    const int rc = musicStatus(&state, &time);
+    if (rc < 0) {
+        if (g_p.writeErrors++ < 5) logLine("probe: status 0x%08X", (unsigned)rc);
+        return false;
+    }
+    const int was = g_p.state;
+    const uint32_t before = g_p.timeMs;
+    g_p.state = state;
+    g_p.timeMs = time;
+    if (state != was)
+        logLine("probe: state %d to %d at %u ms%s", was, state, (unsigned)time,
+                g_p.mark || g_p.paused ? "" : ", not asked for");
+    if (g_p.mark) {
+        const uint32_t since = (uint32_t)(now - g_p.markUs) / 1000u;
+        if (state == 1 && time > before && time + 1000 >= g_p.markMs && time <= g_p.markMs + 3000) {
+            logLine("probe: %s: playing at %u ms, %u ms after it was asked", g_p.mark,
+                    (unsigned)time, (unsigned)since);
+            g_p.mark = NULL;
+        } else if (since >= kProbeTookMaxMs) {
+            logLine("probe: %s: not playing from %u ms %u ms after it was asked: state %d at %u ms",
+                    g_p.mark, (unsigned)g_p.markMs, (unsigned)since, state, (unsigned)time);
+            g_p.mark = NULL;
+        }
+        return false;
+    }
+    if (g_p.paused) return false;
+    if (state == 1 && time != before) {
+        if (g_p.stalled)
+            logLine("probe: moving again at %u ms, %u ms written", (unsigned)time,
+                    (unsigned)probeMsOf(g_p.bytes));
+        g_p.stalled = 0;
+        g_p.stillUs = 0;
+        return false;
+    }
+    if (!g_p.stillUs) g_p.stillUs = now;
+    if (g_p.stalled || (uint32_t)(now - g_p.stillUs) < 1500000u) return false;
+    g_p.stalled = 1;
+    logLine("probe: STALL: state %d at %u ms, its clock still for 1.5 s; %u ms written, %u ms as "
+            "the shell opened it",
+            state, (unsigned)time, (unsigned)probeMsOf(g_p.bytes), (unsigned)g_p.openMs);
+    return true;
+}
+
+void probeSecond(uint32_t second) {
+    uint32_t len = 0;
+    const int rcLen = musicLength(&len);
+    g_p.lenMs = len;
+    logLine("probe: %u s: %u ms written (%u KB), shell state %d at %u ms, length %u ms (0x%08X)%s",
+            (unsigned)second, (unsigned)probeMsOf(g_p.bytes),
+            (unsigned)((g_p.bytes + kProbeWavHead) / 1024u), g_p.state, (unsigned)g_p.timeMs,
+            (unsigned)len, (unsigned)rcLen, g_p.paused ? ", paused" : "");
+}
+
+bool probeStopAsked() {
+    return __atomic_load_n(&g_probeStop, __ATOMIC_SEQ_CST) != 0;
+}
+
+const char* probeModeName(int mode) {
+    return mode == SC_PROBE_HUGE      ? "huge header"
+         : mode == SC_PROBE_GROWING   ? "header of the size written"
+         : mode == SC_PROBE_REOPEN    ? "reopened"
+         : mode == SC_PROBE_FILE      ? "a file as it is"
+         : mode == SC_PROBE_HTTP      ? "a request"
+                                      : "?";
+}
+
+// SC_PROBE_FILE: the file in g_p.source played as it is, for 30 s, as the
+// queue plays a local track: does the shell take it (an .m4b, say), how long
+// does it say it is, and does it seek? A seek to 60 s at 10 s, a pause at
+// 20 s, play at 23 s. The file is left as it was.
+void probeFileRun() {
+    g_p.huge = 1;  // its header is never touched
+    g_p.state = -1;
+    g_p.timeMs = 0;
+    g_p.mark = NULL;
+    g_p.stalled = 0;
+    g_p.stillUs = 0;
+    g_p.paused = 0;
+    g_p.bytes = 0;
+    g_p.file = 0;
+    copyText(g_p.path[0], g_p.source, sizeof(g_p.path[0]));
+    SceIoStat st;
+    sceClibMemset(&st, 0, sizeof(st));
+    const int rcStat = sceIoGetstat(g_p.path[0], &st);
+    const int rcStart = musicTracked(0x30000);
+    logLine("probe: run \"%s\": %s, %u KB (stat 0x%08X); music service started: 0x%08X",
+            probeModeName(SC_PROBE_FILE), g_p.path[0], (unsigned)((uint64_t)st.st_size >> 10),
+            (unsigned)rcStat, (unsigned)rcStart);
+    probePlay("first play", 0);
+    const SceUInt64 playUs = sceKernelGetSystemTimeWide();
+    uint32_t nextSecond = 1;
+    int step = 0;
+    while (!probeStopAsked()) {
+        SceUInt timeout = 100 * 1000;
+        sceKernelWaitSema(g_probeSema, 1, &timeout);
+        const SceUInt64 now = sceKernelGetSystemTimeWide();
+        probeLook(now);
+        const uint32_t ms = (uint32_t)(now - playUs) / 1000u, s = ms / 1000u;
+        if (ms >= nextSecond * 1000u) probeSecond(nextSecond++);
+        if (s >= 30) break;
+        if (step == 0 && s >= 10) {
+            step++;
+            probeSeek("seek to 60 s", 60000);
+        } else if (step == 1 && s >= 20) {
+            step++;
+            const int rc = musicEvent(kEventStop);
+            g_p.paused = 1;
+            g_p.mark = NULL;
+            logLine("probe: pause at %u ms: stop 0x%08X", (unsigned)g_p.timeMs, (unsigned)rc);
+        } else if (step == 2 && s >= 23) {
+            step++;
+            const uint32_t at = g_p.timeMs;
+            const int rc = musicEvent(kEventPlay);
+            g_p.paused = 0;
+            logLine("probe: play again from %u ms: play 0x%08X", (unsigned)at, (unsigned)rc);
+            probeMark("play again", at);
+        }
+    }
+    const int rcStop = musicEvent(kEventStop), rcEnd = musicTracked(0x30001);
+    logLine("probe: run \"%s\" %s at %u ms, length %u ms: stop 0x%08X, end 0x%08X",
+            probeModeName(SC_PROBE_FILE), probeStopAsked() ? "stopped" : "over",
+            (unsigned)g_p.timeMs, (unsigned)g_p.lenMs, (unsigned)rcStop, (unsigned)rcEnd);
+}
+
+// SC_PROBE_HTTP: the request <folder>/sc-probe-http.txt describes sent once,
+// as a report is (serverSend), and its answer's status logged: does the
+// firmware send PATCH (sceHttpCreateRequestWithURL2), and does the server
+// take it? The file is the queue's kind, its values encoded:
+// url=, method=, headers=, body=, type=, end. Read and decoded in place in
+// g_probeBuf; the URL, headers and body are never logged.
+void probeHttpRun(const char* file) {
+    const int n = readFile(file, (char*)g_probeBuf, sizeof(g_probeBuf));
+    if (n < 0) {
+        logLine("probe: %s: open 0x%08X", file, (unsigned)n);
+        return;
+    }
+    const char *url = "", *method = "", *headers = "", *body = "", *type = "";
+    bool whole = false;
+    char* text = (char*)g_probeBuf;
+    for (char* line = text; *line;) {
+        char* end = line;
+        while (*end && *end != '\n') end++;
+        const bool last = !*end;
+        *end = 0;
+        int len = (int)(end - line);
+        if (len > 0 && line[len - 1] == '\r') line[--len] = 0;
+        char* eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq) {
+            *eq = 0;
+            char* v = eq + 1;
+            urlDecode(v, (int)(line + len - v), v, (int)(line + len - v) + 1, true);
+            if (same(line, "url")) url = v;
+            else if (same(line, "method")) method = v;
+            else if (same(line, "headers")) headers = v;
+            else if (same(line, "body")) body = v;
+            else if (same(line, "type")) type = v;
+        } else if (same(line, "end")) {
+            whole = true;
+        }
+        if (last) break;
+        line = end + 1;
+    }
+    if (!whole || !url[0]) {
+        logLine("probe: %s is %s", file, !whole ? "not whole (no end line)" : "without a url");
+        return;
+    }
+    if (!g_netFound) g_netFound = findLibraries("probe");
+    logLine("probe: run \"%s\": %s, %u bytes of body; sceHttpCreateRequestWithURL2 %s",
+            probeModeName(SC_PROBE_HTTP), method[0] ? method : "GET",
+            (unsigned)sceClibStrnlen(body, sizeof(g_probeBuf)),
+            g_httpRequest2.fn ? "found" : "missing");
+    int rcSsl = -1, rcHttp = -1;
+    if (!g_netFound || !httpStart("probe", &rcSsl, &rcHttp)) {
+        logLine("probe: no HTTP library");
+        return;
+    }
+    const int tmpl = httpTemplate("probe");
+    if (tmpl >= 0) {
+        HttpAsk ask = getWith(headers);
+        ask.method = method;
+        if (body[0]) {
+            ask.body = body;
+            ask.bodyLen = (uint32_t)sceClibStrnlen(body, sizeof(g_probeBuf));
+            ask.type = type[0] ? type : "application/json";
+        }
+        int conn, req, status = 0;
+        unsigned long long length = 0;
+        const int rc = httpOpen(tmpl, "probe", "the request", url, ask, &conn, &req);
+        if (rc >= 0) {
+            httpFn<FnStatus>(kHttpStatus)(req, &status);
+            httpFn<FnLength>(kHttpLength)(req, &length);
+            httpClose(conn, req);
+        }
+        logLine("probe: the request: 0x%08X, HTTP %d, %u bytes of answer", (unsigned)rc, status,
+                (unsigned)length);
+        httpFn<FnId>(kHttpDeleteTemplate)(tmpl);
+    }
+    httpEnd(rcSsl, rcHttp);
+    sceClibMemset(g_probeBuf, 0, sizeof(g_probeBuf));
+}
+
+// One run of a mode, for kProbeEndS from the first play. Its script, by the
+// second: SC_PROBE_HUGE and SC_PROBE_GROWING pause at 15, play at 20, seek
+// back to 5 s at 30, seek to 2 s short of what is written at 40, and skip to
+// the second file at 55; SC_PROBE_REOPEN opens the file again where it was
+// each time it stalls and every kProbeReopenS.
+void probeRun(int mode) {
+    g_p.mode = mode;
+    g_p.huge = mode == SC_PROBE_HUGE;
+    g_p.state = -1;
+    g_p.timeMs = 0;
+    g_p.mark = NULL;
+    g_p.stalled = 0;
+    g_p.stillUs = 0;
+    g_p.paused = 0;
+    g_p.samples = 0;
+    g_p.phase = 0;
+    if (g_p.source[0] && !probeSourceOpen()) probeSourceClose();
+    const int rcStart = musicTracked(0x30000);
+    logLine("probe: run \"%s\" (mode %d), from %s, %u ms ahead; music service started: 0x%08X",
+            probeModeName(mode), mode, g_p.src >= 0 ? g_p.source : "the tone",
+            (unsigned)kProbeLeadMs, (unsigned)rcStart);
+    if (!probeBegin(0)) {
+        musicTracked(0x30001);
+        probeSourceClose();
+        return;
+    }
+    probePlay("first play", 0);
+    const SceUInt64 playUs = sceKernelGetSystemTimeWide();
+    uint32_t nextSecond = 1, lastReopenS = 0;
+    int step = 0;
+    while (!probeStopAsked()) {
+        SceUInt timeout = 100 * 1000;
+        sceKernelWaitSema(g_probeSema, 1, &timeout);
+        const SceUInt64 now = sceKernelGetSystemTimeWide();
+        probeWrite(now);
+        const bool stalled = probeLook(now);
+        const uint32_t ms = (uint32_t)(now - playUs) / 1000u, s = ms / 1000u;
+        if (ms >= nextSecond * 1000u) probeSecond(nextSecond++);
+        if (s >= kProbeEndS) break;
+        if (mode == SC_PROBE_REOPEN) {
+            if ((stalled || s >= lastReopenS + kProbeReopenS) && !g_p.mark) {
+                lastReopenS = s;
+                probePlay(stalled ? "reopened, stalled" : "reopened, on time", g_p.timeMs);
+            }
+            continue;
+        }
+        static const uint32_t kAt[] = {15, 20, 30, 40, 55};
+        if (step >= 5 || s < kAt[step]) continue;
+        switch (step++) {
+        case 0: {
+            const int rc = musicEvent(kEventStop);
+            g_p.paused = 1;
+            g_p.mark = NULL;
+            logLine("probe: pause at %u ms: stop 0x%08X", (unsigned)g_p.timeMs, (unsigned)rc);
+            break;
+        }
+        case 1: {
+            const uint32_t at = g_p.timeMs;
+            const int rc = musicEvent(kEventPlay);
+            g_p.paused = 0;
+            logLine("probe: play again from %u ms: play 0x%08X", (unsigned)at, (unsigned)rc);
+            probeMark("play again", at);
+            break;
+        }
+        case 2:
+            probeSeek("seek back", 5000);
+            break;
+        case 3:
+            probeSeek("seek to near what is written", probeMsOf(g_p.bytes) - 2000);
+            break;
+        case 4: {
+            const int old = g_p.file;
+            if (probeBegin(1 - old)) {
+                probePlay("skip to the second file", 0);
+                sceIoRemove(g_p.path[old]);
+            }
+            break;
+        }
+        }
+    }
+    const int rcStop = musicEvent(kEventStop), rcEnd = musicTracked(0x30001);
+    probeSourceClose();
+    sceIoRemove(g_p.path[0]);
+    sceIoRemove(g_p.path[1]);
+    logLine("probe: run \"%s\" %s at %u ms, %u ms written: stop 0x%08X, end 0x%08X",
+            probeModeName(mode), probeStopAsked() ? "stopped" : "over", (unsigned)g_p.timeMs,
+            (unsigned)probeMsOf(g_p.bytes), (unsigned)rcStop, (unsigned)rcEnd);
+}
+
+// The run asked for: SC_PROBE_ALL runs the other three in turn.
+void probeStep() {
+    lock();
+    const int mode = g_probeWant;
+    const int app = g_probeWantApp;
+    const App* a = appAt(app);
+    const bool carry = g_carry != 0;
+    const bool go = mode > 0 && a && !carry;
+    g_probeWant = -1;
+    if (go) {
+        g_probeRunning = 1;
+        sceClibSnprintf(g_p.path[0], sizeof(g_p.path[0]), "%s/sc-probe-a.wav", a->folder);
+        sceClibSnprintf(g_p.path[1], sizeof(g_p.path[1]), "%s/sc-probe-b.wav", a->folder);
+        copyText(g_p.name, a->name, sizeof(g_p.name));
+        copyText(g_p.source, g_probeWantSource, sizeof(g_p.source));
+    }
+    unlock();
+    if (mode < 0) return;
+    if (!go) {
+        logLine("probe: mode %d not run%s", mode, carry ? ": a queue is carried on" : "");
+        return;
+    }
+    g_p.src = -1;
+    g_p.writeErrors = 0;
+    if (mode == SC_PROBE_HTTP) {
+        char file[160];
+        lock();
+        const App* who = appAt(app);
+        if (who) appPath(who, "sc-probe-http.txt", file, sizeof(file));
+        unlock();
+        logLine("probe: for %s, mode %d", g_p.name, mode);
+        if (who) probeHttpRun(file);
+    } else if (mode == SC_PROBE_FILE && !g_p.source[0]) {
+        logLine("probe: mode %d wants a file", mode);
+    } else if (findSvcObj("probe") && g_getSvcObj()) {
+        logLine("probe: for %s, mode %d, in %u s", g_p.name, mode, (unsigned)(kProbeDelayMs / 1000));
+        SceUInt timeout = kProbeDelayMs * 1000u;
+        sceKernelWaitSema(g_probeSema, 1, &timeout);
+        const int first = mode == SC_PROBE_ALL ? SC_PROBE_HUGE : mode;
+        const int last = mode == SC_PROBE_ALL ? SC_PROBE_REOPEN : mode;
+        if (mode == SC_PROBE_FILE && !probeStopAsked()) probeFileRun();
+        for (int m = first; m <= last && mode != SC_PROBE_FILE && !probeStopAsked(); m++) {
+            probeRun(m);
+            SceUInt pause = 3000 * 1000;
+            if (m < last) sceKernelWaitSema(g_probeSema, 1, &pause);
+        }
+    } else {
+        logLine("probe: no client for SceShell's music service");
+    }
+    lock();
+    g_probeRunning = 0;
+    __atomic_store_n(&g_probeStop, 0, __ATOMIC_SEQ_CST);
+    // A queue handed over meanwhile goes now.
+    if (g_playQueueDue && g_musicSema >= 0) sceKernelSignalSema(g_musicSema, 1);
+    unlock();
+    logLine("probe: done");
+}
+
+class ProbeThread : public paf::thread::Thread {
+public:
+    using paf::thread::Thread::Thread;
+
+    void EntryFunction() override {
+        while (!IsCanceled()) {
+            sceKernelWaitSema(g_probeSema, 1, NULL);
+            probeStep();
+        }
+    }
+};
+
+// The probe runs, or is about to: a queue handed over waits. Under g_lock.
+bool probeHolds() {
+    return g_probeRunning || g_probeWant >= 0;
+}
+
+// Has the probe stop, if it runs, or not begin. Under g_lock.
+void probeStop(const char* why) {
+    if (g_probeWant >= 0) {
+        g_probeWant = -1;
+        logLine("probe: not to run: %s", why);
+    }
+    if (!g_probeRunning || __atomic_load_n(&g_probeStop, __ATOMIC_SEQ_CST)) return;
+    __atomic_store_n(&g_probeStop, 1, __ATOMIC_SEQ_CST);
+    logLine("probe: to stop: %s", why);
+    sceKernelSignalSema(g_probeSema, 1);
+}
+
+// SC_CMD_PROBE_STREAM from an app. Under g_lock.
+void probeAsk(int app, uint32_t mode, const char* source) {
+    if (mode == SC_PROBE_STOP) {
+        probeStop("asked");
+        return;
+    }
+    if (mode > SC_PROBE_HTTP) {
+        logLine("probe: no mode %u", (unsigned)mode);
+        return;
+    }
+    if (g_probeRunning || g_probeWant >= 0) {
+        logLine("probe: one runs already");
+        return;
+    }
+    if (g_carry || g_playQueueDue) {
+        logLine("probe: not while a queue is carried on");
+        return;
+    }
+    if (ssHolds()) {
+        logLine("probe: not while the plugin is the Sendspin player");
+        return;
+    }
+    if (g_probeSema < 0) g_probeSema = sceKernelCreateSema("ShellCompanion::Probe", 0, 0, 1, NULL);
+    if (g_probeSema < 0) {
+        logLine("probe: its semaphore: 0x%08X", (unsigned)g_probeSema);
+        return;
+    }
+    if (!g_probeThread) {
+        const int rc = (new ProbeThread(kThreadPriority, kFetchStack, "ShellCompanion::Probe"))->Start();
+        if (rc < 0) {
+            logLine("probe: its thread not started: 0x%08X", (unsigned)rc);
+            return;
+        }
+        g_probeThread = 1;
+    }
+    g_probeWant = (int)mode;
+    g_probeWantApp = app;
+    copyText(g_probeWantSource, source, sizeof(g_probeWantSource));
+    sceKernelSignalSema(g_probeSema, 1);
 }
 
 // ── Remote control: the listener ────────────────────────────────────────────
@@ -5116,7 +5843,7 @@ void pushAll(int tmpl) {
         if (!sub->addr) continue;
         char ip[16];
         ipText(sub->addr, ip, sizeof(ip));
-        if ((uint32_t)((now - sub->seenUs) / 1000u) > kSubscriberIdleMs || sub->failures >= 3) {
+        if ((uint32_t)(now - sub->seenUs) / 1000u > kSubscriberIdleMs || sub->failures >= 3) {
             logLine("control: %s dropped (%s)", ip, sub->failures >= 3 ? "it took no pushes" : "idle");
             sub->addr = 0;
             continue;
@@ -5234,7 +5961,7 @@ int ctlThread(SceSize, void*) {
             lock();
             const uint32_t serial = g_ctlState.serial;
             unlock();
-            if (serial != pushedSerial || (uint32_t)((now - pushedUs) / 1000u) >= every) {
+            if (serial != pushedSerial || (uint32_t)(now - pushedUs) / 1000u >= every) {
                 pushedSerial = serial;
                 pushedUs = now;
                 pushAll(tmpl);
@@ -5303,6 +6030,1026 @@ void stopControl() {
         if (!still) break;
         sceKernelDelayThread(50 * 1000);
     }
+}
+
+// ── Sendspin: Music Assistant's player, carried on ──────────────────────────
+// (docs/PROTOCOL.md §8) An app that is a Sendspin player (Vita Music
+// Assistant) hands it over as it goes: the plugin connects to the server
+// with the app's client id, so that Music Assistant sees the same player,
+// and plays what the server streams through SceShell's music service, which
+// plays only files. So the PCM goes into a WAV as it comes, its header
+// rewritten with the size every kSsFlushMs, and the file is given to the
+// shell once kSsLeadMs of it is there. The shell is opened again where it
+// was whenever it stops or its clock stands while more is written, as a
+// file that grows may be read only as far as it was as it was opened
+// (SC_PROBE_REOPEN measures how long that takes). Past kSsRotateMs the PCM
+// goes to the other file, which the shell is given at the first's end.
+//
+// The Sendspin is its plain JSON, as the app speaks it: client/hello as a
+// player of PCM 44.1 kHz 16-bit stereo, with metadata@v1 and controller@v1
+// if the app asks, so that the Music row shows the song and its buttons go
+// to the server; client/state; stream/start, stream/clear (a seek or a
+// skip: the shell stopped, a new file begun), stream/end (pause or stop);
+// server/command's volume and mute, applied to the PCM as it is written, so
+// heard after what is buffered. Clock sync is not done: one player plays as
+// the shell goes. Over plain ws:// on the LAN, to an IPv4 address: there is
+// no TLS socket here. Its lines in the log begin "sendspin:"; no id is
+// logged.
+const uint32_t kSsLeadMs = 2000;           // written before the shell is given the file
+const uint32_t kSsFlushMs = 250;           // the file closed, its header rewritten
+const uint32_t kSsRotateMs = 20 * 60 * 1000;  // a file's longest, 211 MB
+const uint32_t kSsTickUs = 100 * 1000;
+const uint32_t kSsStillMs = 1000;          // the shell's clock still this long: opened again
+const uint32_t kSsGoneWaitMs = 30000;      // for the app to have gone
+const uint32_t kSsStatusUs = 2000000;
+const int kNetEagain = (int)0x80410123, kNetEtimedout = (int)0x8041013C,
+          kNetEinprogress = (int)0x80410124, kNetEalready = (int)0x80410125,
+          kNetEisconn = (int)0x80410138;
+
+LibFn g_netConnect = {"sceNetConnect", 0x11E5B6F6, 0};
+typedef int (*FnConnect)(int, const void*, unsigned);
+
+// Under g_lock: a start asked for, by whom; running; to stop, and why (the
+// thread reads g_ssStop without it).
+int g_ssWant = -1;
+int g_ssRunning;
+int g_ssStop;              // atomic: 1 to stop, 2 taken back by the app
+const char* g_ssStopWhy;
+SceUID g_ssSema = -1;
+int g_ssThread;
+
+// What the app handed over (SC_SENDSPIN). The thread's.
+struct SsCfg {
+    char titleId[12], folder[96], appName[48];
+    uint32_t ip;          // network order
+    int port;
+    char path[64];
+    char clientId[96];
+    char name[64], product[48], manufacturer[48], software[64];
+    int metadata, controller;  // the roles asked for beyond player@v1
+    uint32_t bufferBytes;
+    int staticDelayMs;
+    int volume, muted;    // as the app last had them
+};
+
+// The session. The thread's alone, but for the row's lines, which go to the
+// row under g_lock.
+struct Ss {
+    SsCfg cfg;
+    int sock;
+    WsIn in;
+    uint32_t rng;
+    int hello;            // server/hello seen
+    char server[64];
+    // A text message as it comes; too long for g_ssText, dropped.
+    uint32_t textN;
+    int textOver;
+    // A binary message: its header's bytes so far, and its type.
+    uint8_t binHead[9];
+    uint32_t binN;
+    // The stream: going (stream/start for the player in our format), and
+    // its files: the one written (wr) and the one with the shell (sh), each
+    // with its PCM so far, and the shell's file finished (it has all it
+    // will have) once the stream went on to the other.
+    int streaming;
+    char path[2][120];
+    SceUID fd;            // wr's, open between flushes
+    uint32_t bytes[2];
+    int wr, sh;           // -1 for none
+    int shDone;
+    SceUInt64 flushUs;
+    int tracked;          // the music service started (musicTracked)
+    // The shell, as last looked at.
+    int state;
+    uint32_t timeMs;
+    SceUInt64 stillUs;
+    int reopens, waitingLogged;
+    uint32_t gainQ15;
+    // A sample's first byte, held as its second comes in the next piece.
+    uint8_t half;
+    int haveHalf;
+    // What the server said: the group playing; the song; the controller's
+    // commands (kSsCmd* bits).
+    int groupPlaying;
+    uint32_t commands;
+    char title[160], artist[96], album[96];
+    int32_t progressMs, durationMs;
+    SceUInt64 progressUs;
+    // Counts, for the log.
+    uint32_t chunks, unknown;
+    SceUInt64 statusUs;
+};
+Ss g_ss;
+// The socket's reads go through g_probeBuf: the probe and Sendspin never run
+// at once (probeAsk, ssAsk). A text message is held in g_ssText.
+char g_ssText[4096];
+char g_ssOut[1536];
+enum { kSsCmdPlay = 1, kSsCmdPause = 2, kSsCmdNext = 4, kSsCmdPrevious = 8 };
+
+uint32_t ssRandom() {
+    uint32_t x = g_ss.rng ? g_ss.rng : 0x9E3779B9u;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return g_ss.rng = x;
+}
+
+bool ssStopAsked() {
+    return __atomic_load_n(&g_ssStop, __ATOMIC_SEQ_CST) != 0;
+}
+
+// The handover file (SC_SENDSPIN) into g_ss.cfg. true when whole and usable.
+bool ssReadCfg(const char* file) {
+    SsCfg* c = &g_ss.cfg;
+    const int n = readFile(file, g_ssText, sizeof(g_ssText));
+    if (n < 0 || !findText(g_ssText, "\nend")) {
+        logLine("sendspin: %s %s", file, n < 0 ? "is not there" : "is not whole");
+        return false;
+    }
+    char v[160];
+    // Decoded into out, cut to fit.
+    struct Get {
+        static void at(const char* key, char* out, int cap) {
+            char raw[192];
+            noteValue(g_ssText, key, raw, sizeof(raw));
+            urlDecode(raw, (int)sceClibStrnlen(raw, sizeof(raw)), out, cap, false);
+        }
+    };
+    Get::at("host", v, sizeof(v));
+    if (!parseIp(v, &c->ip)) {
+        logLine("sendspin: host= is not an IPv4 address; the app resolves a name first");
+        return false;
+    }
+    Get::at("port", v, sizeof(v));
+    c->port = v[0] ? toInt(v) : 8927;
+    Get::at("path", c->path, sizeof(c->path));
+    if (c->path[0] != '/') copyText(c->path, "/sendspin", sizeof(c->path));
+    Get::at("clientId", c->clientId, sizeof(c->clientId));
+    Get::at("name", c->name, sizeof(c->name));
+    Get::at("product", c->product, sizeof(c->product));
+    Get::at("manufacturer", c->manufacturer, sizeof(c->manufacturer));
+    Get::at("software", c->software, sizeof(c->software));
+    Get::at("roles", v, sizeof(v));
+    c->metadata = findText(v, "metadata") != NULL;
+    c->controller = findText(v, "controller") != NULL;
+    Get::at("bufferBytes", v, sizeof(v));
+    c->bufferBytes = v[0] ? toUint(v) : 2u * 1024u * 1024u;
+    Get::at("staticDelayMs", v, sizeof(v));
+    c->staticDelayMs = toInt(v);
+    Get::at("volume", v, sizeof(v));
+    c->volume = v[0] ? toInt(v) : 100;
+    if (c->volume < 0 || c->volume > 100) c->volume = 100;
+    Get::at("muted", v, sizeof(v));
+    c->muted = v[0] == '1';
+    if (!c->clientId[0] || c->port <= 0 || c->port > 65535) {
+        logLine("sendspin: %s has no clientId, or no port", file);
+        return false;
+    }
+    if (!c->name[0]) copyText(c->name, c->appName, sizeof(c->name));
+    return true;
+}
+
+// The status (SC_SENDSPIN_STATUS), for the app: state, the server, the song.
+void ssStatus(const char* state) {
+    static char text[640], path[160];
+    if (!g_ss.cfg.folder[0]) return;
+    uint32_t secs, micros;
+    splitUs(sceKernelGetSystemTimeWide(), &secs, &micros);
+    // The song's place, as metadata@v1 has it worked out.
+    int32_t pos = g_ss.progressMs;
+    if (g_ss.groupPlaying && g_ss.progressUs)
+        pos += (int32_t)((uint32_t)(sceKernelGetSystemTimeWide() - g_ss.progressUs) / 1000u);
+    if (g_ss.durationMs > 0 && pos > g_ss.durationMs) pos = g_ss.durationMs;
+    const int n = sceClibSnprintf(
+        text, sizeof(text),
+        "written=%u.%06u\nstate=%s\nserver=%s\nstreaming=%d\nplaying=%d\nvolume=%d\nmuted=%d\n"
+        "positionMs=%d\ndurationMs=%d\nend\n",
+        (unsigned)secs, (unsigned)micros, state, g_ss.server, g_ss.streaming, g_ss.groupPlaying,
+        g_ss.cfg.volume, g_ss.cfg.muted, (int)(pos > 0 ? pos : 0),
+        (int)(g_ss.durationMs > 0 ? g_ss.durationMs : 0));
+    sceClibSnprintf(path, sizeof(path), "%s/%s", g_ss.cfg.folder, SC_SENDSPIN_STATUS);
+    writeWhole(path, text, n);
+    g_ss.statusUs = sceKernelGetSystemTimeWide();
+}
+
+// A text message to the server. false when it could not go.
+bool ssSendText(const char* text, uint32_t n) {
+    uint8_t mask[4];
+    const uint32_t r = ssRandom();
+    for (int i = 0; i < 4; i++) mask[i] = (uint8_t)(r >> (8 * i));
+    static uint8_t frame[sizeof(g_ssOut) + 16];
+    const uint32_t len = wsFrame(frame, sizeof(frame), WS_TEXT, (const uint8_t*)text, n, mask);
+    return len && sendAll(g_ss.sock, (const char*)frame, (int)len);
+}
+
+bool ssSendControl(int op, const uint8_t* data, uint32_t n) {
+    uint8_t mask[4] = {(uint8_t)ssRandom(), 0x5A, 0xA5, 0x3C};
+    uint8_t frame[140];
+    const uint32_t len = wsFrame(frame, sizeof(frame), op, data, n > 125 ? 125 : n, mask);
+    return len && sendAll(g_ss.sock, (const char*)frame, (int)len);
+}
+
+// g_ssOut, made with ssjPut*, sent; false when it did not fit or go.
+bool ssSendOut(uint32_t n, const char* what) {
+    if (n >= sizeof(g_ssOut)) {
+        logLine("sendspin: %s too long to send (%u bytes)", what, (unsigned)n);
+        return false;
+    }
+    const bool ok = ssSendText(g_ssOut, n);
+    if (!ok) logLine("sendspin: %s not sent", what);
+    return ok;
+}
+
+void ssSendHello() {
+    const SsCfg* c = &g_ss.cfg;
+    char* o = g_ssOut;
+    uint32_t n = 0;
+    const uint32_t cap = sizeof(g_ssOut);
+    ssjPut(o, &n, cap, "{\"type\":\"client/hello\",\"payload\":{\"client_id\":");
+    ssjPutString(o, &n, cap, c->clientId);
+    ssjPut(o, &n, cap, ",\"name\":");
+    ssjPutString(o, &n, cap, c->name);
+    ssjPut(o, &n, cap, ",\"version\":1,\"device_info\":{\"product_name\":");
+    ssjPutString(o, &n, cap, c->product[0] ? c->product : "PS Vita");
+    ssjPut(o, &n, cap, ",\"manufacturer\":");
+    ssjPutString(o, &n, cap, c->manufacturer[0] ? c->manufacturer : "Sony");
+    ssjPut(o, &n, cap, ",\"software_version\":");
+    ssjPutString(o, &n, cap, c->software[0] ? c->software : "vita-shell-companion");
+    ssjPut(o, &n, cap, "},\"supported_roles\":[\"player@v1\"");
+    if (c->metadata) ssjPut(o, &n, cap, ",\"metadata@v1\"");
+    if (c->controller) ssjPut(o, &n, cap, ",\"controller@v1\"");
+    char num[64];
+    sceClibSnprintf(num, sizeof(num), "%u", (unsigned)c->bufferBytes);
+    ssjPut(o, &n, cap,
+           "],\"player@v1_support\":{\"supported_formats\":[{\"codec\":\"pcm\",\"channels\":2,"
+           "\"sample_rate\":44100,\"bit_depth\":16}],\"buffer_capacity\":");
+    ssjPut(o, &n, cap, num);
+    ssjPut(o, &n, cap, ",\"supported_commands\":[\"volume\",\"mute\"]}}}");
+    ssSendOut(n, "client/hello");
+}
+
+// client/state: synchronized, with the player's volume, mute and delay.
+void ssSendState() {
+    uint32_t n = (uint32_t)sceClibSnprintf(
+        g_ssOut, sizeof(g_ssOut),
+        "{\"type\":\"client/state\",\"payload\":{\"state\":\"synchronized\",\"player\":"
+        "{\"volume\":%d,\"muted\":%s,\"static_delay_ms\":%d}}}",
+        g_ss.cfg.volume, g_ss.cfg.muted ? "true" : "false", g_ss.cfg.staticDelayMs);
+    ssSendOut(n, "client/state");
+}
+
+void ssSendCommand(const char* command) {
+    uint32_t n = (uint32_t)sceClibSnprintf(
+        g_ssOut, sizeof(g_ssOut), "{\"type\":\"client/command\",\"payload\":{\"controller\":"
+        "{\"command\":\"%s\"}}}", command);
+    if (ssSendOut(n, "client/command")) logLine("sendspin: %s, from the row", command);
+}
+
+void ssSendGoodbye(const char* reason) {
+    uint32_t n = (uint32_t)sceClibSnprintf(
+        g_ssOut, sizeof(g_ssOut), "{\"type\":\"client/goodbye\",\"payload\":{\"reason\":\"%s\"}}",
+        reason);
+    ssSendOut(n, "client/goodbye");
+}
+
+// The gain the PCM is written with: volume as perceived loudness, about its
+// square as amplitude; none when muted.
+void ssGain() {
+    const uint32_t v = (uint32_t)g_ss.cfg.volume;
+    g_ss.gainQ15 = g_ss.cfg.muted ? 0 : v * v * 32768u / 10000u;
+}
+
+// ── The files and the shell ──
+// The file written now flushed: closed, its header given its size, opened
+// again to go on.
+void ssFlush() {
+    if (g_ss.wr < 0) return;
+    if (g_ss.fd >= 0) sceIoClose(g_ss.fd);
+    g_ss.fd = -1;
+    uint8_t h[kProbeWavHead];
+    probeHeader(h, g_ss.bytes[g_ss.wr]);
+    const int rcHead = writeAtStart(g_ss.path[g_ss.wr], h, sizeof(h));
+    g_ss.fd = sceIoOpen(g_ss.path[g_ss.wr], SCE_O_WRONLY | SCE_O_APPEND, 0);
+    if ((rcHead < 0 || g_ss.fd < 0) && g_ss.chunks < 1000)
+        logLine("sendspin: %s not flushed: header 0x%08X, open 0x%08X", g_ss.path[g_ss.wr],
+                (unsigned)rcHead, (unsigned)g_ss.fd);
+    g_ss.flushUs = sceKernelGetSystemTimeWide();
+}
+
+// A file begun for the stream: the other one than the shell has.
+void ssBeginFile() {
+    ssFlush();
+    if (g_ss.fd >= 0) sceIoClose(g_ss.fd);
+    g_ss.fd = -1;
+    const int f = g_ss.sh == 0 ? 1 : 0;
+    g_ss.wr = f;
+    g_ss.bytes[f] = 0;
+    g_ss.haveHalf = 0;
+    uint8_t h[kProbeWavHead];
+    probeHeader(h, 0);
+    g_ss.fd = sceIoOpen(g_ss.path[f], SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+    if (g_ss.fd < 0 || sceIoWrite(g_ss.fd, h, sizeof(h)) != (int)sizeof(h)) {
+        logLine("sendspin: %s not made: 0x%08X", g_ss.path[f], (unsigned)g_ss.fd);
+        if (g_ss.fd >= 0) sceIoClose(g_ss.fd);
+        g_ss.fd = -1;
+        g_ss.wr = -1;
+        return;
+    }
+    g_ss.flushUs = sceKernelGetSystemTimeWide();
+}
+
+// The shell stopped, and its file forgotten (and removed unless written now).
+void ssShellStop(const char* why) {
+    if (g_ss.sh < 0) return;
+    const int rc = musicEvent(kEventStop);
+    logLine("sendspin: the shell stopped (%s) at %u ms: 0x%08X", why, (unsigned)g_ss.timeMs,
+            (unsigned)rc);
+    if (g_ss.sh != g_ss.wr) sceIoRemove(g_ss.path[g_ss.sh]);
+    g_ss.sh = -1;
+    g_ss.shDone = 0;
+}
+
+// A file to the shell (f, the one written now unless the shell's finished
+// one is to play on), from atMs: stop, open, play, as the queue's songs are
+// handed over.
+void ssShellPlay(uint32_t atMs, const char* why, int f = -1) {
+    if (f < 0) f = g_ss.wr;
+    if (!g_ss.tracked) {
+        const int rc = musicTracked(0x30000);
+        g_ss.tracked = 1;
+        logLine("sendspin: music service started: 0x%08X", (unsigned)rc);
+    }
+    ssFlush();
+    const int old = g_ss.sh;
+    const int done = f != g_ss.wr;  // the shell's finished file, played on
+    const int rcStop = musicEvent(kEventStop), rcOpen = musicOpen(g_ss.path[f]);
+    const int rcTime = atMs ? musicSeekTime(atMs) : 0;
+    const int rcPlay = musicEvent(kEventPlay);
+    const int rcSeek = atMs ? musicEvent(kEventSeek) : 0;
+    if (g_ss.reopens < 20 || g_ss.reopens % 100 == 0)
+        logLine("sendspin: to the shell (%s), %u ms written, from %u ms: stop 0x%08X, open 0x%08X, "
+                "seek time 0x%08X, play 0x%08X, seek 0x%08X",
+                why, (unsigned)probeMsOf(g_ss.bytes[f]), (unsigned)atMs, (unsigned)rcStop,
+                (unsigned)rcOpen, (unsigned)rcTime, (unsigned)rcPlay, (unsigned)rcSeek);
+    if (old >= 0 && old != f && old != g_ss.wr) sceIoRemove(g_ss.path[old]);
+    g_ss.sh = f;
+    g_ss.shDone = done;
+    g_ss.stillUs = 0;
+    g_ss.timeMs = atMs;
+    g_ss.waitingLogged = 0;
+}
+
+// The stream's end (stream/end, or the session's): the shell stopped, the
+// files gone.
+void ssStreamEnd(const char* why) {
+    ssShellStop(why);
+    if (g_ss.fd >= 0) sceIoClose(g_ss.fd);
+    g_ss.fd = -1;
+    g_ss.wr = -1;
+    g_ss.streaming = 0;
+    sceIoRemove(g_ss.path[0]);
+    sceIoRemove(g_ss.path[1]);
+    if (g_ss.tracked) {
+        musicTracked(0x30001);
+        g_ss.tracked = 0;
+    }
+}
+
+// A sample with the gain.
+void ssScale(uint8_t* p) {
+    const int s = (int16_t)(p[0] | p[1] << 8);
+    const int v = (int)(((int32_t)s * (int32_t)g_ss.gainQ15) >> 15);
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+void ssWrite(const uint8_t* data, uint32_t n) {
+    if (!n) return;
+    if (g_ss.fd >= 0 && sceIoWrite(g_ss.fd, data, n) == (int)n) {
+        g_ss.bytes[g_ss.wr] += n;
+    } else if (g_ss.chunks < 5) {
+        logLine("sendspin: PCM not written");
+    }
+}
+
+// PCM from the server, written with the gain. The pieces the socket gives
+// may split a sample: its first byte is held for the next.
+void ssPcm(uint8_t* data, uint32_t n) {
+    if (!g_ss.streaming || g_ss.wr < 0 || !n) return;
+    if (g_ss.haveHalf) {
+        uint8_t s[2] = {g_ss.half, data[0]};
+        if (g_ss.gainQ15 < 32768u) ssScale(s);
+        ssWrite(s, 2);
+        g_ss.haveHalf = 0;
+        data++;
+        n--;
+    }
+    if (n & 1) {
+        g_ss.half = data[n - 1];
+        g_ss.haveHalf = 1;
+        n--;
+    }
+    if (g_ss.gainQ15 < 32768u)
+        for (uint32_t i = 0; i < n; i += 2) ssScale(data + i);
+    ssWrite(data, n);
+    // Long enough: the stream goes on in the other file, which the shell
+    // is given at this one's end.
+    if (g_ss.sh == g_ss.wr && g_ss.bytes[g_ss.wr] >= probeBytesOf(kSsRotateMs)) {
+        logLine("sendspin: %s has %u ms; the stream goes on in the other", g_ss.path[g_ss.wr],
+                (unsigned)probeMsOf(g_ss.bytes[g_ss.wr]));
+        ssFlush();
+        g_ss.shDone = 1;
+        ssBeginFile();
+    }
+}
+
+// Each tick: the file flushed, the shell given it, and kept playing.
+void ssShellTick(SceUInt64 now) {
+    if (!g_ss.streaming || g_ss.wr < 0) return;
+    if ((uint32_t)(now - g_ss.flushUs) >= kSsFlushMs * 1000u) ssFlush();
+    const uint32_t writtenMs = probeMsOf(g_ss.bytes[g_ss.wr]);
+    if (g_ss.sh < 0) {
+        if (writtenMs >= kSsLeadMs) ssShellPlay(0, "the stream's start");
+        return;
+    }
+    int state = 0;
+    uint32_t time = 0;
+    if (musicStatus(&state, &time) < 0) return;
+    const uint32_t before = g_ss.timeMs;
+    if (state != g_ss.state)
+        logLine("sendspin: the shell's state %d to %d at %u ms", g_ss.state, state, (unsigned)time);
+    g_ss.state = state;
+    g_ss.timeMs = time;
+    const uint32_t shMs = probeMsOf(g_ss.bytes[g_ss.sh]);
+    // The shell's file finished and played out: the other one from its start.
+    if (g_ss.shDone && time + 150 >= shMs) {
+        ssShellPlay(0, "the next file");
+        return;
+    }
+    if (state == 1 && time != before) {
+        g_ss.stillUs = 0;
+        return;
+    }
+    if (!g_ss.stillUs) g_ss.stillUs = now;
+    if (state == 1 && (uint32_t)(now - g_ss.stillUs) < kSsStillMs * 1000u) return;
+    // Stopped, or its clock still: opened again where it was, if more is
+    // written; else the stream is late, and it waits.
+    if (shMs > time + 500) {
+        g_ss.reopens++;
+        ssShellPlay(time, state == 1 ? "its clock stood" : "it stopped", g_ss.sh);
+    } else if (g_ss.shDone) {
+        ssShellPlay(0, "the next file");
+    } else if (!g_ss.waitingLogged) {
+        g_ss.waitingLogged = 1;
+        logLine("sendspin: the shell at %u ms has all that was written; waiting for the stream",
+                (unsigned)time);
+    }
+}
+
+// ── The row ──
+void ssRowLines() {
+    lock();
+    if (g_owner == kOwnerShell && g_ssRunning) {
+        if (g_ss.title[0]) {
+            fromUtf8(g_ss.title, g_title, 256);
+            fromUtf8(g_ss.artist, g_artist, 256);
+            fromUtf8(g_ss.album, g_album, 256);
+        } else {
+            fromUtf8(g_ss.cfg.name, g_title, 256);
+            fromUtf8(g_ss.server[0] ? g_ss.server : "Music Assistant", g_artist, 256);
+            g_album[0] = 0;
+        }
+        g_playing = g_ss.groupPlaying || g_ss.streaming ? 1 : 0;
+        g_artSerial = 0;
+    }
+    unlock();
+}
+
+// The row is the shell's while the plugin is the player, with an app's
+// lines; given back as it stops.
+void ssRowTake(int app) {
+    lock();
+    g_owner = kOwnerShell;
+    g_ownerApp = app;
+    g_pressTitle[0] = 0;
+    g_active = 1;
+    notesWanted();
+    unlock();
+    ssRowLines();
+}
+
+void ssRowGiveBack() {
+    lock();
+    if (g_owner == kOwnerShell && !g_carry) {
+        g_active = 0;
+        g_releaseDue = 1;
+        g_artSerial = 0;
+        g_playing = -1;
+        notesWanted();
+    }
+    unlock();
+}
+
+// A press on the row, to the server as the controller's command.
+void ssPress(int press) {
+    const char* cmd = press == SC_PRESS_NEXT     ? "next"
+                    : press == SC_PRESS_PREVIOUS ? "previous"
+                    : g_ss.groupPlaying          ? "pause"
+                                                 : "play";
+    const uint32_t bit = press == SC_PRESS_NEXT     ? kSsCmdNext
+                       : press == SC_PRESS_PREVIOUS ? kSsCmdPrevious
+                       : g_ss.groupPlaying          ? kSsCmdPause
+                                                    : kSsCmdPlay;
+    if (!g_ss.cfg.controller) {
+        logLine("sendspin: %s, from the row: not asked to be a controller; dropped", cmd);
+        return;
+    }
+    if (g_ss.commands && !(g_ss.commands & bit)) {
+        logLine("sendspin: %s, from the row: the server does not take it now", cmd);
+        return;
+    }
+    ssSendCommand(cmd);
+}
+
+// ── The server's messages ──
+// Whether roles (a stream message's) leaves the player out: a list without
+// "player" in it.
+bool ssNotForPlayer(const char* payload) {
+    const char* roles = ssjMember(payload, "roles");
+    return roles && !ssjArrayHas(roles, "player");
+}
+
+void ssStreamStart(const char* payload) {
+    const char* p = ssjMember(payload, "player");
+    if (!p) return;
+    char codec[16];
+    int32_t rate = 0, channels = 0, bits = 0;
+    ssjString(ssjMember(p, "codec"), codec, sizeof(codec));
+    ssjInt(ssjMember(p, "sample_rate"), &rate);
+    ssjInt(ssjMember(p, "channels"), &channels);
+    ssjInt(ssjMember(p, "bit_depth"), &bits);
+    const bool ours = same(codec, "pcm") && rate == 44100 && channels == 2 && bits == 16;
+    logLine("sendspin: stream/start: %s %d Hz, %d channels, %d bits%s%s", codec, (int)rate,
+            (int)channels, (int)bits, ours ? "" : ": not what the shell is given; asked again",
+            ours && g_ss.streaming ? ", the stream going on" : "");
+    if (!ours) {
+        const uint32_t n = (uint32_t)sceClibSnprintf(
+            g_ssOut, sizeof(g_ssOut),
+            "{\"type\":\"stream/request-format\",\"payload\":{\"player\":{\"codec\":\"pcm\","
+            "\"sample_rate\":44100,\"channels\":2,\"bit_depth\":16}}}");
+        ssSendOut(n, "stream/request-format");
+        return;
+    }
+    // A stream going on is updated, not cleared (the spec's stream/start).
+    if (g_ss.streaming) return;
+    g_ss.streaming = 1;
+    g_ss.reopens = 0;
+    g_ss.state = -1;
+    ssBeginFile();
+}
+
+void ssServerState(const char* payload) {
+    const char* m = ssjMember(payload, "metadata");
+    if (m) {
+        // Only fields there change; null clears.
+        const char* v;
+        if ((v = ssjMember(m, "title"))) ssjString(v, g_ss.title, sizeof(g_ss.title));
+        if ((v = ssjMember(m, "artist"))) ssjString(v, g_ss.artist, sizeof(g_ss.artist));
+        if ((v = ssjMember(m, "album"))) ssjString(v, g_ss.album, sizeof(g_ss.album));
+        const char* pr = ssjMember(m, "progress");
+        if (pr) {
+            int32_t at = 0, dur = 0, speed = 1000;
+            ssjInt(ssjMember(pr, "track_progress"), &at);
+            ssjInt(ssjMember(pr, "track_duration"), &dur);
+            ssjInt(ssjMember(pr, "playback_speed"), &speed);
+            g_ss.progressMs = at;
+            g_ss.durationMs = dur;
+            g_ss.progressUs = speed ? sceKernelGetSystemTimeWide() : 0;
+        }
+        ssRowLines();
+    }
+    const char* c = ssjMember(payload, "controller");
+    const char* cmds = c ? ssjMember(c, "supported_commands") : NULL;
+    if (cmds) {
+        g_ss.commands = (ssjArrayHas(cmds, "play") ? kSsCmdPlay : 0) |
+                        (ssjArrayHas(cmds, "pause") ? kSsCmdPause : 0) |
+                        (ssjArrayHas(cmds, "next") ? kSsCmdNext : 0) |
+                        (ssjArrayHas(cmds, "previous") ? kSsCmdPrevious : 0);
+        // None of them: anything goes, rather than nothing.
+    }
+}
+
+void ssText(const char* json) {
+    char type[32];
+    ssjString(ssjMember(json, "type"), type, sizeof(type));
+    const char* payload = ssjMember(json, "payload");
+    if (!payload) payload = json;
+    if (same(type, "server/hello")) {
+        ssjString(ssjMember(payload, "name"), g_ss.server, sizeof(g_ss.server));
+        for (char* c = g_ss.server; *c; c++)
+            if ((unsigned char)*c < 0x20) *c = ' ';  // one line in the status
+        const char* roles = ssjMember(payload, "active_roles");
+        logLine("sendspin: server/hello from \"%s\": player %s, metadata %s, controller %s",
+                g_ss.server, ssjArrayHas(roles, "player@v1") ? "on" : "off",
+                ssjArrayHas(roles, "metadata@v1") ? "on" : "off",
+                ssjArrayHas(roles, "controller@v1") ? "on" : "off");
+        g_ss.hello = 1;
+        ssSendState();
+        ssRowLines();
+        ssStatus("connected");
+    } else if (same(type, "stream/start")) {
+        ssStreamStart(payload);
+    } else if (same(type, "stream/clear")) {
+        if (ssNotForPlayer(payload) || !g_ss.streaming) return;
+        logLine("sendspin: stream/clear at %u ms, %u ms written", (unsigned)g_ss.timeMs,
+                (unsigned)(g_ss.wr >= 0 ? probeMsOf(g_ss.bytes[g_ss.wr]) : 0));
+        ssShellStop("stream/clear");
+        ssBeginFile();
+    } else if (same(type, "stream/end")) {
+        if (ssNotForPlayer(payload)) return;
+        logLine("sendspin: stream/end");
+        ssStreamEnd("stream/end");
+        ssRowLines();
+    } else if (same(type, "server/command")) {
+        const char* p = ssjMember(payload, "player");
+        char cmd[24];
+        ssjString(ssjMember(p, "command"), cmd, sizeof(cmd));
+        int32_t v = 0;
+        if (same(cmd, "volume") && ssjInt(ssjMember(p, "volume"), &v)) {
+            g_ss.cfg.volume = v < 0 ? 0 : v > 100 ? 100 : (int)v;
+        } else if (same(cmd, "mute")) {
+            const int b = ssjBool(ssjMember(p, "mute"));
+            if (b >= 0) g_ss.cfg.muted = b;
+        } else {
+            logLine("sendspin: server/command \"%s\" passed over", cmd);
+            return;
+        }
+        ssGain();
+        logLine("sendspin: volume %d%s, from the server", g_ss.cfg.volume,
+                g_ss.cfg.muted ? ", muted" : "");
+        ssSendState();
+    } else if (same(type, "server/state")) {
+        ssServerState(payload);
+    } else if (same(type, "group/update")) {
+        char state[16];
+        if (ssjString(ssjMember(payload, "playback_state"), state, sizeof(state))) {
+            g_ss.groupPlaying = same(state, "playing");
+            ssRowLines();
+        }
+    } else if (same(type, "server/time")) {
+    } else if (g_ss.unknown++ < 10) {
+        logLine("sendspin: %s passed over", type[0] ? type : "a message with no type");
+    }
+}
+
+// A piece of a message from the socket (wsFeed's callback).
+int ssPiece(void*, int op, const uint8_t* data, uint32_t n, int first, int last) {
+    if (op == WS_PING) return ssSendControl(WS_PONG, data, n) ? 0 : -10;
+    if (op == WS_PONG) return 0;
+    if (op == WS_CLOSE) {
+        const uint32_t code = n >= 2 ? (uint32_t)data[0] << 8 | data[1] : 0;
+        logLine("sendspin: the server closed the connection (%u)", (unsigned)code);
+        ssSendControl(WS_CLOSE, data, n >= 2 ? 2 : 0);
+        return -11;
+    }
+    if (op == WS_TEXT) {
+        if (first) {
+            g_ss.textN = 0;
+            g_ss.textOver = 0;
+        }
+        if (g_ss.textN + n < sizeof(g_ssText)) {
+            sceClibMemcpy(g_ssText + g_ss.textN, data, n);
+            g_ss.textN += n;
+        } else {
+            g_ss.textOver = 1;
+        }
+        if (last) {
+            g_ssText[g_ss.textN] = 0;
+            if (g_ss.textOver)
+                logLine("sendspin: a message of over %u bytes passed over",
+                        (unsigned)sizeof(g_ssText));
+            else
+                ssText(g_ssText);
+        }
+        return 0;
+    }
+    // Binary: its 9-byte header, then what it carries.
+    if (first) g_ss.binN = 0;
+    uint32_t i = 0;
+    while (g_ss.binN < 9 && i < n) g_ss.binHead[g_ss.binN++] = data[i++];
+    if (g_ss.binN < 9 || g_ss.binHead[0] != 4) return 0;
+    if (first || i > 0) g_ss.chunks++;
+    if (i < n) ssPcm((uint8_t*)data + i, n - i);
+    return 0;
+}
+
+// ── The connection ──
+bool ssConnect() {
+    const SsCfg* c = &g_ss.cfg;
+    g_ss.sock = netFn<FnSocket>(kNetSocket)("ShellCompanion::Sendspin", kAfInet, kSockStream, 0);
+    if (g_ss.sock < 0) {
+        logLine("sendspin: socket 0x%08X", (unsigned)g_ss.sock);
+        return false;
+    }
+    NetAddrIn to;
+    sceClibMemset(&to, 0, sizeof(to));
+    to.len = sizeof(to);
+    to.family = kAfInet;
+    to.port = netOrder16(c->port);
+    to.addr = c->ip;
+    // Without waiting on it, so that a stop is seen while it connects: up to
+    // 5 s.
+    setOpt(g_ss.sock, kSolSocket, kSoNbio, 1);
+    int rc = ((FnConnect)g_netConnect.fn)(g_ss.sock, &to, sizeof(to));
+    for (int i = 0; i < 100 && (rc == kNetEinprogress || rc == kNetEalready) && !ssStopAsked(); i++) {
+        sceKernelDelayThread(50 * 1000);
+        rc = ((FnConnect)g_netConnect.fn)(g_ss.sock, &to, sizeof(to));
+    }
+    if (rc == kNetEisconn) rc = 0;
+    setOpt(g_ss.sock, kSolSocket, kSoNbio, 0);
+    if (rc < 0) {
+        char ip[16];
+        ipText(c->ip, ip, sizeof(ip));
+        logLine("sendspin: connect to %s:%d: 0x%08X", ip, c->port, (unsigned)rc);
+        return false;
+    }
+    setOpt(g_ss.sock, kSolSocket, kSoRcvTimeo, 5000000);
+    setOpt(g_ss.sock, kSolSocket, kSoSndTimeo, 5000000);
+    // The upgrade, with a key of 16 random bytes.
+    uint8_t raw[16];
+    for (int i = 0; i < 16; i += 4) {
+        const uint32_t r = ssRandom();
+        for (int k = 0; k < 4; k++) raw[i + k] = (uint8_t)(r >> (8 * k));
+    }
+    char key[32], ip[16];
+    b64Encode(raw, sizeof(raw), key, sizeof(key));
+    ipText(c->ip, ip, sizeof(ip));
+    const int n = sceClibSnprintf(g_ssOut, sizeof(g_ssOut),
+                                  "GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\n"
+                                  "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+                                  "Sec-WebSocket-Version: 13\r\n\r\n",
+                                  c->path, ip, c->port, key);
+    if (!sendAll(g_ss.sock, g_ssOut, n)) {
+        logLine("sendspin: the upgrade not sent");
+        return false;
+    }
+    // Its answer, up to the blank line; what comes after is frames.
+    int got = 0;
+    const char* end = NULL;
+    while (!end && got < (int)sizeof(g_ssText) - 1) {
+        const int r = netFn<FnRecv>(kNetRecv)(g_ss.sock, g_ssText + got,
+                                               sizeof(g_ssText) - 1 - got, 0);
+        if (r <= 0) break;
+        got += r;
+        g_ssText[got] = 0;
+        end = findText(g_ssText, "\r\n\r\n");
+    }
+    char line[64];
+    int k = 0;
+    while (k < got && k < (int)sizeof(line) - 1 && g_ssText[k] != '\r') line[k] = g_ssText[k], k++;
+    line[k] = 0;
+    if (!end || !startsWith(g_ssText, "HTTP/1.1 101")) {
+        logLine("sendspin: the upgrade answered \"%s\"%s", line, end ? "" : ", cut short");
+        return false;
+    }
+    wsInit(&g_ss.in);
+    setOpt(g_ss.sock, kSolSocket, kSoRcvTimeo, (int)kSsTickUs);
+    const int after = got - (int)(end + 4 - g_ssText);
+    if (after > 0) {
+        sceClibMemcpy(g_probeBuf, end + 4, after);
+        if (wsFeed(&g_ss.in, g_probeBuf, (uint32_t)after, ssPiece, NULL) != 0) return false;
+    }
+    return true;
+}
+
+void ssClose() {
+    if (g_ss.sock >= 0) netFn<FnClose>(kNetClose)(g_ss.sock);
+    g_ss.sock = -1;
+}
+
+// One connection, to its end: false when it was lost, true when stopped.
+bool ssSession(int app) {
+    if (!ssConnect()) {
+        ssClose();
+        return ssStopAsked();
+    }
+    logLine("sendspin: connected; client/hello as \"%s\"", g_ss.cfg.name);
+    ssSendHello();
+    g_ss.hello = 0;
+    ssRowTake(app);
+    SceUInt64 helloUs = sceKernelGetSystemTimeWide();
+    bool lost = false;
+    while (!ssStopAsked()) {
+        const int r = netFn<FnRecv>(kNetRecv)(g_ss.sock, g_probeBuf, sizeof(g_probeBuf), 0);
+        if (r > 0) {
+            const int rc = wsFeed(&g_ss.in, g_probeBuf, (uint32_t)r, ssPiece, NULL);
+            if (rc != 0) {
+                if (rc != -11) logLine("sendspin: the connection's frames: %d", rc);
+                lost = true;
+                break;
+            }
+        } else if (r == 0 || (r != kNetEagain && r != kNetEtimedout)) {
+            logLine("sendspin: the connection lost: 0x%08X", (unsigned)r);
+            lost = true;
+            break;
+        }
+        const SceUInt64 now = sceKernelGetSystemTimeWide();
+        if (!g_ss.hello && (uint32_t)(now - helloUs) > 10000000u) {
+            logLine("sendspin: no server/hello in 10 s");
+            lost = true;
+            break;
+        }
+        const int press = __atomic_exchange_n(&g_carryPress, 0, __ATOMIC_SEQ_CST);
+        if (press) ssPress(press);
+        ssShellTick(now);
+        if ((uint32_t)(now - g_ss.statusUs) >= kSsStatusUs)
+            ssStatus(g_ss.streaming ? "streaming" : "connected");
+    }
+    if (!lost) ssSendGoodbye(__atomic_load_n(&g_ssStop, __ATOMIC_SEQ_CST) == 2 ? "restart"
+                                                                              : "shutdown");
+    ssStreamEnd(lost ? "the connection lost" : "stopped");
+    ssClose();
+    return !lost;
+}
+
+// The handover, run: the app's file read, the app gone, and the connection
+// kept until stopped, made again when lost (after 1, 2, 5, 10 s, then each
+// 30 s, for up to 30 min of failures in a row).
+void ssRun(int app) {
+    sceClibMemset(&g_ss, 0, sizeof(g_ss));
+    g_ss.sock = g_ss.fd = -1;
+    g_ss.wr = g_ss.sh = -1;
+    g_ss.rng = (uint32_t)sceKernelGetSystemTimeWide() ^ 0xA5A5F00Du;
+    char file[160];
+    lock();
+    const App* a = appAt(app);
+    if (a) {
+        copyText(g_ss.cfg.titleId, a->titleId, sizeof(g_ss.cfg.titleId));
+        copyText(g_ss.cfg.folder, a->folder, sizeof(g_ss.cfg.folder));
+        copyText(g_ss.cfg.appName, a->name, sizeof(g_ss.cfg.appName));
+        appPath(a, SC_SENDSPIN, file, sizeof(file));
+    }
+    unlock();
+    if (!a || !ssReadCfg(file)) {
+        ssStatus("failed");
+        return;
+    }
+    ssGain();
+    sceClibSnprintf(g_ss.path[0], sizeof(g_ss.path[0]), "%s/sc-sendspin-a.wav", g_ss.cfg.folder);
+    sceClibSnprintf(g_ss.path[1], sizeof(g_ss.path[1]), "%s/sc-sendspin-b.wav", g_ss.cfg.folder);
+    if (!g_netFound && !netFind()) {
+        logLine("sendspin: no SceNet");
+        ssStatus("failed");
+        return;
+    }
+    if (!g_netConnect.fn) {
+        uintptr_t fn = 0;
+        const int rc = scGetModuleExportFunc("SceNet", kNetLibrary, g_netConnect.nid, &fn);
+        g_netConnect.fn = rc >= 0 ? fn : 0;
+        if (rc < 0) {
+            logLine("sendspin: sceNetConnect not in SceNet: 0x%08X", (unsigned)rc);
+            ssStatus("failed");
+            return;
+        }
+    }
+    if (!findSvcObj("sendspin") || !g_getSvcObj()) {
+        logLine("sendspin: no client for SceShell's music service");
+        ssStatus("failed");
+        return;
+    }
+    ssStatus("waiting");
+    // The app gone first, so that its own connection has closed.
+    for (uint32_t waited = 0; !ssStopAsked(); waited += 250) {
+        SceUID pid = -1;
+        if (sceAppMgrGetIdByName(&pid, g_ss.cfg.titleId) < 0) {
+            logLine("sendspin: %s gone, %s s after it handed over", g_ss.cfg.appName,
+                    secsOf(waited).s);
+            break;
+        }
+        if (waited >= kSsGoneWaitMs) {
+            logLine("sendspin: %s still runs after %u s; connecting anyway", g_ss.cfg.appName,
+                    (unsigned)(kSsGoneWaitMs / 1000));
+            break;
+        }
+        sceKernelDelayThread(250 * 1000);
+    }
+    // The queue the shell carried on has stopped (ssAsk asked it to).
+    for (int i = 0; i < 50; i++) {
+        lock();
+        const int carry = g_carry;
+        unlock();
+        if (!carry) break;
+        sceKernelDelayThread(100 * 1000);
+    }
+    static const uint32_t kBackoffS[] = {1, 2, 5, 10, 30};
+    uint32_t failedS = 0;
+    int tries = 0;
+    while (!ssStopAsked()) {
+        ssStatus("connecting");
+        const SceUInt64 began = sceKernelGetSystemTimeWide();
+        if (ssSession(app)) break;
+        // A connection that held a minute starts the counts again.
+        if ((uint32_t)(sceKernelGetSystemTimeWide() - began) > 60000000u) {
+            tries = 0;
+            failedS = 0;
+        }
+        const uint32_t wait = kBackoffS[tries < 4 ? tries : 4];
+        tries++;
+        failedS += wait;
+        if (failedS > 30 * 60) {
+            logLine("sendspin: no connection for 30 min; given up");
+            break;
+        }
+        if (tries <= 5 || tries % 20 == 0)
+            logLine("sendspin: connecting again in %u s (try %d)", (unsigned)wait, tries + 1);
+        ssStatus("reconnecting");
+        ssRowLines();
+        SceUInt timeout = wait * 1000000u;
+        sceKernelWaitSema(g_ssSema, 1, &timeout);
+    }
+    ssRowGiveBack();
+}
+
+void ssStep() {
+    lock();
+    const int app = g_ssWant;
+    g_ssWant = -1;
+    if (app >= 0) g_ssRunning = 1;
+    unlock();
+    if (app < 0) return;
+    ssRun(app);
+    lock();
+    const int how = __atomic_load_n(&g_ssStop, __ATOMIC_SEQ_CST);
+    const char* why = g_ssStopWhy;
+    g_ssRunning = 0;
+    __atomic_store_n(&g_ssStop, 0, __ATOMIC_SEQ_CST);
+    g_ssStopWhy = NULL;
+    // A queue handed over meanwhile goes now.
+    if (g_playQueueDue && g_musicSema >= 0) sceKernelSignalSema(g_musicSema, 1);
+    unlock();
+    g_ss.groupPlaying = 0;
+    ssStatus("stopped");
+    logLine("sendspin: stopped%s%s", how ? ": " : "", how && why ? why : "");
+}
+
+class SsThread : public paf::thread::Thread {
+public:
+    using paf::thread::Thread::Thread;
+
+    void EntryFunction() override {
+        while (!IsCanceled()) {
+            sceKernelWaitSema(g_ssSema, 1, NULL);
+            ssStep();
+        }
+    }
+};
+
+// Sendspin runs, or is about to. Under g_lock.
+bool ssHolds() {
+    return g_ssRunning || g_ssWant >= 0;
+}
+
+// Stops being the player, if it is (how 2: the app takes it back). Under
+// g_lock.
+void ssStop(const char* why, int how = 1) {
+    if (g_ssWant >= 0) {
+        g_ssWant = -1;
+        logLine("sendspin: not to start: %s", why);
+    }
+    if (!g_ssRunning || __atomic_load_n(&g_ssStop, __ATOMIC_SEQ_CST)) return;
+    g_ssStopWhy = why;
+    __atomic_store_n(&g_ssStop, how, __ATOMIC_SEQ_CST);
+    logLine("sendspin: to stop: %s", why);
+    sceKernelSignalSema(g_ssSema, 1);
+}
+
+// SC_CMD_SENDSPIN_START from an app. Under g_lock.
+void ssAsk(int app) {
+    if (g_ssRunning || g_ssWant >= 0) {
+        logLine("sendspin: already the player; %s's start passed over", appName(app));
+        return;
+    }
+    if (g_probeRunning || g_probeWant >= 0) {
+        logLine("sendspin: not while the probe runs");
+        return;
+    }
+    if (g_ssSema < 0) g_ssSema = sceKernelCreateSema("ShellCompanion::Sendspin", 0, 0, 1, NULL);
+    if (g_ssSema < 0) {
+        logLine("sendspin: its semaphore: 0x%08X", (unsigned)g_ssSema);
+        return;
+    }
+    if (!g_ssThread) {
+        const int rc = (new SsThread(kThreadPriority, kFetchStack, "ShellCompanion::Sendspin"))->Start();
+        if (rc < 0) {
+            logLine("sendspin: its thread not started: 0x%08X", (unsigned)rc);
+            return;
+        }
+        g_ssThread = 1;
+    }
+    stopCarry("Sendspin takes the music", kEndStopped);
+    g_playQueueDue = 0;
+    g_ssWant = app;
+    sceKernelSignalSema(g_ssSema, 1);
 }
 
 // ── An app's update ─────────────────────────────────────────────────────────
@@ -5560,7 +7307,15 @@ struct DlItem {
     uint64_t total;   // its full size, 0 when not known
     char queue[16];   // the download queue's id and the item's, "" for none
     char item[16];
+    int pagesDone, pageCount;  // a "pages" download's, else 0
 };
+// The download thread's: a page of a "pages" download as it is fetched; the
+// page it is, for the notification's line (dlSub), "" for none; and the
+// fetch's begun and whole lines left out of the log, as a chapter has a
+// file a page.
+DlItem g_dlPage;
+char g_dlPageNote[24];
+int g_dlQuiet;
 DlItem g_dl[SC_MAX_DOWNLOADS];
 int g_dlCount;
 int g_dlRunning;  // under g_lock: the download thread runs
@@ -5577,8 +7332,12 @@ int g_dlPendingCount;
 App g_dlFor;
 struct DlHead {
     int notify;
+    int battery;         // battery=: wait below this percent off power, 0 never
     char headers[2048];  // URL-decoded: "Name: value" lines
 };
+// Under g_lock: the battery's percent while the downloads wait for power
+// (dlBatteryHold), else -1.
+int g_dlBattery = -1;
 DlHead g_dlHead;
 // The download thread's: the list a line at a time, as the queue is read
 // (LineReader), with room for an add's profile; a piece of a file on its way
@@ -5723,6 +7482,7 @@ enum { kFKey, kFPath, kFSize, kFTitle, kFKind, kFArg1, kFArg2, kFArg3, kFMax };
 // waiting. false when it is not there or not whole.
 bool dlReadList() {
     sceClibMemset(&g_dlHead, 0, sizeof(g_dlHead));
+    g_dlHead.battery = SC_BATTERY_PAUSE_PERCENT;
     if (!dlOpenList()) return false;
     int count = 0;
     bool whole = false;
@@ -5734,11 +7494,15 @@ bool dlReadList() {
         }
         if (startsWith(g_dlLine, "notify=")) {
             g_dlHead.notify = g_dlLine[7] == '1';
+        } else if (startsWith(g_dlLine, "battery=")) {
+            const int pct = toInt(g_dlLine + 8);
+            g_dlHead.battery = pct < 0 ? 0 : pct > 100 ? 100 : pct;
         } else if (startsWith(g_dlLine, "headers=")) {
             urlDecode(g_dlLine + 8, (int)sceClibStrnlen(g_dlLine + 8, sizeof(g_dlLine)),
                       g_dlHead.headers, sizeof(g_dlHead.headers), true);
         } else if (startsWith(g_dlLine, "item=") && count < SC_MAX_DOWNLOADS) {
-            if (dlFields(g_dlLine + 5, f, kFMax) <= kFArg1) continue;
+            const int nf = dlFields(g_dlLine + 5, f, kFMax);
+            if (nf <= kFArg1) continue;
             const uint64_t bytes = fileSize(f[kFPath]);  // not under the lock: the card
             lock();
             DlItem* d = &g_dl[count];
@@ -5747,6 +7511,7 @@ bool dlReadList() {
             d->state = kDlWaiting;
             d->total = toU64(f[kFSize]);
             d->bytes = bytes;
+            if (same(f[kFKind], "pages") && nf > kFArg2) d->pageCount = toInt(f[kFArg2]);
             unlock();
             count++;
         }
@@ -5771,19 +7536,28 @@ void dlStatus(bool running) {
         uint32_t secs, micros;
         splitUs(sceKernelGetSystemTimeWide(), &secs, &micros);
         lock();
-        const int paused = g_dlPaused;
+        const int battery = g_dlBattery;
+        const int paused = g_dlPaused       ? SC_PAUSED_ASKED
+                         : battery >= 0     ? SC_PAUSED_BATTERY
+                                            : 0;
         unlock();
         int n = sceClibSnprintf(text, sizeof(text), "written=%u.%06u\nrunning=%d\npaused=%d\n",
                                 (unsigned)secs, (unsigned)micros, running ? 1 : 0, paused);
+        if (battery >= 0)
+            n += sceClibSnprintf(text + n, sizeof(text) - n, "battery=%d\n", battery);
         rc = sceIoWrite(fd, text, (SceSize)n) == n ? 0 : -1;
         for (int i = 0; rc == 0; i++) {
             lock();
             const bool more = i < g_dlCount;
             if (more) {
                 const DlItem* d = &g_dl[i];
-                n = sceClibSnprintf(text, sizeof(text), "item=%s\t%s\t%s\t%s\t%s\t%s\n", d->key,
+                n = sceClibSnprintf(text, sizeof(text), "item=%s\t%s\t%s\t%s\t%s\t%s", d->key,
                                     kDlStateNames[d->state], bigOf(d->bytes).s,
                                     bigOf(d->total).s, d->queue, d->item);
+                if (d->pageCount > 0)
+                    n += sceClibSnprintf(text + n, sizeof(text) - n, "\t%d/%d", d->pagesDone,
+                                         d->pageCount);
+                n += sceClibSnprintf(text + n, sizeof(text) - n, "\n");
             }
             unlock();
             if (!more) break;
@@ -6204,10 +7978,12 @@ bool dlAdd(int tmpl, DlItem* d, const char* server, const char* query, const cha
 
 // What the notification's second line says, for n of count.
 void dlSub(char* out, int cap, int n, int count, const char* what) {
+    char page[32] = "";
+    if (g_dlPageNote[0]) sceClibSnprintf(page, sizeof(page), "%s \xC2\xB7 ", g_dlPageNote);
     if (count > 1)
-        sceClibSnprintf(out, cap, "%d of %d \xC2\xB7 %s", n + 1, count, what);
+        sceClibSnprintf(out, cap, "%d of %d \xC2\xB7 %s%s", n + 1, count, page, what);
     else
-        sceClibSnprintf(out, cap, "%s", what);
+        sceClibSnprintf(out, cap, "%s%s", page, what);
 }
 
 enum { kPrepReady, kPrepGone, kPrepNotReady, kPrepStopped };
@@ -6262,6 +8038,66 @@ int dlPrepared(int tmpl, DlItem* d, const char* server, const char* title, int n
     }
 }
 
+// ── The battery ──
+// A download goes on only while the battery holds: below the list's
+// battery= percent with the Vita off power, it waits, the connection
+// closed, until the Vita is on power or the battery is 5 points above that,
+// and the notification says why. ScePower is imported as it is: a library
+// every process may call, which SceShell's own battery plugins (ShellBat)
+// import too.
+const uint32_t kDlBatteryLookMs = 5000;
+
+// The battery's percent, or -1 when it is on power or holds (or cannot be
+// read): what the downloads wait on.
+int dlBatteryLow(int resumeAbove = 0) {
+    const int limit = g_dlHead.battery;
+    if (limit <= 0) return -1;
+    if (scePowerIsPowerOnline() > 0 || scePowerIsBatteryCharging() > 0) return -1;
+    const int pct = scePowerGetBatteryLifePercent();
+    if (pct < 0) return -1;
+    return pct < limit + resumeAbove ? pct : -1;
+}
+
+// Waits while the battery is low (dlBatteryLow), the notification saying so
+// for download n of count. 0 when it was not, 1 when it waited and holds
+// now, -1 when the downloads were stopped meanwhile.
+int dlBatteryHold(int n, int count) {
+    int pct = dlBatteryLow();
+    if (pct < 0) return 0;
+    logLine("download: the battery at %d%%, off power: waiting for it (below %d%%)", pct,
+            g_dlHead.battery);
+    const SceUInt64 began = sceKernelGetSystemTimeWide();
+    int shownPct = -1;
+    while (pct >= 0) {
+        if (pct != shownPct) {
+            lock();
+            g_dlBattery = pct;
+            unlock();
+            char line[64], sub[96];
+            sceClibSnprintf(line, sizeof(line), "Paused: battery at %d%%", pct);
+            sceClibSnprintf(sub, sizeof(sub), "Charge the Vita to go on (%d of %d)", n + 1, count);
+            notifyShow(line, sub, -1.0f);
+            dlStatus(true);
+            shownPct = pct;
+        }
+        if (!dlWait(kDlBatteryLookMs)) {
+            lock();
+            g_dlBattery = -1;
+            unlock();
+            return -1;
+        }
+        pct = dlBatteryLow(5);
+    }
+    lock();
+    g_dlBattery = -1;
+    unlock();
+    logLine("download: going on after %s s waiting for power (battery %d%%%s)",
+            secsOf(msSince(began)).s, scePowerGetBatteryLifePercent(),
+            scePowerIsPowerOnline() > 0 ? ", on power" : "");
+    dlStatus(true);
+    return 1;
+}
+
 // kDl* of fetching url into path from where the file ends: the bytes and full
 // size in d as they come.
 int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* extra,
@@ -6271,6 +8107,7 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
     SceUInt64 prepareFrom = 0;
     for (;;) {
         if (dlStopped()) return kDlGoing;
+        if (dlBatteryHold(n, count) < 0) return kDlGoing;
         uint64_t have = fileSize(path);
         if (d->total > 0 && have == d->total) return kDlDone;
         if (have > 0) sceClibSnprintf(range, sizeof(range), "bytes=%s-", bigOf(have).s);
@@ -6331,8 +8168,9 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
                     logLine("download: %s: its file not opened: 0x%08X", label, (unsigned)fd);
                     return kDlFailed;
                 }
-                logLine("download: %s: %s from %s MB of %s MB", label,
-                        append ? "going on" : "begun", mb64Of(have).s, mb64Of(d->total).s);
+                if (!g_dlQuiet)
+                    logLine("download: %s: %s from %s MB of %s MB", label,
+                            append ? "going on" : "begun", mb64Of(have).s, mb64Of(d->total).s);
                 const SceUInt64 began = sceKernelGetSystemTimeWide();
                 SceUInt64 shown = 0, logged = began;
                 uint64_t shownBytes = have;
@@ -6367,6 +8205,10 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
                     }
                     have += (uint64_t)got;
                     const SceUInt64 now = sceKernelGetSystemTimeWide();
+                    if (now - shown >= kDlStatusEveryMs * 1000ull && dlBatteryLow() >= 0) {
+                        rc = 3;  // waited for with the connection closed, then gone on
+                        break;
+                    }
                     if (now - shown >= kDlStatusEveryMs * 1000ull) {
                         lock();
                         d->bytes = have;
@@ -6408,9 +8250,15 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
                     logLine("download: %s: stopped at %s MB", label, mb64Of(have).s);
                     return kDlGoing;
                 }
+                if (rc == 3) {
+                    logLine("download: %s: held at %s MB for the battery", label,
+                            mb64Of(have).s);
+                    continue;  // dlBatteryHold waits, then it goes on from there
+                }
                 if (rc == 0 && (d->total == 0 || have >= d->total)) {
-                    logLine("download: %s: whole, %s MB, %s MB of it in %s s", label,
-                            mb64Of(have).s, mb64Of(have - from).s, secsOf(ms).s);
+                    if (!g_dlQuiet)
+                        logLine("download: %s: whole, %s MB, %s MB of it in %s s", label,
+                                mb64Of(have).s, mb64Of(have - from).s, secsOf(ms).s);
                     lock();
                     if (d->total == 0) d->total = have;
                     unlock();
@@ -6431,12 +8279,138 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
     }
 }
 
+// ── A chapter: a file a page ──
+// A "pages" download: a URL template and a file template with {page} in
+// them, the page number from `first` on, or {page:N}, padded to N digits;
+// and how many pages. Each page is fetched as a url download is, into
+// "<file>.part", moved in once whole: a page whose file is there is done,
+// with no request for it when the chapter goes on.
+bool pageExpand(const char* tmpl, int page, char* out, int cap) {
+    int n = 0;
+    for (const char* p = tmpl; *p;) {
+        int digits = 0;
+        const char* after = NULL;
+        if (startsWith(p, "{page}")) {
+            after = p + 6;
+        } else if (startsWith(p, "{page:") && p[6] >= '1' && p[6] <= '9' && p[7] == '}') {
+            digits = p[6] - '0';
+            after = p + 8;
+        }
+        if (after) {
+            char v[16];
+            const int k = sceClibSnprintf(v, sizeof(v), "%0*d", digits, page);
+            for (int i = 0; i < k; i++, n++)
+                if (n < cap - 1) out[n] = v[i];
+            p = after;
+        } else {
+            if (n < cap - 1) out[n] = *p;
+            n++;
+            p++;
+        }
+    }
+    if (n >= cap) {
+        out[0] = 0;
+        return false;
+    }
+    out[n] = 0;
+    return true;
+}
+
+// The download's pages, f's: URL template, "count[,first]", extra header
+// lines. Its state when it ends.
+int dlPages(int tmpl, DlItem* d, char** f, int nf, int n, int count, const char* label) {
+    const char* const urlTmpl = f[kFArg1];
+    const char* const fileTmpl = f[kFPath];
+    const char* const extra = nf > kFArg3 ? f[kFArg3] : NULL;
+    const int pages = nf > kFArg2 ? toInt(f[kFArg2]) : 0;
+    const char* comma = nf > kFArg2 ? findText(f[kFArg2], ",") : NULL;
+    const int first = comma ? toInt(comma + 1) : 0;
+    if (!urlTmpl[0] || !findText(urlTmpl, "{page") || !findText(fileTmpl, "{page") ||
+        pages <= 0 || pages > SC_MAX_PAGES || first < 0) {
+        logLine("download: %s: pages need {page} in the URL and the file, and 1 to %d pages", label,
+                SC_MAX_PAGES);
+        return kDlFailed;
+    }
+    static char url[1024], path[200], part[208];
+    lock();
+    d->pageCount = pages;
+    d->pagesDone = 0;
+    d->bytes = 0;
+    unlock();
+    int state = kDlDone, fetched = 0;
+    const SceUInt64 began = sceKernelGetSystemTimeWide();
+    for (int i = 0; i < pages && state == kDlDone; i++) {
+        const int page = first + i;
+        if (!pageExpand(urlTmpl, page, url, sizeof(url)) ||
+            !pageExpand(fileTmpl, page, path, sizeof(path))) {
+            logLine("download: %s: page %d too long a URL or file name", label, page);
+            state = kDlFailed;
+            break;
+        }
+        // The pages' folder, its last level, made with the first page.
+        if (i == 0) {
+            char dir[200];
+            copyText(dir, path, sizeof(dir));
+            int k = (int)sceClibStrnlen(dir, sizeof(dir));
+            while (k > 0 && dir[k - 1] != '/') k--;
+            if (k > 1) {
+                dir[k - 1] = 0;
+                sceIoMkdir(dir, 0777);
+            }
+        }
+        uint64_t size = fileSize(path);
+        if (size == 0) {
+            sceClibSnprintf(part, sizeof(part), "%s.part", path);
+            sceClibSnprintf(g_dlPageNote, sizeof(g_dlPageNote), "page %d/%d", i + 1, pages);
+            char pageLabel[64];
+            sceClibSnprintf(pageLabel, sizeof(pageLabel), "%s page %d", label, page);
+            sceClibMemset(&g_dlPage, 0, sizeof(g_dlPage));
+            g_dlQuiet = 1;
+            state = dlFetch(tmpl, &g_dlPage, url, part, extra, f[kFTitle], n, count, pageLabel);
+            g_dlQuiet = 0;
+            if (state == kDlDone) {
+                sceIoRemove(path);
+                const int rc = sceIoRename(part, path);
+                if (rc < 0) {
+                    logLine("download: %s: page %d not moved in: 0x%08X", label, page, (unsigned)rc);
+                    state = kDlFailed;
+                }
+                size = fileSize(path);
+                fetched++;
+            }
+        }
+        if (state == kDlDone) {
+            lock();
+            d->pagesDone = i + 1;
+            d->bytes += size;
+            unlock();
+            dlStatus(true);
+        }
+    }
+    g_dlPageNote[0] = 0;
+    logLine("download: %s: %s, %d of %d pages, %d fetched now, %s MB, in %s s", label,
+            kDlStateNames[state], d->pagesDone, pages, fetched, mb64Of(d->bytes).s,
+            secsOf(msSince(began)).s);
+    if (state == kDlDone) {
+        lock();
+        if (d->total == 0) d->total = d->bytes;
+        unlock();
+    }
+    return state;
+}
+
 // One download of the list: its fields f. Its state when it ends.
 int dlOne(int tmpl, int n, int count, char** f, int nf, const char* label) {
     DlItem* d = &g_dl[n];
     const char* const path = f[kFPath];
     const char* const title = f[kFTitle];
     const char* const kind = f[kFKind];
+    if (same(kind, "pages")) {
+        char sub[96];
+        dlSub(sub, sizeof(sub), n, count, "Starting");
+        notifyShow(title, sub, -1.0f);
+        return dlPages(tmpl, d, f, nf, n, count, label);
+    }
     if (d->total > 0 && fileSize(path) == d->total) {
         logLine("download: %s: whole already", label);
         return kDlDone;
@@ -6850,6 +8824,51 @@ int appOf(const ScMessage& m) {
     return -1;
 }
 
+// The features this plugin has, and what else an app may look for in
+// SC_PLUGIN_INFO's caps= before it counts on it.
+const uint32_t kFeatures = SC_FEAT_ROW | SC_FEAT_MUSIC | SC_FEAT_DOWNLOADS | SC_FEAT_UPDATE |
+                           SC_FEAT_SENDSPIN;
+const char* const kCaps =
+    "queue.seek,queue.control,downloads.battery,sendspin.metadata,sendspin.controller,probe";
+// Under g_lock: the app a HELLO is to be answered for, -1 for none: answered
+// by the receiving thread once it has let the lock go (helloReply).
+int g_helloReplyApp = -1;
+
+// The answer to a HELLO: SC_PLUGIN_INFO in the app's folder, then
+// SC_REPLY_HELLO on the pipe for it. The receiving thread's, under nothing.
+void helloReply() {
+    lock();
+    const int i = g_helloReplyApp;
+    g_helloReplyApp = -1;
+    App a;
+    if (i >= 0) a = g_apps[i];
+    const int apps = g_appCount;
+    unlock();
+    if (i < 0) return;
+    static char text[512], path[160];
+    uint32_t secs, micros;
+    splitUs(sceKernelGetSystemTimeWide(), &secs, &micros);
+    const int n = sceClibSnprintf(
+        text, sizeof(text),
+        "written=%u.%06u\nprotocol=%d\nversion=%s\nversionCode=%d\nfeatures=0x%X\ngranted=0x%X\n"
+        "caps=%s\napps=%d\nend\n",
+        (unsigned)secs, (unsigned)micros, SC_PROTOCOL, SC_PLUGIN_VERSION, SC_PLUGIN_VERSION_CODE,
+        (unsigned)kFeatures, (unsigned)(a.features & kFeatures), kCaps, apps);
+    appPath(&a, SC_PLUGIN_INFO, path, sizeof(path));
+    const int rcFile = writeWhole(path, text, n);
+    ScPress msg;
+    sceClibMemset(&msg, 0, sizeof(msg));
+    msg.press = SC_REPLY_HELLO;
+    sceClibMemcpy(msg.titleId, a.titleId, sizeof(msg.titleId) - 1);
+    const int rcPipe = sceKernelTrySendMsgPipe(g_fromPlugin, &msg, sizeof(msg), kPipeModeFull, NULL);
+    if (rcFile < 0 || rcPipe < 0)
+        logLine("hello: %s answered: info 0x%08X, reply 0x%08X", a.name, (unsigned)rcFile,
+                (unsigned)rcPipe);
+    if (a.features & ~kFeatures)
+        logLine("hello: %s asked for features 0x%X this plugin does not have", a.name,
+                (unsigned)(a.features & ~kFeatures));
+}
+
 // An app registering itself, or again. Under g_lock.
 void hello(const ScMessage& m) {
     char title[12], folder[96], name[48];
@@ -6884,11 +8903,13 @@ void hello(const ScMessage& m) {
     copyText(a->name, name[0] ? name : title, sizeof(a->name));
     a->features = m.arg;
     sceIoMkdir(folder, 0777);
-    logLine("hello: %s (%s) %s, folder %s, features%s%s%s%s", a->name, a->titleId,
+    g_helloReplyApp = i;
+    logLine("hello: %s (%s) %s, folder %s, features%s%s%s%s%s", a->name, a->titleId,
             fresh ? "registered" : "again", a->folder,
             (a->features & SC_FEAT_ROW) ? " row" : "", (a->features & SC_FEAT_MUSIC) ? " music" : "",
             (a->features & SC_FEAT_DOWNLOADS) ? " downloads" : "",
-            (a->features & SC_FEAT_UPDATE) ? " update" : "");
+            (a->features & SC_FEAT_UPDATE) ? " update" : "",
+            (a->features & SC_FEAT_SENDSPIN) ? " sendspin" : "");
 }
 
 // The feature a command needs, 0 for none.
@@ -6902,6 +8923,7 @@ uint32_t featureOf(uint32_t cmd) {
         return SC_FEAT_ROW;
     case SC_CMD_MUSIC_PLAY:
     case SC_CMD_MUSIC_TAKE_BACK:
+    case SC_CMD_PROBE_STREAM:
         return SC_FEAT_MUSIC;
     case SC_CMD_DL_START:
     case SC_CMD_DL_TAKE_BACK:
@@ -6910,6 +8932,9 @@ uint32_t featureOf(uint32_t cmd) {
         return SC_FEAT_DOWNLOADS;
     case SC_CMD_UPDATE_INSTALL:
         return SC_FEAT_UPDATE;
+    case SC_CMD_SENDSPIN_START:
+    case SC_CMD_SENDSPIN_TAKE_BACK:
+        return SC_FEAT_SENDSPIN;
     default:
         return 0;
     }
@@ -6932,6 +8957,7 @@ public:
             lock();
             handle(g_message);
             unlock();
+            helloReply();
             notifyAsked();
         }
     }
@@ -6969,6 +8995,7 @@ private:
             // and does not begin a queue handed over before. The app plays
             // its own, which SceShell's would play over, so that one stops.
             stopCarry("an app takes the row", kEndStopped);
+            ssStop("an app takes the row");
             g_playQueueDue = 0;
             if (g_owner != kOwnerApp || g_ownerApp != app) g_artSerial = 0;  // the last owner's cover
             g_active = 1;
@@ -7020,6 +9047,8 @@ private:
                 g_artSerial = 0;
             }
             stopCarry("an app hands a queue over", kEndYield);
+            probeStop("a queue handed over");
+            ssStop("a queue handed over");
             if (startMusicThread()) {
                 g_playQueueDue = 1;
                 g_playQueueApp = app;
@@ -7038,6 +9067,23 @@ private:
         case SC_CMD_UPDATE_INSTALL:
             startUpdate(app);
             break;
+        case SC_CMD_SENDSPIN_START:
+            logLine("sendspin: %s hands its player over", appName(app));
+            ssAsk(app);
+            break;
+        case SC_CMD_SENDSPIN_TAKE_BACK:
+            logLine("sendspin: %s takes its player back%s", appName(app),
+                    g_ssRunning || g_ssWant >= 0 ? "" : "; the plugin is not it");
+            ssStop("the app takes it back", 2);
+            break;
+        case SC_CMD_PROBE_STREAM: {
+            char source[160];
+            toUtf8(m.text1, 256, source, sizeof(source));
+            logLine("probe: %s asks for mode %u%s", appName(app), (unsigned)m.arg,
+                    source[0] ? ", from a WAV" : "");
+            probeAsk(app, m.arg, source);
+            break;
+        }
         case SC_CMD_DL_START:
             startDownloads(app);
             break;
@@ -7131,7 +9177,8 @@ extern "C" int module_start(SceSize args, const void* argp) {
     (void)args;
     (void)argp;
     logOpen();
-    logLine("start: vita-shell-companion, protocol %d, pipes %s", SC_PROTOCOL, SC_PIPE_TO_PLUGIN);
+    logLine("start: vita-shell-companion %s, protocol %d, pipes %s", SC_PLUGIN_VERSION, SC_PROTOCOL,
+            SC_PIPE_TO_PLUGIN);
 
     // The quick menu's root, as ElevenMPV-A's plugin finds it: power_manage_
     // plugin's interface has a function giving it at 0x54.

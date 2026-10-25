@@ -9,12 +9,14 @@ Any app loads it once per boot and uses only the features it wants:
 | Background music | `SC_FEAT_MUSIC` | its queue keeps playing through the shell's music player after it closes |
 | Background downloads | `SC_FEAT_DOWNLOADS` | its downloads continue after it closes, with one progress notification |
 | Self-update | `SC_FEAT_UPDATE` | its update is installed after it closes, and it is launched again |
+| Sendspin | `SC_FEAT_SENDSPIN` | it stays Music Assistant's Sendspin player after it closes (§8) |
 
 Nothing in the plugin knows about Plex, Audiobookshelf, Music Assistant or
 Suwayomi. Everything server-specific is in plain URLs, request header lines
-and report templates that the app writes. The one exception is the
-`plexqueue`/`plexadd` download kinds (§5.2), which drive Plex's server-side
-download queue for VitaPlex.
+and report templates that the app writes. The exceptions are protocols that
+are the feature itself: the `plexqueue`/`plexadd` download kinds (§5.2),
+which drive Plex's server-side download queue for VitaPlex, and Sendspin
+(§8), Music Assistant's player protocol.
 
 `include/sc_protocol.h` holds the constants and structures below;
 `client/` is a C library that does all of it for an app (§7).
@@ -78,6 +80,37 @@ The plugin keeps a record of up to 16 apps a boot (title ID, folder, name,
 features); a second HELLO from the same title updates it. A command from an
 app that has not said HELLO this boot, or for a feature it didn't ask for,
 is ignored and logged.
+
+### The answer
+
+Several apps can ship the plugin, and whichever is loaded first in a boot is
+the one in SceShell until the Vita restarts. It may be older than the app's
+own copy. So, from version 0.2.0, the plugin answers each HELLO:
+
+1. It writes `<folder>/sc-plugin.txt`:
+
+   ```
+   written=...
+   protocol=1
+   version=0.2.0
+   versionCode=200               <major * 10000 + minor * 100 + patch>
+   features=0x1F                 <the SC_FEAT_* bits this plugin has>
+   granted=0x12                  <the ones this app asked for that it has>
+   caps=queue.seek,queue.control,downloads.battery,sendspin.metadata,sendspin.controller,probe
+   apps=<apps registered this boot>
+   end
+   ```
+
+2. It sends an `ScPress` on the FromPlugin pipe, with `press` set to
+   `SC_REPLY_HELLO` (`0x100`) and the app's title ID. A client that doesn't
+   know it skips it, as it does any press it doesn't know.
+
+`scOpen` waits up to half a second for the answer, and `scPluginInfo` then
+gives the file's contents. When it returns -1, the plugin in SceShell is
+older than 0.2.0 and has protocol 1's first features only. `caps=` names
+what came later, to check before counting on it (`scPluginHas`). An app
+whose own plugin is newer than the one answering can ask the user to
+restart the Vita.
 
 ## 3. Music row
 
@@ -328,11 +361,10 @@ queue can be played: a `playMedia` for anything else is answered, and does
 nothing. This follows the companion protocol as open players implement it
 (plex-mpv-shim); it is untested against Plex's apps.
 
-**Sendspin** (Music Assistant) can't be served this way: a Sendspin player
-keeps a WebSocket open to the server, the server streams the audio over it
-and controls playback by changing the stream, and current Sendspin encrypts
-the connection end to end (Noise). Remote control of a queue the shell plays
-from files isn't what Music Assistant's server does.
+**Sendspin** (Music Assistant) isn't served this way: a Sendspin player
+keeps a WebSocket open to the server, which streams the audio over it and
+controls playback by changing the stream. The plugin is such a player
+itself (§8).
 
 ## 5. Background downloads
 
@@ -344,6 +376,7 @@ When the app closes, it writes `<folder>/sc-downloads.txt`, then sends
 ```
 written=...
 notify=<1: show the progress notification>
+battery=<percent: wait below it while the Vita is off power; 15 by default, 0 never>
 headers=<encoded: header lines sent with every request, as in §4>
 item=<fields, tab-separated, each encoded, below>     (up to 200 items, in order)
 end
@@ -357,7 +390,7 @@ Each item has these fields:
 | 1 | `file` | the file to write; a partial file is continued with HTTP Range from its size |
 | 2 | `size` | the expected full size, or 0 if unknown |
 | 3 | `title` | for the notification |
-| 4 | `kind` | `url` (§5.1), or `plexqueue` / `plexadd` (§5.2) |
+| 4 | `kind` | `url` (§5.1), `pages` (§5.1.1), or `plexqueue` / `plexadd` (§5.2) |
 | 5… | kind's own fields | see below |
 
 The plugin waits up to 30 s for the app to close before it begins, so it
@@ -373,6 +406,49 @@ sent after the list's.
 - **Waiting:** 503 is waited for, every 10 s, for up to an hour.
 - **Retries:** after 5, 15 and 60 s; getting any bytes resets the count.
 - **Gone:** 404 and 410 mark the item `gone`.
+
+#### The battery
+
+When the battery falls below `battery=` with the Vita off power, the download
+stops after the piece it is writing, its connection closed. The plugin waits
+and checks every 5 s. The notification says `Paused: battery at 12%` and
+`Charge the Vita to go on (3 of 5)`, and the status `paused=2`. Once the Vita
+is on power, or the battery is 5 points above `battery=`, the download goes
+on from where its file ends, as after a cut-off. A wait costs none of the
+item's tries.
+
+#### 5.1.1 `pages`
+
+A download that is a file a page, such as a manga chapter: one item for the
+chapter however many pages it has.
+
+- **Fields:** `file` (1) is a template, as is field 5, the URL. Field 6 is
+  the page count, or `count,first`. Field 7 is optional extra header lines.
+  `size` (2) is 0, or the chapter's whole size.
+- **Placeholders:** `{page}` is the page number, from `first` on (0 by
+  default). `{page:N}` is the same, padded with zeros to N digits (1 to 9).
+  Both templates must have one.
+- **Pages:** up to 1000 a chapter, fetched in order, each as a `url` item
+  is (resumed, waited for, retried; the battery too). Each goes to
+  `<file>.part` and is moved in once whole, so a page whose file is there is
+  done, and is not asked for again when the chapter goes on.
+- **Ends:** `done` once every page is there. A page the server says is gone
+  (404, 410) makes the chapter `gone`. A page that fails its tries makes it
+  `failed`, with the pages before it kept.
+- **Progress:** the notification's second line names the page, `2 of 5 ·
+  page 12/24 · 40%`. The status adds a field, `<pages done>/<pages>`.
+
+Suwayomi, for example (its pages from 0, the files padded to 3 digits):
+
+```c
+char url[256], file[256];
+snprintf(url, sizeof(url), "%s/api/v1/manga/%d/chapter/%d/page/{page}", server, mangaId, chapter);
+snprintf(file, sizeof(file), "ux0:data/Suwayomi/%d/%d/{page:3}.jpg", mangaId, chapter);
+ScDownload d = {.id = "ch-1234", .file = file, .title = "Chapter 12", .kind = "pages",
+                .args = {url, "24", NULL}};
+```
+
+The plugin makes the folder the pages go in, its last level only.
 
 #### 5.2 `plexqueue` / `plexadd`
 
@@ -393,14 +469,16 @@ which prepares a transcoded file before it can be fetched. The list's
   ```
   written=
   running=0|1
-  paused=0|1
-  item=<id>\t<going|waiting|done|gone|failed>\t<bytes>\t<size>\t<queue id>\t<item id>
+  paused=0|1|2               <1: the notification's Yes; 2: waiting for power>
+  battery=<percent, while paused=2>
+  item=<id>\t<going|waiting|done|gone|failed>\t<bytes>\t<size>\t<queue id>\t<item id>[\t<pages done>/<pages>]
   ...
   end
   ```
 
-  The last two fields are the Plex download queue's IDs the item used, and
-  empty for `url` items.
+  The fifth and sixth fields are the Plex download queue's IDs the item used,
+  and empty for other items. A `pages` item has a seventh, its pages done
+  (`pagesDone`, `pageCount` in `ScDownloadStatus`).
 
 - **`SC_CMD_DL_TAKE_BACK`:** the app sends it when it opens. The plugin stops
   after the piece it is writing and writes `running=0`. The app waits for
@@ -421,7 +499,8 @@ which prepares a transcoded file before it can be fetched. The list's
   on after the app closes. Lines are cut to 63 UTF-16 units.
 - **Icon:** it shows the icon of the app it was last shown for.
 - **"Pause downloads?":** answering Yes pauses the plugin's own downloads
-  (`paused=1`). While the app is downloading itself, the plugin creates
+  (`paused=1`), until the app takes them up again. A pause for the battery
+  (`paused=2`) ends by itself. While the app is downloading itself, the plugin creates
   `<folder>/sc-downloads-pause` instead, which the app checks for
   (`scDownloadPauseAsked`).
 - **Left over:** a notification still showing 30 s after the downloads were
@@ -452,6 +531,8 @@ int scInit(const char* titleId, const char* dataDir, const char* name, uint32_t 
            const char* bundledPluginPath);           // who the app is; no I/O
 int scOpen(char* what, size_t size);                  // finds or loads the plugin, sends HELLO
 int scIsOpen(void);
+int scPluginInfo(ScPluginInfo* out);                  // its answer to HELLO (§2), -1 for none
+int scPluginHas(const ScPluginInfo* info, const char* cap);
 int scPath(const char* name, char* out, size_t size); // a file in the data folder
 // row
 int scRowActivate(void);  int scRowRelease(void);
@@ -466,9 +547,16 @@ int scDownloadProgressEnd(const char* l1, const char* l2);
 int scDownloadPauseAsked(void);
 // update
 int scUpdateInstall(void);
+// sendspin (§8)
+int scWriteSendspin(const ScSendspin* s);
+int scSendspinStart(void);  int scSendspinTakeBack(void);
+int scReadSendspinStatus(ScSendspinStatus* out);
+// debug (§10)
+int scProbeStream(int mode, const char* sourceWav);
 // the files
 int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
 int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count);
+extern int scDownloadsBatteryPercent;                 // its battery=, 15 unless changed
 int scReadQueueStatus(ScQueueStatus* out);
 int scReadDownloadsStatus(int* running, int* paused, ScDownloadStatus* items, uint32_t cap,
                           uint32_t* count);
@@ -479,12 +567,186 @@ int scCoverWriteTo(const void* image, size_t len, const char* path, char* why, s
 uint32_t scCoverNextSerial(uint32_t last, uint64_t nowUs);
 ```
 
-`scMusicTakeBack` and `scDownloadsTakeBack` only reach a plugin that is in
+`scMusicTakeBack`, `scDownloadsTakeBack` and `scSendspinTakeBack` only reach a plugin that is in
 SceShell already, and never load one: with none there, nothing was carried
 on.
 
-## 8. Logs
+## 8. Sendspin (Music Assistant)
+
+An app that is a Sendspin player hands it to the plugin as it closes, and the
+Vita stays the same player in Music Assistant: it keeps playing, and Music
+Assistant's own controls (skip, pause, seek, play something else) keep
+working.
+
+> **Status:** host-tested against a fake server; not yet tried on a console
+> or against Music Assistant. How the shell plays a file that is still being
+> written is what the probe (§10) finds out, and may change §8.3.
+
+### 8.1 Handing over (`SC_CMD_SENDSPIN_START`)
+
+The app closes its own connection to the server, gives the Music row back
+(`scRowRelease`: an app that takes the row stops the player), writes
+`<folder>/sc-sendspin.txt` (`scWriteSendspin`), sends
+`SC_CMD_SENDSPIN_START` (`scSendspinStart`), and quits:
+
+```
+written=...
+host=<the server's IPv4 address; the app resolves a name first>
+port=<8927 by default>
+path=</sendspin by default>
+clientId=<encoded: the app's own client_id, so that it is the same player>
+name=<encoded: the player's name>
+product=, manufacturer=, software=   <encoded: device_info; PS Vita, Sony and the plugin's by default>
+roles=player[,metadata][,controller]
+bufferBytes=<buffer_capacity, 2097152 (about 12 s of PCM) by default>
+staticDelayMs=<0 by default>
+volume=<0-100, as the app had it>
+muted=<0/1>
+end
+```
+
+The plugin waits up to 30 s for the app to have gone, then connects with
+plain `ws://` (no TLS: LAN only) and speaks Sendspin's plain-JSON messages, as
+Vita Music Assistant does:
+
+- **`client/hello`:** the app's `client_id`, `name` and `device_info`;
+  `player@v1` with PCM 44.1 kHz, 16-bit, stereo only, `buffer_capacity`, and
+  the `volume` and `mute` commands; `metadata@v1` and `controller@v1` when
+  `roles=` lists them.
+- **`client/state`:** `synchronized`, with the volume, mute and
+  `static_delay_ms`, after `server/hello` and after each volume change.
+- **`stream/start`:** a stream in any other format is asked again as PCM
+  (`stream/request-format`).
+- **Ping:** answered. There is no clock sync (`client/time`): the one player
+  plays as the shell goes.
+- **Lost:** a connection that drops is made again after 1, 2, 5 and 10 s, then
+  every 30 s, for up to 30 minutes of failures in a row.
+
+### 8.2 What the server does, and the Music row
+
+| From the server | The plugin |
+|---|---|
+| `stream/start` | begins a new WAV for the stream |
+| `stream/clear` (a seek or skip) | stops the shell, and begins a new WAV |
+| `stream/end` (pause or stop) | stops the shell, and removes the files |
+| `server/command` volume, mute | applied to the PCM as it is written, so heard after what is buffered |
+| `server/state` metadata | the song on the Music row (with `metadata`) |
+| `group/update` | ⏯ shows playing or paused |
+
+With `controller`, the row's ⏮ ⏯ ⏭ are sent to the server as
+`client/command` `previous`, `play`/`pause` and `next`, so Music Assistant does
+what its own app would. Without it, presses are dropped. The row is the
+plugin's while it is the player.
+
+### 8.3 Into the shell
+
+The PCM goes into `<folder>/sc-sendspin-a.wav`, its header rewritten with the
+size every 250 ms, and the shell is given the file once 2 s of it are there.
+When the shell stops, or its clock stands still for a second, while more has
+been written, it is opened again where it was. After 20 minutes (211 MB) the
+stream goes on in `sc-sendspin-b.wav`, which the shell is given at the
+first's end. Both files are removed as the stream ends.
+
+### 8.4 Status and taking back
+
+- **Status:** `<folder>/sc-sendspin-status.txt`, every 2 s and at changes:
+
+  ```
+  written=
+  state=waiting|connecting|connected|streaming|reconnecting|stopped|failed
+  server=<the server's name>
+  streaming=0|1
+  playing=0|1
+  volume=<as the server last set it>
+  muted=0|1
+  positionMs=, durationMs=   <the song's, with metadata>
+  end
+  ```
+
+- **`SC_CMD_SENDSPIN_TAKE_BACK`** (`scSendspinTakeBack`): the app sends it as it
+  opens. The plugin sends `client/goodbye` (`restart`), closes the
+  connection, stops the shell and writes `state=stopped`. The app waits for
+  that, a second or two at most, then connects with its own player, from
+  the status's volume.
+- **Others:** an app that takes the Music row, or hands a queue over (§4), stops
+  the player too. It doesn't run while the probe does, or the other way round.
+
+## 9. Logs
 
 `ux0:data/ShellCompanion/plugin.log` holds the current boot, and
 `plugin.prev.log` the boot before. Lines about an app's work name the app.
 URLs and header lines are never logged, as they may carry tokens.
+
+## 10. Debug: the streaming probe (`SC_CMD_PROBE_STREAM`)
+
+A test for Music Assistant in the background: can the shell's music player
+play a WAV that is still being written? The plugin writes 44.1 kHz 16-bit
+stereo PCM into `<folder>/sc-probe-a.wav` at real-time pace, starting 3 s
+ahead, gives the file to the player the way it gives it a queue's songs, and
+logs what the player makes of it. It may change or go once that is answered.
+
+```c
+scProbeStream(SC_PROBE_ALL, NULL);   // or a WAV: "ux0:music/test.wav"
+scProbeStream(SC_PROBE_STOP, NULL);  // stop it early
+```
+
+- **Feature:** needs `SC_FEAT_MUSIC`. It is refused while a queue is carried
+  on; a queue handed over stops it and waits for it to finish.
+- **`arg`, the mode:**
+
+  | Mode | Value | The WAV's header |
+  |---|---|---|
+  | `SC_PROBE_STOP` | 0 | stops the run |
+  | `SC_PROBE_HUGE` | 1 | a data size of `0x7FFFF000` (3 h 22 min) |
+  | `SC_PROBE_GROWING` | 2 | the size written so far, rewritten after each write |
+  | `SC_PROBE_REOPEN` | 3 | as 2; the file is reopened where it was at each stall and every 10 s |
+  | `SC_PROBE_ALL` | 4 | 1, 2 and 3 in turn, about 4 min 20 s |
+  | `SC_PROBE_FILE` | 5 | no WAV: `text1` is played as it is, for 30 s (below) |
+  | `SC_PROBE_HTTP` | 6 | no music: one request is sent (below) |
+
+- **`text1`:** a WAV on the card to stream (PCM, 44.1 kHz, 16-bit, stereo),
+  looped. Empty for a tone: 440 Hz, 880 Hz every tenth second, and the last
+  100 ms of each second silent, so a jump can be heard.
+- **When:** the first file is played 10 s after the command, so the app can be
+  closed first. An app holding the audio may keep the shell's music silent.
+- **Script:** each run lasts 80 s from its first play. Modes 1 and 2 pause at
+  15 s, play again at 20 s, seek back to 5 s at 30 s, seek to 2 s short of
+  what is written at 40 s, and skip to a second file (`sc-probe-b.wav`) at
+  55 s. Both files are removed at the end.
+
+What the log (`plugin.log`, lines beginning `probe:`) shows:
+
+| Line | Meaning |
+|---|---|
+| `N s: X ms written …, shell state S at T ms, length L ms` | every second. With state 1 the player plays; T should keep climbing past 3000, the size the file had as it was opened. L is the length the player gives the song |
+| `STALL: …` | the player's clock stopped for 1.5 s while nothing was asked of it: the last line before it says how much was written, and `as the shell opened it` how much it saw |
+| `state A to B …, not asked for` | the player changed state by itself |
+| `<step>: playing at T ms, N ms after it was asked` | how long a play, seek, skip or reopen took to be heard |
+| `<step>: not playing from … after it was asked` | that step never took effect within 10 s |
+| `open 0x8…` on `first play` | the player refused the file, probably its header |
+
+Two more modes answer questions for the other apps:
+
+- **`SC_PROBE_FILE`**, for Audiobookshelf: does the shell play an `.m4b`
+  (AAC in MP4) under that name? `text1` names any file on the card. It is
+  played as the queue plays a local track, sought to 60 s at 10 s, paused at
+  20 s and played again at 23 s, and left as it was. `first play: … open
+  0x8…`, or state never 1, means the shell refuses it; the per-second lines
+  give the length it reads.
+- **`SC_PROBE_HTTP`**, for Audiobookshelf's progress: does a PATCH get
+  through from SceShell? The app writes `<folder>/sc-probe-http.txt` like
+  the queue (§1, values encoded):
+
+  ```
+  url=http://<server>/api/me/progress/<item id>
+  method=PATCH
+  headers=Authorization: Bearer <token>
+  body={"currentTime":12.5,"duration":3600}
+  type=application/json
+  end
+  ```
+
+  The log gives whether `sceHttpCreateRequestWithURL2` (PATCH's way) was
+  found, then `the request: 0x…, HTTP <status>`. No URL, header or body is
+  logged.
+

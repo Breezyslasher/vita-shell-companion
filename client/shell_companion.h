@@ -37,10 +37,32 @@ int scInit(const char* titleId, const char* dataDir, const char* name, uint32_t 
            const char* bundledPluginPath);
 
 // Finds the plugin in SceShell, or loads the bundled one, opens its pipes and
-// registers the app with it (SC_CMD_HELLO). 0 when open, else the code that
-// stopped it; what happened, for a log, in what. Loading needs taiHEN and the
-// app to be unsafe homebrew.
+// registers the app with it (SC_CMD_HELLO), waiting up to half a second for
+// its answer (scPluginInfo). 0 when open, else the code that stopped it;
+// what happened, for a log, in what. Loading needs taiHEN and the app to be
+// unsafe homebrew.
 int scOpen(char* what, size_t size);
+
+// The plugin that answered this app's HELLO: several apps ship a plugin,
+// and the first one loaded in a boot is the one in SceShell until the Vita
+// restarts, which may be older than the app's own. The features it has, the
+// app's that it took, and its caps, things an app checks before it counts on
+// them (scPluginHas: "downloads.battery", "sendspin.controller", ...). 0, or
+// -1 when it never answered: a plugin older than version 0.2.0, which has
+// the features of protocol 1 as it first was.
+typedef struct ScPluginInfo {
+    char written[32];
+    unsigned protocol;
+    char version[16];      // "0.2.0"
+    uint32_t versionCode;  // major * 10000 + minor * 100 + patch
+    uint32_t features;     // SC_FEAT_* it has
+    uint32_t granted;      // of those this app asked for
+    char caps[192];        // ',' between
+} ScPluginInfo;
+int scPluginInfo(ScPluginInfo* out);
+int scPluginHas(const ScPluginInfo* info, const char* cap);
+// The same, read from the file whether or not the answer has come.
+int scReadPluginInfo(ScPluginInfo* out);
 int scIsOpen(void);
 
 // A file in the app's data folder, into out. 0, or -1 before scInit or when
@@ -101,6 +123,55 @@ int scDownloadPauseAsked(void);
 // scReadUpdateResult.
 int scUpdateInstall(void);
 
+// ── Sendspin (SC_FEAT_SENDSPIN) ──────────────────────────────────────────────
+// As the app goes, having closed its own connection to the server: the
+// plugin becomes the Sendspin player scWriteSendspin described, with the
+// same client id, so that Music Assistant sees the same player
+// (docs/PROTOCOL.md §8).
+typedef struct ScSendspin {
+    const char* host;          // the server's IPv4 address: resolve a name first
+    uint16_t port;             // 0 for 8927
+    const char* path;          // NULL for /sendspin
+    const char* clientId;      // the app's own, as its client/hello has it
+    const char* name;          // the player's name
+    const char* product;       // device_info; NULL for "PS Vita", "Sony", the plugin's
+    const char* manufacturer;
+    const char* software;
+    int metadata;              // 1: metadata@v1, the song on the Music row
+    int controller;            // 1: controller@v1, the row's buttons to the server
+    uint32_t bufferBytes;      // buffer_capacity; 0 for 2 MB (about 12 s of PCM)
+    int staticDelayMs;
+    int volume;                // 0-100, as the app had it; the plugin goes on from there
+    int muted;
+} ScSendspin;
+int scWriteSendspin(const ScSendspin* s);
+int scSendspinStart(void);
+// As the app opens: the plugin says goodbye and closes its connection, then
+// writes state=stopped to the status, which the app waits for (a second or
+// two at most) before it connects itself. As scMusicTakeBack, never loads
+// the plugin.
+int scSendspinTakeBack(void);
+
+typedef struct ScSendspinStatus {
+    char written[32];
+    char state[16];        // waiting, connecting, connected, streaming, reconnecting,
+                           // stopped or failed
+    char server[64];
+    int streaming, playing;
+    int volume, muted;     // as the server last set them: the app goes on from there
+    uint32_t positionMs, durationMs;  // the song's, with metadata
+} ScSendspinStatus;
+int scReadSendspinStatus(ScSendspinStatus* out);
+
+// ── Debug ────────────────────────────────────────────────────────────────────
+// SC_CMD_PROBE_STREAM (SC_FEAT_MUSIC): the plugin streams a growing WAV
+// through the shell's music player and logs what the player makes of it
+// (docs/PROTOCOL.md §10). mode SC_PROBE_*; sourceWav a 44.1 kHz 16-bit stereo
+// WAV on the card to stream, NULL or "" for a tone; for SC_PROBE_FILE, the
+// file to play as it is. SC_PROBE_HTTP sends the request scPath's
+// "sc-probe-http.txt" describes.
+int scProbeStream(int mode, const char* sourceWav);
+
 // ── The files ────────────────────────────────────────────────────────────────
 // Each written whole beside its name and moved in, with its "end" line, its
 // fields URL-encoded where docs/PROTOCOL.md says: 0, or -1 when it could not
@@ -160,12 +231,22 @@ typedef struct ScDownload {
     const char* file;      // the file to write, continued from its size
     uint64_t size;         // its full size, 0 if unknown
     const char* title;     // for the notification
-    const char* kind;      // "url", "plexqueue" or "plexadd"
-    const char* args[3];   // url: the URL, extra header lines; plexqueue: server, queue id,
-                           // item id; plexadd: server, query, profile extra
+    const char* kind;      // "url", "pages", "plexqueue" or "plexadd"
+    const char* args[3];   // url: the URL, extra header lines; pages: the URL with {page},
+                           // "count" or "count,first", extra header lines; plexqueue:
+                           // server, queue id, item id; plexadd: server, query, profile extra
+    // For "pages" (a manga chapter, say), file is a template too: {page} is
+    // the page number from first on (0 by default), {page:3} the same padded
+    // to 3 digits; each page goes to its own file. size is 0 or the chapter's
+    // whole size.
 } ScDownload;
 
 int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count);
+// The battery= scWriteDownloads writes: the plugin's downloads wait below
+// this percent while the Vita is off power, and go on by themselves once it
+// is on power or 5 points above it; 0 never waits. SC_BATTERY_PAUSE_PERCENT
+// unless changed.
+extern int scDownloadsBatteryPercent;
 
 // What the files the plugin writes say. 0 when the file is there and whole.
 typedef struct ScQueueStatus {
@@ -181,6 +262,8 @@ typedef struct ScQueueStatus {
 } ScQueueStatus;
 int scReadQueueStatus(ScQueueStatus* out);
 
+// paused: 0, SC_PAUSED_ASKED (the notification's Yes: the app goes on with
+// them), or SC_PAUSED_BATTERY (waiting for power: the plugin goes on).
 typedef struct ScDownloadStatus {
     char id[64];
     char state[12];        // going, waiting, done, gone or failed
@@ -188,6 +271,8 @@ typedef struct ScDownloadStatus {
     uint64_t size;
     char queueId[16];      // plexqueue/plexadd: the queue's and item's ids it used
     char itemId[16];
+    uint32_t pagesDone;    // pages: those whose files are whole, from the first
+    uint32_t pageCount;
 } ScDownloadStatus;
 // Up to cap items into items, how many in *count.
 int scReadDownloadsStatus(int* running, int* paused, ScDownloadStatus* items, uint32_t cap,

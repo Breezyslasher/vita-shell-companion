@@ -124,13 +124,15 @@ int scWriteQueue(const ScQueue* q, const ScTrack* tracks, uint32_t count) {
     return finish(f, path, part);
 }
 
+int scDownloadsBatteryPercent = SC_BATTERY_PAUSE_PERCENT;
+
 int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count) {
     char path[256], part[256];
     if (count > SC_MAX_DOWNLOADS) count = SC_MAX_DOWNLOADS;
     FILE* f = openPart(SC_DOWNLOADS, path, part, sizeof(path));
     if (!f) return -1;
     putWritten(f);
-    fprintf(f, "notify=%d\n", notify ? 1 : 0);
+    fprintf(f, "notify=%d\nbattery=%d\n", notify ? 1 : 0, scDownloadsBatteryPercent);
     if (headers && headers[0]) {
         fputs("headers=", f);
         putEncoded(f, headers);
@@ -250,7 +252,7 @@ int scReadDownloadsStatus(int* running, int* paused, ScDownloadStatus* items, ui
     value(text, "running", num, sizeof(num));
     *running = num[0] == '1';
     value(text, "paused", num, sizeof(num));
-    *paused = num[0] == '1';
+    *paused = atoi(num);
     for (const char* p = text; *p && *count < cap;) {
         if (strncmp(p, "item=", 5) == 0) {
             p += 5;
@@ -264,6 +266,12 @@ int scReadDownloadsStatus(int* running, int* paused, ScDownloadStatus* items, ui
             d->size = strtoull(num, NULL, 10);
             tabField(&p, d->queueId, sizeof(d->queueId));
             tabField(&p, d->itemId, sizeof(d->itemId));
+            tabField(&p, num, sizeof(num));
+            const char* slash = strchr(num, '/');
+            if (slash) {
+                d->pagesDone = (uint32_t)strtoul(num, NULL, 10);
+                d->pageCount = (uint32_t)strtoul(slash + 1, NULL, 10);
+            }
         }
         while (*p && *p != '\n') p++;
         if (*p) p++;
@@ -282,5 +290,87 @@ int scReadUpdateResult(int* result, char* why, size_t whySize) {
     *result = (int)strtoul(num, NULL, 16);
     value(text, "why", why, whySize);
     free(text);
+    return 0;
+}
+
+int scWriteSendspin(const ScSendspin* s) {
+    char path[256], part[256];
+    if (!s->host || !s->clientId) return -1;
+    FILE* f = openPart(SC_SENDSPIN, path, part, sizeof(path));
+    if (!f) return -1;
+    putWritten(f);
+    fputs("host=", f);
+    putEncoded(f, s->host);
+    fprintf(f, "\nport=%u\n", (unsigned)(s->port ? s->port : 8927));
+    const char* const keys[6] = {"path", "clientId", "name", "product", "manufacturer", "software"};
+    const char* const vals[6] = {s->path, s->clientId, s->name, s->product, s->manufacturer,
+                                 s->software};
+    for (int i = 0; i < 6; i++) {
+        if (!vals[i] || !vals[i][0]) continue;
+        fprintf(f, "%s=", keys[i]);
+        putEncoded(f, vals[i]);
+        fputc('\n', f);
+    }
+    fprintf(f, "roles=player%s%s\n", s->metadata ? ",metadata" : "",
+            s->controller ? ",controller" : "");
+    if (s->bufferBytes) fprintf(f, "bufferBytes=%u\n", (unsigned)s->bufferBytes);
+    fprintf(f, "staticDelayMs=%d\nvolume=%d\nmuted=%d\n", s->staticDelayMs, s->volume,
+            s->muted ? 1 : 0);
+    return finish(f, path, part);
+}
+
+int scReadSendspinStatus(ScSendspinStatus* out) {
+    memset(out, 0, sizeof(*out));
+    char* text = readWhole(SC_SENDSPIN_STATUS);
+    if (!text) return -1;
+    char num[24];
+    value(text, "written", out->written, sizeof(out->written));
+    value(text, "state", out->state, sizeof(out->state));
+    value(text, "server", out->server, sizeof(out->server));
+    value(text, "streaming", num, sizeof(num));
+    out->streaming = num[0] == '1';
+    value(text, "playing", num, sizeof(num));
+    out->playing = num[0] == '1';
+    value(text, "volume", num, sizeof(num));
+    out->volume = atoi(num);
+    value(text, "muted", num, sizeof(num));
+    out->muted = num[0] == '1';
+    value(text, "positionMs", num, sizeof(num));
+    out->positionMs = (uint32_t)strtoul(num, NULL, 10);
+    value(text, "durationMs", num, sizeof(num));
+    out->durationMs = (uint32_t)strtoul(num, NULL, 10);
+    free(text);
+    return 0;
+}
+
+int scReadPluginInfo(ScPluginInfo* out) {
+    memset(out, 0, sizeof(*out));
+    char* text = readWhole(SC_PLUGIN_INFO);
+    if (!text) return -1;
+    char num[24];
+    value(text, "written", out->written, sizeof(out->written));
+    value(text, "protocol", num, sizeof(num));
+    out->protocol = (unsigned)strtoul(num, NULL, 10);
+    value(text, "version", out->version, sizeof(out->version));
+    value(text, "versionCode", num, sizeof(num));
+    out->versionCode = (uint32_t)strtoul(num, NULL, 10);
+    value(text, "features", num, sizeof(num));
+    out->features = (uint32_t)strtoul(num, NULL, 16);
+    value(text, "granted", num, sizeof(num));
+    out->granted = (uint32_t)strtoul(num, NULL, 16);
+    value(text, "caps", out->caps, sizeof(out->caps));
+    free(text);
+    return 0;
+}
+
+int scPluginHas(const ScPluginInfo* info, const char* cap) {
+    const size_t n = strlen(cap);
+    for (const char* p = info->caps; *p;) {
+        const char* end = strchr(p, ',');
+        const size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == n && strncmp(p, cap, n) == 0) return 1;
+        if (!end) break;
+        p = end + 1;
+    }
     return 0;
 }
