@@ -266,6 +266,12 @@ int scReadDownloadsStatus(int* running, int* paused, ScDownloadStatus* items, ui
             d->size = strtoull(num, NULL, 10);
             tabField(&p, d->queueId, sizeof(d->queueId));
             tabField(&p, d->itemId, sizeof(d->itemId));
+            tabField(&p, num, sizeof(num));
+            const char* slash = strchr(num, '/');
+            if (slash) {
+                d->pagesDone = (uint32_t)strtoul(num, NULL, 10);
+                d->pageCount = (uint32_t)strtoul(slash + 1, NULL, 10);
+            }
         }
         while (*p && *p != '\n') p++;
         if (*p) p++;

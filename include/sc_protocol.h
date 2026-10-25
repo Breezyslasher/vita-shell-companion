@@ -85,6 +85,7 @@ enum {
 #define SC_MAX_APPS         16
 #define SC_MAX_TRACKS       1000
 #define SC_MAX_DOWNLOADS    200
+#define SC_MAX_PAGES        1000  // a "pages" download's page count
 // The downloads' battery= by default: they wait below this percent while the
 // Vita is not on power.
 #define SC_BATTERY_PAUSE_PERCENT 15

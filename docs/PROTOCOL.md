@@ -390,7 +390,7 @@ Each item has these fields:
 | 1 | `file` | the file to write; a partial file is continued with HTTP Range from its size |
 | 2 | `size` | the expected full size, or 0 if unknown |
 | 3 | `title` | for the notification |
-| 4 | `kind` | `url` (§5.1), or `plexqueue` / `plexadd` (§5.2) |
+| 4 | `kind` | `url` (§5.1), `pages` (§5.1.1), or `plexqueue` / `plexadd` (§5.2) |
 | 5… | kind's own fields | see below |
 
 The plugin waits up to 30 s for the app to close before it begins, so it
@@ -417,6 +417,39 @@ is on power, or the battery is 5 points above `battery=`, the download goes
 on from where its file ends, as after a cut-off. A wait costs none of the
 item's tries.
 
+#### 5.1.1 `pages`
+
+A download that is a file a page, such as a manga chapter: one item for the
+chapter however many pages it has.
+
+- **Fields:** `file` (1) is a template, as is field 5, the URL. Field 6 is
+  the page count, or `count,first`. Field 7 is optional extra header lines.
+  `size` (2) is 0, or the chapter's whole size.
+- **Placeholders:** `{page}` is the page number, from `first` on (0 by
+  default). `{page:N}` is the same, padded with zeros to N digits (1 to 9).
+  Both templates must have one.
+- **Pages:** up to 1000 a chapter, fetched in order, each as a `url` item
+  is (resumed, waited for, retried; the battery too). Each goes to
+  `<file>.part` and is moved in once whole, so a page whose file is there is
+  done, and is not asked for again when the chapter goes on.
+- **Ends:** `done` once every page is there. A page the server says is gone
+  (404, 410) makes the chapter `gone`. A page that fails its tries makes it
+  `failed`, with the pages before it kept.
+- **Progress:** the notification's second line names the page, `2 of 5 ·
+  page 12/24 · 40%`. The status adds a field, `<pages done>/<pages>`.
+
+Suwayomi, for example (its pages from 0, the files padded to 3 digits):
+
+```c
+char url[256], file[256];
+snprintf(url, sizeof(url), "%s/api/v1/manga/%d/chapter/%d/page/{page}", server, mangaId, chapter);
+snprintf(file, sizeof(file), "ux0:data/Suwayomi/%d/%d/{page:3}.jpg", mangaId, chapter);
+ScDownload d = {.id = "ch-1234", .file = file, .title = "Chapter 12", .kind = "pages",
+                .args = {url, "24", NULL}};
+```
+
+The plugin makes the folder the pages go in, its last level only.
+
 #### 5.2 `plexqueue` / `plexadd`
 
 These keep VitaPlex's existing behaviour: Plex's server-side download queue,
@@ -438,13 +471,14 @@ which prepares a transcoded file before it can be fetched. The list's
   running=0|1
   paused=0|1|2               <1: the notification's Yes; 2: waiting for power>
   battery=<percent, while paused=2>
-  item=<id>\t<going|waiting|done|gone|failed>\t<bytes>\t<size>\t<queue id>\t<item id>
+  item=<id>\t<going|waiting|done|gone|failed>\t<bytes>\t<size>\t<queue id>\t<item id>[\t<pages done>/<pages>]
   ...
   end
   ```
 
-  The last two fields are the Plex download queue's IDs the item used, and
-  empty for `url` items.
+  The fifth and sixth fields are the Plex download queue's IDs the item used,
+  and empty for other items. A `pages` item has a seventh, its pages done
+  (`pagesDone`, `pageCount` in `ScDownloadStatus`).
 
 - **`SC_CMD_DL_TAKE_BACK`:** the app sends it when it opens. The plugin stops
   after the piece it is writing and writes `running=0`. The app waits for

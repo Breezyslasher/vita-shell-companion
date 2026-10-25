@@ -7307,7 +7307,15 @@ struct DlItem {
     uint64_t total;   // its full size, 0 when not known
     char queue[16];   // the download queue's id and the item's, "" for none
     char item[16];
+    int pagesDone, pageCount;  // a "pages" download's, else 0
 };
+// The download thread's: a page of a "pages" download as it is fetched; the
+// page it is, for the notification's line (dlSub), "" for none; and the
+// fetch's begun and whole lines left out of the log, as a chapter has a
+// file a page.
+DlItem g_dlPage;
+char g_dlPageNote[24];
+int g_dlQuiet;
 DlItem g_dl[SC_MAX_DOWNLOADS];
 int g_dlCount;
 int g_dlRunning;  // under g_lock: the download thread runs
@@ -7493,7 +7501,8 @@ bool dlReadList() {
             urlDecode(g_dlLine + 8, (int)sceClibStrnlen(g_dlLine + 8, sizeof(g_dlLine)),
                       g_dlHead.headers, sizeof(g_dlHead.headers), true);
         } else if (startsWith(g_dlLine, "item=") && count < SC_MAX_DOWNLOADS) {
-            if (dlFields(g_dlLine + 5, f, kFMax) <= kFArg1) continue;
+            const int nf = dlFields(g_dlLine + 5, f, kFMax);
+            if (nf <= kFArg1) continue;
             const uint64_t bytes = fileSize(f[kFPath]);  // not under the lock: the card
             lock();
             DlItem* d = &g_dl[count];
@@ -7502,6 +7511,7 @@ bool dlReadList() {
             d->state = kDlWaiting;
             d->total = toU64(f[kFSize]);
             d->bytes = bytes;
+            if (same(f[kFKind], "pages") && nf > kFArg2) d->pageCount = toInt(f[kFArg2]);
             unlock();
             count++;
         }
@@ -7541,9 +7551,13 @@ void dlStatus(bool running) {
             const bool more = i < g_dlCount;
             if (more) {
                 const DlItem* d = &g_dl[i];
-                n = sceClibSnprintf(text, sizeof(text), "item=%s\t%s\t%s\t%s\t%s\t%s\n", d->key,
+                n = sceClibSnprintf(text, sizeof(text), "item=%s\t%s\t%s\t%s\t%s\t%s", d->key,
                                     kDlStateNames[d->state], bigOf(d->bytes).s,
                                     bigOf(d->total).s, d->queue, d->item);
+                if (d->pageCount > 0)
+                    n += sceClibSnprintf(text + n, sizeof(text) - n, "\t%d/%d", d->pagesDone,
+                                         d->pageCount);
+                n += sceClibSnprintf(text + n, sizeof(text) - n, "\n");
             }
             unlock();
             if (!more) break;
@@ -7964,10 +7978,12 @@ bool dlAdd(int tmpl, DlItem* d, const char* server, const char* query, const cha
 
 // What the notification's second line says, for n of count.
 void dlSub(char* out, int cap, int n, int count, const char* what) {
+    char page[32] = "";
+    if (g_dlPageNote[0]) sceClibSnprintf(page, sizeof(page), "%s \xC2\xB7 ", g_dlPageNote);
     if (count > 1)
-        sceClibSnprintf(out, cap, "%d of %d \xC2\xB7 %s", n + 1, count, what);
+        sceClibSnprintf(out, cap, "%d of %d \xC2\xB7 %s%s", n + 1, count, page, what);
     else
-        sceClibSnprintf(out, cap, "%s", what);
+        sceClibSnprintf(out, cap, "%s%s", page, what);
 }
 
 enum { kPrepReady, kPrepGone, kPrepNotReady, kPrepStopped };
@@ -8152,8 +8168,9 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
                     logLine("download: %s: its file not opened: 0x%08X", label, (unsigned)fd);
                     return kDlFailed;
                 }
-                logLine("download: %s: %s from %s MB of %s MB", label,
-                        append ? "going on" : "begun", mb64Of(have).s, mb64Of(d->total).s);
+                if (!g_dlQuiet)
+                    logLine("download: %s: %s from %s MB of %s MB", label,
+                            append ? "going on" : "begun", mb64Of(have).s, mb64Of(d->total).s);
                 const SceUInt64 began = sceKernelGetSystemTimeWide();
                 SceUInt64 shown = 0, logged = began;
                 uint64_t shownBytes = have;
@@ -8239,8 +8256,9 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
                     continue;  // dlBatteryHold waits, then it goes on from there
                 }
                 if (rc == 0 && (d->total == 0 || have >= d->total)) {
-                    logLine("download: %s: whole, %s MB, %s MB of it in %s s", label,
-                            mb64Of(have).s, mb64Of(have - from).s, secsOf(ms).s);
+                    if (!g_dlQuiet)
+                        logLine("download: %s: whole, %s MB, %s MB of it in %s s", label,
+                                mb64Of(have).s, mb64Of(have - from).s, secsOf(ms).s);
                     lock();
                     if (d->total == 0) d->total = have;
                     unlock();
@@ -8261,12 +8279,138 @@ int dlFetch(int tmpl, DlItem* d, const char* url, const char* path, const char* 
     }
 }
 
+// ── A chapter: a file a page ──
+// A "pages" download: a URL template and a file template with {page} in
+// them, the page number from `first` on, or {page:N}, padded to N digits;
+// and how many pages. Each page is fetched as a url download is, into
+// "<file>.part", moved in once whole: a page whose file is there is done,
+// with no request for it when the chapter goes on.
+bool pageExpand(const char* tmpl, int page, char* out, int cap) {
+    int n = 0;
+    for (const char* p = tmpl; *p;) {
+        int digits = 0;
+        const char* after = NULL;
+        if (startsWith(p, "{page}")) {
+            after = p + 6;
+        } else if (startsWith(p, "{page:") && p[6] >= '1' && p[6] <= '9' && p[7] == '}') {
+            digits = p[6] - '0';
+            after = p + 8;
+        }
+        if (after) {
+            char v[16];
+            const int k = sceClibSnprintf(v, sizeof(v), "%0*d", digits, page);
+            for (int i = 0; i < k; i++, n++)
+                if (n < cap - 1) out[n] = v[i];
+            p = after;
+        } else {
+            if (n < cap - 1) out[n] = *p;
+            n++;
+            p++;
+        }
+    }
+    if (n >= cap) {
+        out[0] = 0;
+        return false;
+    }
+    out[n] = 0;
+    return true;
+}
+
+// The download's pages, f's: URL template, "count[,first]", extra header
+// lines. Its state when it ends.
+int dlPages(int tmpl, DlItem* d, char** f, int nf, int n, int count, const char* label) {
+    const char* const urlTmpl = f[kFArg1];
+    const char* const fileTmpl = f[kFPath];
+    const char* const extra = nf > kFArg3 ? f[kFArg3] : NULL;
+    const int pages = nf > kFArg2 ? toInt(f[kFArg2]) : 0;
+    const char* comma = nf > kFArg2 ? findText(f[kFArg2], ",") : NULL;
+    const int first = comma ? toInt(comma + 1) : 0;
+    if (!urlTmpl[0] || !findText(urlTmpl, "{page") || !findText(fileTmpl, "{page") ||
+        pages <= 0 || pages > SC_MAX_PAGES || first < 0) {
+        logLine("download: %s: pages need {page} in the URL and the file, and 1 to %d pages", label,
+                SC_MAX_PAGES);
+        return kDlFailed;
+    }
+    static char url[1024], path[200], part[208];
+    lock();
+    d->pageCount = pages;
+    d->pagesDone = 0;
+    d->bytes = 0;
+    unlock();
+    int state = kDlDone, fetched = 0;
+    const SceUInt64 began = sceKernelGetSystemTimeWide();
+    for (int i = 0; i < pages && state == kDlDone; i++) {
+        const int page = first + i;
+        if (!pageExpand(urlTmpl, page, url, sizeof(url)) ||
+            !pageExpand(fileTmpl, page, path, sizeof(path))) {
+            logLine("download: %s: page %d too long a URL or file name", label, page);
+            state = kDlFailed;
+            break;
+        }
+        // The pages' folder, its last level, made with the first page.
+        if (i == 0) {
+            char dir[200];
+            copyText(dir, path, sizeof(dir));
+            int k = (int)sceClibStrnlen(dir, sizeof(dir));
+            while (k > 0 && dir[k - 1] != '/') k--;
+            if (k > 1) {
+                dir[k - 1] = 0;
+                sceIoMkdir(dir, 0777);
+            }
+        }
+        uint64_t size = fileSize(path);
+        if (size == 0) {
+            sceClibSnprintf(part, sizeof(part), "%s.part", path);
+            sceClibSnprintf(g_dlPageNote, sizeof(g_dlPageNote), "page %d/%d", i + 1, pages);
+            char pageLabel[64];
+            sceClibSnprintf(pageLabel, sizeof(pageLabel), "%s page %d", label, page);
+            sceClibMemset(&g_dlPage, 0, sizeof(g_dlPage));
+            g_dlQuiet = 1;
+            state = dlFetch(tmpl, &g_dlPage, url, part, extra, f[kFTitle], n, count, pageLabel);
+            g_dlQuiet = 0;
+            if (state == kDlDone) {
+                sceIoRemove(path);
+                const int rc = sceIoRename(part, path);
+                if (rc < 0) {
+                    logLine("download: %s: page %d not moved in: 0x%08X", label, page, (unsigned)rc);
+                    state = kDlFailed;
+                }
+                size = fileSize(path);
+                fetched++;
+            }
+        }
+        if (state == kDlDone) {
+            lock();
+            d->pagesDone = i + 1;
+            d->bytes += size;
+            unlock();
+            dlStatus(true);
+        }
+    }
+    g_dlPageNote[0] = 0;
+    logLine("download: %s: %s, %d of %d pages, %d fetched now, %s MB, in %s s", label,
+            kDlStateNames[state], d->pagesDone, pages, fetched, mb64Of(d->bytes).s,
+            secsOf(msSince(began)).s);
+    if (state == kDlDone) {
+        lock();
+        if (d->total == 0) d->total = d->bytes;
+        unlock();
+    }
+    return state;
+}
+
 // One download of the list: its fields f. Its state when it ends.
 int dlOne(int tmpl, int n, int count, char** f, int nf, const char* label) {
     DlItem* d = &g_dl[n];
     const char* const path = f[kFPath];
     const char* const title = f[kFTitle];
     const char* const kind = f[kFKind];
+    if (same(kind, "pages")) {
+        char sub[96];
+        dlSub(sub, sizeof(sub), n, count, "Starting");
+        notifyShow(title, sub, -1.0f);
+        return dlPages(tmpl, d, f, nf, n, count, label);
+    }
     if (d->total > 0 && fileSize(path) == d->total) {
         logLine("download: %s: whole already", label);
         return kDlDone;

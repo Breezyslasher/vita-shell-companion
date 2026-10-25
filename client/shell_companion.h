@@ -231,9 +231,14 @@ typedef struct ScDownload {
     const char* file;      // the file to write, continued from its size
     uint64_t size;         // its full size, 0 if unknown
     const char* title;     // for the notification
-    const char* kind;      // "url", "plexqueue" or "plexadd"
-    const char* args[3];   // url: the URL, extra header lines; plexqueue: server, queue id,
-                           // item id; plexadd: server, query, profile extra
+    const char* kind;      // "url", "pages", "plexqueue" or "plexadd"
+    const char* args[3];   // url: the URL, extra header lines; pages: the URL with {page},
+                           // "count" or "count,first", extra header lines; plexqueue:
+                           // server, queue id, item id; plexadd: server, query, profile extra
+    // For "pages" (a manga chapter, say), file is a template too: {page} is
+    // the page number from first on (0 by default), {page:3} the same padded
+    // to 3 digits; each page goes to its own file. size is 0 or the chapter's
+    // whole size.
 } ScDownload;
 
 int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count);
@@ -266,6 +271,8 @@ typedef struct ScDownloadStatus {
     uint64_t size;
     char queueId[16];      // plexqueue/plexadd: the queue's and item's ids it used
     char itemId[16];
+    uint32_t pagesDone;    // pages: those whose files are whole, from the first
+    uint32_t pageCount;
 } ScDownloadStatus;
 // Up to cap items into items, how many in *count.
 int scReadDownloadsStatus(int* running, int* paused, ScDownloadStatus* items, uint32_t cap,
