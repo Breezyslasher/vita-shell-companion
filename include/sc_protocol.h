@@ -23,6 +23,7 @@
 #define SC_FEAT_MUSIC     0x2u  // its queue played on by the shell once it has gone
 #define SC_FEAT_DOWNLOADS 0x4u  // its downloads carried on, with one notification
 #define SC_FEAT_UPDATE    0x8u  // its update installed once it has gone
+#define SC_FEAT_SENDSPIN  0x10u // its Sendspin player (Music Assistant) carried on once it has gone
 
 enum {
     // arg: SC_FEAT_* bits; text1: the app's data folder (all its files below
@@ -46,8 +47,11 @@ enum {
     SC_CMD_UPDATE_INSTALL,   // install SC_UPDATE_DIR once the app has gone, then launch it
     // Debug (SC_FEAT_MUSIC): arg SC_PROBE_*; text1 a WAV on the card to stream
     // (44.1 kHz, 16-bit, stereo PCM), empty for a tone, or SC_PROBE_FILE's
-    // file. docs/PROTOCOL.md §9.
-    SC_CMD_PROBE_STREAM
+    // file. docs/PROTOCOL.md §10.
+    SC_CMD_PROBE_STREAM,
+    // Sendspin (SC_FEAT_SENDSPIN).
+    SC_CMD_SENDSPIN_START,      // be the player SC_SENDSPIN describes once the app has gone
+    SC_CMD_SENDSPIN_TAKE_BACK   // stop being it; SC_SENDSPIN_STATUS says stopped once it has
 };
 #define SC_PROGRESS_UNKNOWN 0xFFFFFFFFu
 
@@ -72,6 +76,8 @@ enum {
 #define SC_DOWNLOADS_PAUSE  "sc-downloads-pause"  // made when "Pause downloads?" is answered Yes
 #define SC_UPDATE_DIR       "sc-update"
 #define SC_UPDATE_RESULT    "sc-update-result.txt"
+#define SC_SENDSPIN         "sc-sendspin.txt"     // the Sendspin player handed over
+#define SC_SENDSPIN_STATUS  "sc-sendspin-status.txt"
 
 #define SC_ART_SIZE         64
 #define SC_ROW_TIMEOUT_S    5

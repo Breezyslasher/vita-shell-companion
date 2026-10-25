@@ -284,3 +284,53 @@ int scReadUpdateResult(int* result, char* why, size_t whySize) {
     free(text);
     return 0;
 }
+
+int scWriteSendspin(const ScSendspin* s) {
+    char path[256], part[256];
+    if (!s->host || !s->clientId) return -1;
+    FILE* f = openPart(SC_SENDSPIN, path, part, sizeof(path));
+    if (!f) return -1;
+    putWritten(f);
+    fputs("host=", f);
+    putEncoded(f, s->host);
+    fprintf(f, "\nport=%u\n", (unsigned)(s->port ? s->port : 8927));
+    const char* const keys[6] = {"path", "clientId", "name", "product", "manufacturer", "software"};
+    const char* const vals[6] = {s->path, s->clientId, s->name, s->product, s->manufacturer,
+                                 s->software};
+    for (int i = 0; i < 6; i++) {
+        if (!vals[i] || !vals[i][0]) continue;
+        fprintf(f, "%s=", keys[i]);
+        putEncoded(f, vals[i]);
+        fputc('\n', f);
+    }
+    fprintf(f, "roles=player%s%s\n", s->metadata ? ",metadata" : "",
+            s->controller ? ",controller" : "");
+    if (s->bufferBytes) fprintf(f, "bufferBytes=%u\n", (unsigned)s->bufferBytes);
+    fprintf(f, "staticDelayMs=%d\nvolume=%d\nmuted=%d\n", s->staticDelayMs, s->volume,
+            s->muted ? 1 : 0);
+    return finish(f, path, part);
+}
+
+int scReadSendspinStatus(ScSendspinStatus* out) {
+    memset(out, 0, sizeof(*out));
+    char* text = readWhole(SC_SENDSPIN_STATUS);
+    if (!text) return -1;
+    char num[24];
+    value(text, "written", out->written, sizeof(out->written));
+    value(text, "state", out->state, sizeof(out->state));
+    value(text, "server", out->server, sizeof(out->server));
+    value(text, "streaming", num, sizeof(num));
+    out->streaming = num[0] == '1';
+    value(text, "playing", num, sizeof(num));
+    out->playing = num[0] == '1';
+    value(text, "volume", num, sizeof(num));
+    out->volume = atoi(num);
+    value(text, "muted", num, sizeof(num));
+    out->muted = num[0] == '1';
+    value(text, "positionMs", num, sizeof(num));
+    out->positionMs = (uint32_t)strtoul(num, NULL, 10);
+    value(text, "durationMs", num, sizeof(num));
+    out->durationMs = (uint32_t)strtoul(num, NULL, 10);
+    free(text);
+    return 0;
+}

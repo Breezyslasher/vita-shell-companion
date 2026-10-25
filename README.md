@@ -15,6 +15,9 @@ going after it closes:
   or remote apps on the network can play, pause, skip, seek and start tracks,
   through an HTTP listener the app describes (a Plex player's companion
   protocol, for one).
+- **Music Assistant in the background:** a Sendspin player app (Vita Music
+  Assistant) hands its player over as it closes, and the Vita stays the same
+  player, which Music Assistant keeps streaming to and controlling.
 - **Skip or seek:** an app chooses whether the row's ⏮ ⏭ skip tracks or seek
   within them, as an audiobook app wants.
 

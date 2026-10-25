@@ -9,12 +9,14 @@ Any app loads it once per boot and uses only the features it wants:
 | Background music | `SC_FEAT_MUSIC` | its queue keeps playing through the shell's music player after it closes |
 | Background downloads | `SC_FEAT_DOWNLOADS` | its downloads continue after it closes, with one progress notification |
 | Self-update | `SC_FEAT_UPDATE` | its update is installed after it closes, and it is launched again |
+| Sendspin | `SC_FEAT_SENDSPIN` | it stays Music Assistant's Sendspin player after it closes (§8) |
 
 Nothing in the plugin knows about Plex, Audiobookshelf, Music Assistant or
 Suwayomi. Everything server-specific is in plain URLs, request header lines
-and report templates that the app writes. The one exception is the
-`plexqueue`/`plexadd` download kinds (§5.2), which drive Plex's server-side
-download queue for VitaPlex.
+and report templates that the app writes. The exceptions are protocols that
+are the feature itself: the `plexqueue`/`plexadd` download kinds (§5.2),
+which drive Plex's server-side download queue for VitaPlex, and Sendspin
+(§8), Music Assistant's player protocol.
 
 `include/sc_protocol.h` holds the constants and structures below;
 `client/` is a C library that does all of it for an app (§7).
@@ -328,11 +330,10 @@ queue can be played: a `playMedia` for anything else is answered, and does
 nothing. This follows the companion protocol as open players implement it
 (plex-mpv-shim); it is untested against Plex's apps.
 
-**Sendspin** (Music Assistant) can't be served this way: a Sendspin player
-keeps a WebSocket open to the server, the server streams the audio over it
-and controls playback by changing the stream, and current Sendspin encrypts
-the connection end to end (Noise). Remote control of a queue the shell plays
-from files isn't what Music Assistant's server does.
+**Sendspin** (Music Assistant) isn't served this way: a Sendspin player
+keeps a WebSocket open to the server, which streams the audio over it and
+controls playback by changing the stream. The plugin is such a player
+itself (§8).
 
 ## 5. Background downloads
 
@@ -466,7 +467,11 @@ int scDownloadProgressEnd(const char* l1, const char* l2);
 int scDownloadPauseAsked(void);
 // update
 int scUpdateInstall(void);
-// debug (§9)
+// sendspin (§8)
+int scWriteSendspin(const ScSendspin* s);
+int scSendspinStart(void);  int scSendspinTakeBack(void);
+int scReadSendspinStatus(ScSendspinStatus* out);
+// debug (§10)
 int scProbeStream(int mode, const char* sourceWav);
 // the files
 int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
@@ -481,17 +486,117 @@ int scCoverWriteTo(const void* image, size_t len, const char* path, char* why, s
 uint32_t scCoverNextSerial(uint32_t last, uint64_t nowUs);
 ```
 
-`scMusicTakeBack` and `scDownloadsTakeBack` only reach a plugin that is in
+`scMusicTakeBack`, `scDownloadsTakeBack` and `scSendspinTakeBack` only reach a plugin that is in
 SceShell already, and never load one: with none there, nothing was carried
 on.
 
-## 8. Logs
+## 8. Sendspin (Music Assistant)
+
+An app that is a Sendspin player hands it to the plugin as it closes, and the
+Vita stays the same player in Music Assistant: it keeps playing, and Music
+Assistant's own controls (skip, pause, seek, play something else) keep
+working.
+
+> **Status:** host-tested against a fake server; not yet tried on a console
+> or against Music Assistant. How the shell plays a file that is still being
+> written is what the probe (§10) finds out, and may change §8.3.
+
+### 8.1 Handing over (`SC_CMD_SENDSPIN_START`)
+
+The app closes its own connection to the server, gives the Music row back
+(`scRowRelease`: an app that takes the row stops the player), writes
+`<folder>/sc-sendspin.txt` (`scWriteSendspin`), sends
+`SC_CMD_SENDSPIN_START` (`scSendspinStart`), and quits:
+
+```
+written=...
+host=<the server's IPv4 address; the app resolves a name first>
+port=<8927 by default>
+path=</sendspin by default>
+clientId=<encoded: the app's own client_id, so that it is the same player>
+name=<encoded: the player's name>
+product=, manufacturer=, software=   <encoded: device_info; PS Vita, Sony and the plugin's by default>
+roles=player[,metadata][,controller]
+bufferBytes=<buffer_capacity, 2097152 (about 12 s of PCM) by default>
+staticDelayMs=<0 by default>
+volume=<0-100, as the app had it>
+muted=<0/1>
+end
+```
+
+The plugin waits up to 30 s for the app to have gone, then connects with
+plain `ws://` (no TLS: LAN only) and speaks Sendspin's plain-JSON messages, as
+Vita Music Assistant does:
+
+- **`client/hello`:** the app's `client_id`, `name` and `device_info`;
+  `player@v1` with PCM 44.1 kHz, 16-bit, stereo only, `buffer_capacity`, and
+  the `volume` and `mute` commands; `metadata@v1` and `controller@v1` when
+  `roles=` lists them.
+- **`client/state`:** `synchronized`, with the volume, mute and
+  `static_delay_ms`, after `server/hello` and after each volume change.
+- **`stream/start`:** a stream in any other format is asked again as PCM
+  (`stream/request-format`).
+- **Ping:** answered. There is no clock sync (`client/time`): the one player
+  plays as the shell goes.
+- **Lost:** a connection that drops is made again after 1, 2, 5 and 10 s, then
+  every 30 s, for up to 30 minutes of failures in a row.
+
+### 8.2 What the server does, and the Music row
+
+| From the server | The plugin |
+|---|---|
+| `stream/start` | begins a new WAV for the stream |
+| `stream/clear` (a seek or skip) | stops the shell, and begins a new WAV |
+| `stream/end` (pause or stop) | stops the shell, and removes the files |
+| `server/command` volume, mute | applied to the PCM as it is written, so heard after what is buffered |
+| `server/state` metadata | the song on the Music row (with `metadata`) |
+| `group/update` | ⏯ shows playing or paused |
+
+With `controller`, the row's ⏮ ⏯ ⏭ are sent to the server as
+`client/command` `previous`, `play`/`pause` and `next`, so Music Assistant does
+what its own app would. Without it, presses are dropped. The row is the
+plugin's while it is the player.
+
+### 8.3 Into the shell
+
+The PCM goes into `<folder>/sc-sendspin-a.wav`, its header rewritten with the
+size every 250 ms, and the shell is given the file once 2 s of it are there.
+When the shell stops, or its clock stands still for a second, while more has
+been written, it is opened again where it was. After 20 minutes (211 MB) the
+stream goes on in `sc-sendspin-b.wav`, which the shell is given at the
+first's end. Both files are removed as the stream ends.
+
+### 8.4 Status and taking back
+
+- **Status:** `<folder>/sc-sendspin-status.txt`, every 2 s and at changes:
+
+  ```
+  written=
+  state=waiting|connecting|connected|streaming|reconnecting|stopped|failed
+  server=<the server's name>
+  streaming=0|1
+  playing=0|1
+  volume=<as the server last set it>
+  muted=0|1
+  positionMs=, durationMs=   <the song's, with metadata>
+  end
+  ```
+
+- **`SC_CMD_SENDSPIN_TAKE_BACK`** (`scSendspinTakeBack`): the app sends it as it
+  opens. The plugin sends `client/goodbye` (`restart`), closes the
+  connection, stops the shell and writes `state=stopped`. The app waits for
+  that, a second or two at most, then connects with its own player, from
+  the status's volume.
+- **Others:** an app that takes the Music row, or hands a queue over (§4), stops
+  the player too. It doesn't run while the probe does, or the other way round.
+
+## 9. Logs
 
 `ux0:data/ShellCompanion/plugin.log` holds the current boot, and
 `plugin.prev.log` the boot before. Lines about an app's work name the app.
 URLs and header lines are never logged, as they may carry tokens.
 
-## 9. Debug: the streaming probe (`SC_CMD_PROBE_STREAM`)
+## 10. Debug: the streaming probe (`SC_CMD_PROBE_STREAM`)
 
 A test for Music Assistant in the background: can the shell's music player
 play a WAV that is still being written? The plugin writes 44.1 kHz 16-bit

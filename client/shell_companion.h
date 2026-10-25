@@ -101,10 +101,50 @@ int scDownloadPauseAsked(void);
 // scReadUpdateResult.
 int scUpdateInstall(void);
 
+// ── Sendspin (SC_FEAT_SENDSPIN) ──────────────────────────────────────────────
+// As the app goes, having closed its own connection to the server: the
+// plugin becomes the Sendspin player scWriteSendspin described, with the
+// same client id, so that Music Assistant sees the same player
+// (docs/PROTOCOL.md §8).
+typedef struct ScSendspin {
+    const char* host;          // the server's IPv4 address: resolve a name first
+    uint16_t port;             // 0 for 8927
+    const char* path;          // NULL for /sendspin
+    const char* clientId;      // the app's own, as its client/hello has it
+    const char* name;          // the player's name
+    const char* product;       // device_info; NULL for "PS Vita", "Sony", the plugin's
+    const char* manufacturer;
+    const char* software;
+    int metadata;              // 1: metadata@v1, the song on the Music row
+    int controller;            // 1: controller@v1, the row's buttons to the server
+    uint32_t bufferBytes;      // buffer_capacity; 0 for 2 MB (about 12 s of PCM)
+    int staticDelayMs;
+    int volume;                // 0-100, as the app had it; the plugin goes on from there
+    int muted;
+} ScSendspin;
+int scWriteSendspin(const ScSendspin* s);
+int scSendspinStart(void);
+// As the app opens: the plugin says goodbye and closes its connection, then
+// writes state=stopped to the status, which the app waits for (a second or
+// two at most) before it connects itself. As scMusicTakeBack, never loads
+// the plugin.
+int scSendspinTakeBack(void);
+
+typedef struct ScSendspinStatus {
+    char written[32];
+    char state[16];        // waiting, connecting, connected, streaming, reconnecting,
+                           // stopped or failed
+    char server[64];
+    int streaming, playing;
+    int volume, muted;     // as the server last set them: the app goes on from there
+    uint32_t positionMs, durationMs;  // the song's, with metadata
+} ScSendspinStatus;
+int scReadSendspinStatus(ScSendspinStatus* out);
+
 // ── Debug ────────────────────────────────────────────────────────────────────
 // SC_CMD_PROBE_STREAM (SC_FEAT_MUSIC): the plugin streams a growing WAV
 // through the shell's music player and logs what the player makes of it
-// (docs/PROTOCOL.md §9). mode SC_PROBE_*; sourceWav a 44.1 kHz 16-bit stereo
+// (docs/PROTOCOL.md §10). mode SC_PROBE_*; sourceWav a 44.1 kHz 16-bit stereo
 // WAV on the card to stream, NULL or "" for a tone; for SC_PROBE_FILE, the
 // file to play as it is. SC_PROBE_HTTP sends the request scPath's
 // "sc-probe-http.txt" describes.

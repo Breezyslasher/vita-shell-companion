@@ -398,3 +398,15 @@ int scProbeStream(int mode, const char* sourceWav) {
     unlock();
     return rc;
 }
+
+int scSendspinStart(void) {
+    return sendCommand(SC_CMD_SENDSPIN_START, 0);
+}
+
+int scSendspinTakeBack(void) {
+    lock();
+    beginLocked(SC_CMD_SENDSPIN_TAKE_BACK, 0);
+    const int rc = sendToPresentLocked();
+    unlock();
+    return rc;
+}
