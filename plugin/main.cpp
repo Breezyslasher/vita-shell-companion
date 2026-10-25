@@ -4766,7 +4766,7 @@ int g_probeThread;
 struct Probe {
     int mode;              // the run's SC_PROBE_*
     char name[48];
-    char path[2][120];     // its two files, in the app's folder
+    char path[2][160];     // its two files, in the app's folder; SC_PROBE_FILE's file
     int file;              // the one written now and with the shell
     int huge;              // its header gives kProbeHugeBytes, not what is written
     uint32_t bytes;        // PCM written to it
@@ -5088,7 +5088,145 @@ const char* probeModeName(int mode) {
     return mode == SC_PROBE_HUGE      ? "huge header"
          : mode == SC_PROBE_GROWING   ? "header of the size written"
          : mode == SC_PROBE_REOPEN    ? "reopened"
+         : mode == SC_PROBE_FILE      ? "a file as it is"
+         : mode == SC_PROBE_HTTP      ? "a request"
                                       : "?";
+}
+
+// SC_PROBE_FILE: the file in g_p.source played as it is, for 30 s, as the
+// queue plays a local track: does the shell take it (an .m4b, say), how long
+// does it say it is, and does it seek? A seek to 60 s at 10 s, a pause at
+// 20 s, play at 23 s. The file is left as it was.
+void probeFileRun() {
+    g_p.huge = 1;  // its header is never touched
+    g_p.state = -1;
+    g_p.timeMs = 0;
+    g_p.mark = NULL;
+    g_p.stalled = 0;
+    g_p.stillUs = 0;
+    g_p.paused = 0;
+    g_p.bytes = 0;
+    g_p.file = 0;
+    copyText(g_p.path[0], g_p.source, sizeof(g_p.path[0]));
+    SceIoStat st;
+    sceClibMemset(&st, 0, sizeof(st));
+    const int rcStat = sceIoGetstat(g_p.path[0], &st);
+    const int rcStart = musicTracked(0x30000);
+    logLine("probe: run \"%s\": %s, %u KB (stat 0x%08X); music service started: 0x%08X",
+            probeModeName(SC_PROBE_FILE), g_p.path[0], (unsigned)((uint64_t)st.st_size >> 10),
+            (unsigned)rcStat, (unsigned)rcStart);
+    probePlay("first play", 0);
+    const SceUInt64 playUs = sceKernelGetSystemTimeWide();
+    uint32_t nextSecond = 1;
+    int step = 0;
+    while (!probeStopAsked()) {
+        SceUInt timeout = 100 * 1000;
+        sceKernelWaitSema(g_probeSema, 1, &timeout);
+        const SceUInt64 now = sceKernelGetSystemTimeWide();
+        probeLook(now);
+        const uint32_t ms = (uint32_t)(now - playUs) / 1000u, s = ms / 1000u;
+        if (ms >= nextSecond * 1000u) probeSecond(nextSecond++);
+        if (s >= 30) break;
+        if (step == 0 && s >= 10) {
+            step++;
+            probeSeek("seek to 60 s", 60000);
+        } else if (step == 1 && s >= 20) {
+            step++;
+            const int rc = musicEvent(kEventStop);
+            g_p.paused = 1;
+            g_p.mark = NULL;
+            logLine("probe: pause at %u ms: stop 0x%08X", (unsigned)g_p.timeMs, (unsigned)rc);
+        } else if (step == 2 && s >= 23) {
+            step++;
+            const uint32_t at = g_p.timeMs;
+            const int rc = musicEvent(kEventPlay);
+            g_p.paused = 0;
+            logLine("probe: play again from %u ms: play 0x%08X", (unsigned)at, (unsigned)rc);
+            probeMark("play again", at);
+        }
+    }
+    const int rcStop = musicEvent(kEventStop), rcEnd = musicTracked(0x30001);
+    logLine("probe: run \"%s\" %s at %u ms, length %u ms: stop 0x%08X, end 0x%08X",
+            probeModeName(SC_PROBE_FILE), probeStopAsked() ? "stopped" : "over",
+            (unsigned)g_p.timeMs, (unsigned)g_p.lenMs, (unsigned)rcStop, (unsigned)rcEnd);
+}
+
+// SC_PROBE_HTTP: the request <folder>/sc-probe-http.txt describes sent once,
+// as a report is (serverSend), and its answer's status logged: does the
+// firmware send PATCH (sceHttpCreateRequestWithURL2), and does the server
+// take it? The file is the queue's kind, its values encoded:
+// url=, method=, headers=, body=, type=, end. Read and decoded in place in
+// g_probeBuf; the URL, headers and body are never logged.
+void probeHttpRun(const char* file) {
+    const int n = readFile(file, (char*)g_probeBuf, sizeof(g_probeBuf));
+    if (n < 0) {
+        logLine("probe: %s: open 0x%08X", file, (unsigned)n);
+        return;
+    }
+    const char *url = "", *method = "", *headers = "", *body = "", *type = "";
+    bool whole = false;
+    char* text = (char*)g_probeBuf;
+    for (char* line = text; *line;) {
+        char* end = line;
+        while (*end && *end != '\n') end++;
+        const bool last = !*end;
+        *end = 0;
+        int len = (int)(end - line);
+        if (len > 0 && line[len - 1] == '\r') line[--len] = 0;
+        char* eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq) {
+            *eq = 0;
+            char* v = eq + 1;
+            urlDecode(v, (int)(line + len - v), v, (int)(line + len - v) + 1, true);
+            if (same(line, "url")) url = v;
+            else if (same(line, "method")) method = v;
+            else if (same(line, "headers")) headers = v;
+            else if (same(line, "body")) body = v;
+            else if (same(line, "type")) type = v;
+        } else if (same(line, "end")) {
+            whole = true;
+        }
+        if (last) break;
+        line = end + 1;
+    }
+    if (!whole || !url[0]) {
+        logLine("probe: %s is %s", file, !whole ? "not whole (no end line)" : "without a url");
+        return;
+    }
+    if (!g_netFound) g_netFound = findLibraries("probe");
+    logLine("probe: run \"%s\": %s, %u bytes of body; sceHttpCreateRequestWithURL2 %s",
+            probeModeName(SC_PROBE_HTTP), method[0] ? method : "GET",
+            (unsigned)sceClibStrnlen(body, sizeof(g_probeBuf)),
+            g_httpRequest2.fn ? "found" : "missing");
+    int rcSsl = -1, rcHttp = -1;
+    if (!g_netFound || !httpStart("probe", &rcSsl, &rcHttp)) {
+        logLine("probe: no HTTP library");
+        return;
+    }
+    const int tmpl = httpTemplate("probe");
+    if (tmpl >= 0) {
+        HttpAsk ask = getWith(headers);
+        ask.method = method;
+        if (body[0]) {
+            ask.body = body;
+            ask.bodyLen = (uint32_t)sceClibStrnlen(body, sizeof(g_probeBuf));
+            ask.type = type[0] ? type : "application/json";
+        }
+        int conn, req, status = 0;
+        unsigned long long length = 0;
+        const int rc = httpOpen(tmpl, "probe", "the request", url, ask, &conn, &req);
+        if (rc >= 0) {
+            httpFn<FnStatus>(kHttpStatus)(req, &status);
+            httpFn<FnLength>(kHttpLength)(req, &length);
+            httpClose(conn, req);
+        }
+        logLine("probe: the request: 0x%08X, HTTP %d, %u bytes of answer", (unsigned)rc, status,
+                (unsigned)length);
+        httpFn<FnId>(kHttpDeleteTemplate)(tmpl);
+    }
+    httpEnd(rcSsl, rcHttp);
+    sceClibMemset(g_probeBuf, 0, sizeof(g_probeBuf));
 }
 
 // One run of a mode, for kProbeEndS from the first play. Its script, by the
@@ -5204,13 +5342,24 @@ void probeStep() {
     }
     g_p.src = -1;
     g_p.writeErrors = 0;
-    if (findSvcObj("probe") && g_getSvcObj()) {
+    if (mode == SC_PROBE_HTTP) {
+        char file[160];
+        lock();
+        const App* who = appAt(app);
+        if (who) appPath(who, "sc-probe-http.txt", file, sizeof(file));
+        unlock();
+        logLine("probe: for %s, mode %d", g_p.name, mode);
+        if (who) probeHttpRun(file);
+    } else if (mode == SC_PROBE_FILE && !g_p.source[0]) {
+        logLine("probe: mode %d wants a file", mode);
+    } else if (findSvcObj("probe") && g_getSvcObj()) {
         logLine("probe: for %s, mode %d, in %u s", g_p.name, mode, (unsigned)(kProbeDelayMs / 1000));
         SceUInt timeout = kProbeDelayMs * 1000u;
         sceKernelWaitSema(g_probeSema, 1, &timeout);
         const int first = mode == SC_PROBE_ALL ? SC_PROBE_HUGE : mode;
         const int last = mode == SC_PROBE_ALL ? SC_PROBE_REOPEN : mode;
-        for (int m = first; m <= last && !probeStopAsked(); m++) {
+        if (mode == SC_PROBE_FILE && !probeStopAsked()) probeFileRun();
+        for (int m = first; m <= last && mode != SC_PROBE_FILE && !probeStopAsked(); m++) {
             probeRun(m);
             SceUInt pause = 3000 * 1000;
             if (m < last) sceKernelWaitSema(g_probeSema, 1, &pause);
@@ -5262,7 +5411,7 @@ void probeAsk(int app, uint32_t mode, const char* source) {
         probeStop("asked");
         return;
     }
-    if (mode > SC_PROBE_ALL) {
+    if (mode > SC_PROBE_HTTP) {
         logLine("probe: no mode %u", (unsigned)mode);
         return;
     }
@@ -5280,7 +5429,7 @@ void probeAsk(int app, uint32_t mode, const char* source) {
         return;
     }
     if (!g_probeThread) {
-        const int rc = (new ProbeThread(kThreadPriority, 0x4000, "ShellCompanion::Probe"))->Start();
+        const int rc = (new ProbeThread(kThreadPriority, kFetchStack, "ShellCompanion::Probe"))->Start();
         if (rc < 0) {
             logLine("probe: its thread not started: 0x%08X", (unsigned)rc);
             return;

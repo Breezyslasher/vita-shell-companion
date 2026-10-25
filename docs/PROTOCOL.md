@@ -515,6 +515,8 @@ scProbeStream(SC_PROBE_STOP, NULL);  // stop it early
   | `SC_PROBE_GROWING` | 2 | the size written so far, rewritten after each write |
   | `SC_PROBE_REOPEN` | 3 | as 2; the file is reopened where it was at each stall and every 10 s |
   | `SC_PROBE_ALL` | 4 | 1, 2 and 3 in turn, about 4 min 20 s |
+  | `SC_PROBE_FILE` | 5 | no WAV: `text1` is played as it is, for 30 s (below) |
+  | `SC_PROBE_HTTP` | 6 | no music: one request is sent (below) |
 
 - **`text1`:** a WAV on the card to stream (PCM, 44.1 kHz, 16-bit, stereo),
   looped. Empty for a tone: 440 Hz, 880 Hz every tenth second, and the last
@@ -536,4 +538,29 @@ What the log (`plugin.log`, lines beginning `probe:`) shows:
 | `<step>: playing at T ms, N ms after it was asked` | how long a play, seek, skip or reopen took to be heard |
 | `<step>: not playing from … after it was asked` | that step never took effect within 10 s |
 | `open 0x8…` on `first play` | the player refused the file, probably its header |
+
+Two more modes answer questions for the other apps:
+
+- **`SC_PROBE_FILE`**, for Audiobookshelf: does the shell play an `.m4b`
+  (AAC in MP4) under that name? `text1` names any file on the card. It is
+  played as the queue plays a local track, sought to 60 s at 10 s, paused at
+  20 s and played again at 23 s, and left as it was. `first play: … open
+  0x8…`, or state never 1, means the shell refuses it; the per-second lines
+  give the length it reads.
+- **`SC_PROBE_HTTP`**, for Audiobookshelf's progress: does a PATCH get
+  through from SceShell? The app writes `<folder>/sc-probe-http.txt` like
+  the queue (§1, values encoded):
+
+  ```
+  url=http://<server>/api/me/progress/<item id>
+  method=PATCH
+  headers=Authorization: Bearer <token>
+  body={"currentTime":12.5,"duration":3600}
+  type=application/json
+  end
+  ```
+
+  The log gives whether `sceHttpCreateRequestWithURL2` (PATCH's way) was
+  found, then `the request: 0x…, HTTP <status>`. No URL, header or body is
+  logged.
 

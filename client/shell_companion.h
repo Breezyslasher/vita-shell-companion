@@ -105,7 +105,9 @@ int scUpdateInstall(void);
 // SC_CMD_PROBE_STREAM (SC_FEAT_MUSIC): the plugin streams a growing WAV
 // through the shell's music player and logs what the player makes of it
 // (docs/PROTOCOL.md §9). mode SC_PROBE_*; sourceWav a 44.1 kHz 16-bit stereo
-// WAV on the card to stream, NULL or "" for a tone.
+// WAV on the card to stream, NULL or "" for a tone; for SC_PROBE_FILE, the
+// file to play as it is. SC_PROBE_HTTP sends the request scPath's
+// "sc-probe-http.txt" describes.
 int scProbeStream(int mode, const char* sourceWav);
 
 // ── The files ────────────────────────────────────────────────────────────────

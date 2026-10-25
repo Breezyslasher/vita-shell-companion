@@ -45,7 +45,8 @@ enum {
     // Self-update (SC_FEAT_UPDATE).
     SC_CMD_UPDATE_INSTALL,   // install SC_UPDATE_DIR once the app has gone, then launch it
     // Debug (SC_FEAT_MUSIC): arg SC_PROBE_*; text1 a WAV on the card to stream
-    // (44.1 kHz, 16-bit, stereo PCM), empty for a tone. docs/PROTOCOL.md §9.
+    // (44.1 kHz, 16-bit, stereo PCM), empty for a tone, or SC_PROBE_FILE's
+    // file. docs/PROTOCOL.md §9.
     SC_CMD_PROBE_STREAM
 };
 #define SC_PROGRESS_UNKNOWN 0xFFFFFFFFu
@@ -56,6 +57,8 @@ enum {
 #define SC_PROBE_GROWING 2  // its header gives the size written, rewritten as it grows
 #define SC_PROBE_REOPEN  3  // as 2, opened again where it was at each stall and every 10 s
 #define SC_PROBE_ALL     4  // 1, 2 and 3 in turn
+#define SC_PROBE_FILE    5  // text1, a file on the card, played as it is (an .m4b, say)
+#define SC_PROBE_HTTP    6  // the request in <folder>/sc-probe-http.txt sent once
 
 // Files, in the app's data folder (SC_CMD_HELLO's text1). Each is written
 // whole as "<name>.tmp", then renamed into place, and ends with an "end"
