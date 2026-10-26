@@ -374,3 +374,27 @@ int scPluginHas(const ScPluginInfo* info, const char* cap) {
     }
     return 0;
 }
+
+int scUpdateInProgress(char* state, size_t stateSize, int* percent) {
+    if (state && stateSize) state[0] = 0;
+    if (percent) *percent = -1;
+    char* text = readWhole(SC_UPDATE_STATUS);
+    if (!text) return 0;
+    char st[16], num[32];
+    value(text, "state", st, sizeof(st));
+    value(text, "percent", num, sizeof(num));
+    const int pct = num[0] ? atoi(num) : -1;
+    value(text, "written", num, sizeof(num));
+    free(text);
+    // written= is the system clock, which starts again at each boot: a time
+    // ahead of now is a status from before it.
+    const SceUInt64 now = sceKernelGetSystemTimeWide();
+    const SceUInt64 written = (SceUInt64)(strtod(num, NULL) * 1000000.0);
+    const int fresh = written <= now && now - written < 15000000ull;
+    const int going = strcmp(st, "waiting") == 0 || strcmp(st, "unpacking") == 0 ||
+                      strcmp(st, "installing") == 0;
+    if (!fresh || !going) return 0;
+    if (state && stateSize) snprintf(state, stateSize, "%s", st);
+    if (percent) *percent = pct;
+    return 1;
+}
