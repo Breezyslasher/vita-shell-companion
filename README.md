@@ -13,8 +13,9 @@ going after it closes:
 - **Several apps, one plugin:** the plugin answers each app's hello with its
   version and what it has, so an app can tell when the copy in SceShell is
   older than its own.
-- **Self-update:** the plugin installs the app's update once it has closed,
-  then launches it again.
+- **Self-update:** the app downloads its `.vpk`; once the app has closed, the
+  plugin unpacks it, makes its `head.bin`, installs it with the Vita's own
+  installer, and launches the app again.
 - **Remote control:** while the shell plays an app's queue, the app's server
   or remote apps on the network can play, pause, skip, seek and start tracks,
   through an HTTP listener the app describes (a Plex player's companion

@@ -92,11 +92,11 @@ own copy. So, from version 0.2.0, the plugin answers each HELLO:
    ```
    written=...
    protocol=1
-   version=0.2.0
-   versionCode=200               <major * 10000 + minor * 100 + patch>
+   version=0.3.0
+   versionCode=300               <major * 10000 + minor * 100 + patch>
    features=0x1F                 <the SC_FEAT_* bits this plugin has>
    granted=0x12                  <the ones this app asked for that it has>
-   caps=queue.seek,queue.control,downloads.battery,sendspin.metadata,sendspin.controller,probe
+   caps=queue.seek,queue.control,downloads.battery,downloads.pages,update.vpk,sendspin.metadata,sendspin.controller,probe
    apps=<apps registered this boot>
    end
    ```
@@ -508,15 +508,45 @@ which prepares a transcoded file before it can be fetched. The list's
 
 ## 6. Self-update: `SC_CMD_UPDATE_INSTALL`
 
-1. The app unpacks its update to `<folder>/sc-update/` and forges
-   `sce_sys/package/head.bin` there. The client library doesn't do this: the
-   usual template is VitaShell's `head.bin` (GPL-3.0); VitaPlex's
-   `src/utils/vita_install.cpp` shows how.
-2. It sends `SC_CMD_UPDATE_INSTALL`, then quits.
-3. The plugin waits up to 30 s for the app to exit, installs the update
-   (retrying while the title still counts as running), and writes
-   `<folder>/sc-update-result.txt`: `result=0x…`, `why=…`, `end`.
-4. It relaunches the app either way. One update runs at a time.
+The update is installed with the Vita's own installer (ScePromoterUtil, as
+VitaShell installs a VPK), from SceShell: the installer refuses a title while
+it runs, so an app can't install itself.
+
+### From a VPK (0.3.0 on, caps `update.vpk`)
+
+1. The app downloads its update's `.vpk`, then calls
+   `scUpdateInstallVpk("ux0:data/MyApp/update.vpk")` (`SC_CMD_UPDATE_INSTALL`
+   with the VPK's path in `text1`), and quits.
+2. Once the app has gone, the plugin:
+   1. empties `<folder>/sc-update/`,
+   2. unpacks the VPK into it, checking every file's CRC-32,
+   3. checks that `sce_sys/param.sfo`'s `TITLE_ID` is the app's own,
+   4. makes `sce_sys/package/head.bin` the way VitaShell does, unless the VPK
+      has one.
+3. It then installs as below. A VPK that can't be unpacked or is another
+   app's is not installed, and `why=` says why. The unpacked folder is
+   removed if it fails, and the VPK is left where it was.
+
+Refused: names with `..`, a device or a backslash, encrypted entries, ZIP64,
+and methods other than stored and deflate. The unpacking borrows 64 KB of
+memory while it runs.
+
+`scUpdateInstallVpk` sends nothing (it returns -2) to a plugin whose answer
+to HELLO doesn't list `update.vpk`. An older plugin would install whatever
+`sc-update/` held from before.
+
+### From a folder
+
+1. The app unpacks its update to `<folder>/sc-update/` and makes
+   `sce_sys/package/head.bin` there itself.
+2. It sends `SC_CMD_UPDATE_INSTALL` (`scUpdateInstall`), then quits.
+
+### Either way
+
+- **Installing:** the plugin waits up to 30 s for the app to exit, installs
+  the update (retrying while the title still counts as running), and writes
+  `<folder>/sc-update-result.txt`: `result=0x…`, `why=…`, `end`.
+- **Relaunch:** it relaunches the app either way. One update runs at a time.
 
 ## 7. Client library (`client/`)
 
@@ -547,6 +577,7 @@ int scDownloadProgressEnd(const char* l1, const char* l2);
 int scDownloadPauseAsked(void);
 // update
 int scUpdateInstall(void);
+int scUpdateInstallVpk(const char* vpkPath);   // section 6, plugins with update.vpk
 // sendspin (§8)
 int scWriteSendspin(const ScSendspin* s);
 int scSendspinStart(void);  int scSendspinTakeBack(void);
