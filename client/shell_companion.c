@@ -442,3 +442,15 @@ int scSendspinTakeBack(void) {
     unlock();
     return rc;
 }
+
+int scUpdateInstallVpk(const char* vpkPath) {
+    ScPluginInfo info;
+    if (!vpkPath || !vpkPath[0] || scPluginInfo(&info) < 0 || !scPluginHas(&info, "update.vpk"))
+        return -2;
+    lock();
+    beginLocked(SC_CMD_UPDATE_INSTALL, 0);
+    toUtf16(vpkPath, g_message.text1, 256);
+    const int rc = sendLocked();
+    unlock();
+    return rc;
+}

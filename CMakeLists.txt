@@ -14,7 +14,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "toolchain")
 endif()
 
-project(shell_companion VERSION 0.2.0 LANGUAGES C CXX ASM)
+project(shell_companion VERSION 0.3.0 LANGUAGES C CXX ASM)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(SC_PAF_INCLUDE_DIR "" CACHE PATH "PAF headers (scripts/fetch_paf_headers.sh <dir>, then <dir>/include)")
@@ -50,6 +50,7 @@ target_link_libraries(shell_companion
     SceRtc_stub
     SceSysmodule_stub
     ScePower_stub
+    SceSysmem_stub
     gcc)
 # With no C runtime nothing runs static constructors: fail the build on any.
 add_custom_command(TARGET shell_companion POST_BUILD
