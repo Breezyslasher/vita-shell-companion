@@ -127,7 +127,7 @@ namespace {
 const char* const kLogPath = SC_LOG_DIR "/plugin.log";
 const char* const kLogPrevPath = SC_LOG_DIR "/plugin.prev.log";
 const int kLogMax = 512 * 1024;
-const int kRingLines = 128;
+const int kRingLines = 48;  // drained every 100 ms; 15 KB
 const int kLineMax = 320;
 
 struct RingLine {
@@ -296,6 +296,11 @@ paf::ui::Widget* g_impose;               // the quick menu's root
 paf::graph::SurfacePool* g_surfacePool;  // power_manage_plugin's, for the cover
 SceUID g_toPlugin = -1, g_fromPlugin = -1;
 SceUID g_lock = -1;  // everything below, and the widgets
+
+bool memMusic();
+bool memDl();
+void memDlGive();
+bool memPlayer();
 
 // ── The apps ────────────────────────────────────────────────────────────────
 // Each app that has said SC_CMD_HELLO this boot, by its title id. An entry is
@@ -1679,7 +1684,8 @@ RemoteCmd g_remote[kRemoteMax];  // under g_lock, from g_remoteFirst on
 int g_remoteFirst, g_remoteCount;
 // The queue's header lines, sent with every request for it: copied by the
 // fetch and server threads as they begin.
-char g_musicHeaders[2048];
+char (*g_musicHeadersP)[2048];
+#define g_musicHeaders (*g_musicHeadersP)
 uint32_t g_shellArts;    // kShellArt serials so far
 
 // The music thread's alone. A track as the queue's track= line has it
@@ -1801,15 +1807,18 @@ struct Carry {
     ReportTpl reportOn, playedOn;
     uint32_t reportEveryUs;
 };
-Carry g_c;
+Carry* g_cP;
+#define g_c (*g_cP)
 // The music's states as the server is told them (report).
 const char* const kPlaying = "playing";
 const char* const kPaused = "paused";
 const char* const kBuffering = "buffering";
 const char* const kStopped = "stopped";
 void report(const Track* t, const char* state, uint32_t timeMs);
-Track g_found;  // a song looked at for what comes next
-Track g_scan;   // a song read from the queue as it is looked through (nextOnCard)
+Track* g_foundP;  // a song looked at for what comes next
+#define g_found (*g_foundP)
+Track* g_scanP;   // a song read from the queue as it is looked through (nextOnCard)
+#define g_scan (*g_scanP)
 int g_statusErrors, g_statusReadErrors;
 
 // No 64-bit division here: it would bring in libgcc's, built for another
@@ -1919,8 +1928,10 @@ struct LineReader {
     char buf[2048];
     int len, pos;
 };
-LineReader g_reader;
-char g_line[6144];  // the line read last: a track's URLs, URL-encoded, or the header lines
+LineReader* g_readerP;
+#define g_reader (*g_readerP)
+char (*g_lineP)[6144];  // the line read last: a track's URLs, URL-encoded, or the header lines
+#define g_line (*g_lineP)
 
 bool readerOpen(const char* path) {
     g_reader.fd = sceIoOpen(path, SCE_O_RDONLY, 0);
@@ -2000,7 +2011,8 @@ struct QueueHead {
     ReportTpl state, played;
     uint32_t everyS;     // report.state.every
 };
-QueueHead g_queueHead;  // the music thread's
+QueueHead* g_queueHeadP;  // the music thread's
+#define g_queueHead (*g_queueHeadP)
 
 // ── Remote control: the listener's set-up ───────────────────────────────────
 // (docs/PROTOCOL.md §4.4) A queue may have SceShell listen for a remote
@@ -2040,7 +2052,9 @@ struct ControlCfg {
     char pushType[48];
     uint32_t pushEveryMs;
 };
-ControlCfg g_ctl;   // written as a queue begins, while no listener runs; the listener's after
+ControlCfg* g_ctlP;
+char (*g_controlLineVP)[1600];  // controlLine's value, as it is decoded   // written as a queue begins, while no listener runs; the listener's after
+#define g_ctl (*g_ctlP)
 int g_ctlRunning;   // under g_lock: the listener's thread runs
 int g_ctlStop;      // under g_lock: it is to stop
 
@@ -2060,7 +2074,7 @@ int splitBar(char* v, char** part, int n) {
 
 // A control.* line of the queue's head into c. Unknown ones are passed over.
 void controlLine(ControlCfg* c) {
-    static char v[1600];
+    char (&v)[1600] = *g_controlLineVP;
     char* part[4];
     char key[64];
     int k = 0;
@@ -2464,7 +2478,8 @@ bool coverPath(const Track* t, char* out, int cap) {
     return coverPathIn(g_c.songs, t, out, cap);
 }
 
-uint8_t g_copyBuf[4096];  // the music thread's
+uint8_t (*g_copyBufP)[4096];  // the music thread's
+#define g_copyBuf (*g_copyBufP)
 
 // t's cover, if it has none on the card, as a copy of other's when the two
 // have one cover URL, their album's: the songs of an album after
@@ -2576,14 +2591,17 @@ struct Fetch {
     Track t;      // the song; its file in t.path once fetched
 };
 Fetch g_fetch;
-Track g_ahead;       // the music thread's: a song looked at to fetch
+Track* g_aheadP;       // the music thread's: a song looked at to fetch
+#define g_ahead (*g_aheadP)
 // The fetch thread's: the libraries' functions found; what it passes on to
 // the card; a request's URL, the file beside the one it is for, and the
 // queue's header lines.
 int g_netFound;
-uint8_t g_fetchBuf[16384];
+uint8_t (*g_fetchBufP)[16384];
+#define g_fetchBuf (*g_fetchBufP)
 char g_fetchUrl[1024], g_fetchPart[220];
-char g_fetchHeaders[2048];
+char (*g_fetchHeadersP)[2048];
+#define g_fetchHeaders (*g_fetchHeadersP)
 // Whether t can be fetched at all: it has a URL for the shell.
 bool fetchable(const Track* t) {
     return t->url[0] || t->altUrl[0];
@@ -2647,7 +2665,8 @@ Num secsOf(uint32_t ms) {
 
 // The fetch thread's framer for the server's MP3 of a song (fetchMp3), and
 // where what it passes on goes: the file.
-Mp3Frames g_mp3;
+Mp3Frames* g_mp3P;
+#define g_mp3 (*g_mp3P)
 int mp3Sink(void* ctx, const uint8_t* data, uint32_t n) {
     const SceUID fd = *(const SceUID*)ctx;
     return sceIoWrite(fd, data, (SceSize)n) == (int)n ? 0 : -1;
@@ -3313,14 +3332,20 @@ struct Sent {
 // Under g_lock: the tracks waiting to be reported played, from
 // g_scrobbleFirst on; the state waiting; and whether a thread is sending
 // them.
-Sent g_scrobbles[kScrobbles];
+Sent (*g_scrobblesP)[kScrobbles];
+#define g_scrobbles (*g_scrobblesP)
 int g_scrobbleFirst, g_scrobbleCount, g_serving;
-Sent g_report;
+Sent* g_reportP;
+Sent* g_reportMadeP;   // report's and scrobbleSong's request, as it is made
+Sent* g_scrobbleMadeP;
+#define g_report (*g_reportP)
 int g_reportDue;
 // The server thread's: the one it sends, the header lines, and whether the
 // last report was not taken (logged once).
-Sent g_sending;
-char g_serverHeaders[2048];
+Sent* g_sendingP;
+#define g_sending (*g_sendingP)
+char (*g_serverHeadersP)[2048];
+#define g_serverHeaders (*g_serverHeadersP)
 int g_reportFailed;
 
 // What a template may name beyond the track (the control listener's): the
@@ -3553,7 +3578,7 @@ uint32_t reportLength(const Track* t) {
 // thread's.
 void scrobbleSong(const Track* t) {
     if (!g_c.playedOn.url[0] || !t->key[0]) return;
-    static Sent made;
+    Sent& made = *g_scrobbleMadeP;
     const uint32_t len = reportLength(t);
     if (!makeSent(&g_c.playedOn, t, kStopped, len, len, &made)) {
         logLine("carry on: song %d not reported played: report.played is too long here",
@@ -3587,7 +3612,7 @@ void report(const Track* t, const char* state, uint32_t timeMs) {
     const uint32_t len = reportLength(t);
     // A time past the track's length is refused by some servers (Plex).
     if (len > 0 && timeMs > len) timeMs = len;
-    static Sent made;
+    Sent& made = *g_reportMadeP;
     if (!makeSent(&g_c.reportOn, t, state, timeMs, len, &made)) {
         if (!g_reportFailed) logLine("carry on: report.state is too long here");
         g_reportFailed = 1;
@@ -4710,6 +4735,7 @@ public:
 // queue carried on has no stack for it in SceShell. true when there is one.
 bool startMusicThread() {
     if (g_musicThread) return true;
+    if (!memMusic()) return false;
     if (g_musicSema < 0) {
         g_musicSema = sceKernelCreateSema("ShellCompanion::Music", 0, 0, 1, NULL);
         if (g_musicSema < 0) {
@@ -4802,9 +4828,12 @@ struct Probe {
     uint32_t markMs;
     SceUInt64 markUs;
 };
-Probe g_p;
-uint8_t g_probeBuf[4096];
-uint8_t g_probeHead[512];
+Probe* g_pP;
+#define g_p (*g_pP)
+uint8_t (*g_probeBufP)[4096];
+#define g_probeBuf (*g_probeBufP)
+uint8_t (*g_probeHeadP)[512];
+#define g_probeHead (*g_probeHeadP)
 
 uint32_t le32(const uint8_t* p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
@@ -5435,6 +5464,7 @@ void probeAsk(int app, uint32_t mode, const char* source) {
         logLine("probe: not while the plugin is the Sendspin player");
         return;
     }
+    if (!memPlayer()) return;
     if (g_probeSema < 0) g_probeSema = sceKernelCreateSema("ShellCompanion::Probe", 0, 0, 1, NULL);
     if (g_probeSema < 0) {
         logLine("probe: its semaphore: 0x%08X", (unsigned)g_probeSema);
@@ -5570,11 +5600,16 @@ struct Subscriber {
 };
 // The listener thread's alone, all of them.
 Subscriber g_subs[kSubscribers];
-char g_ctlReq[4096];
-char g_ctlBody[2048];
-char g_ctlOut[3072];
+char (*g_ctlReqP)[4096];
+char (*g_ctlQueryP)[1024];  // handleConnection's query
+#define g_ctlReq (*g_ctlReqP)
+char (*g_ctlBodyP)[2048];
+#define g_ctlBody (*g_ctlBodyP)
+char (*g_ctlOutP)[3072];
+#define g_ctlOut (*g_ctlOutP)
 char g_ctlUrl[512];
-Track g_ctlTrack;
+Track* g_ctlTrackP;
+#define g_ctlTrack (*g_ctlTrackP)
 const char* g_ctlTrackState;
 uint32_t g_ctlPos, g_ctlDur, g_ctlSerial;
 
@@ -5743,7 +5778,7 @@ void handleConnection(int sock, uint32_t addr) {
     g_ctlReq[n] = 0;
     // "METHOD /path?query HTTP/1.1"
     char method[12], path[128];
-    static char query[1024];
+    char (&query)[1024] = *g_ctlQueryP;
     int i = 0, k = 0;
     while (g_ctlReq[i] && g_ctlReq[i] != ' ' && k < (int)sizeof(method) - 1) method[k++] = g_ctlReq[i++];
     method[k] = 0;
@@ -6144,11 +6179,15 @@ struct Ss {
     uint32_t chunks, unknown;
     SceUInt64 statusUs;
 };
-Ss g_ss;
+Ss* g_ssP;
+#define g_ss (*g_ssP)
 // The socket's reads go through g_probeBuf: the probe and Sendspin never run
 // at once (probeAsk, ssAsk). A text message is held in g_ssText.
-char g_ssText[4096];
-char g_ssOut[1536];
+char (*g_ssTextP)[4096];
+#define g_ssText (*g_ssTextP)
+char (*g_ssOutP)[1536];
+uint8_t (*g_ssFrameP)[1536 + 16];  // ssSendText's frame
+#define g_ssOut (*g_ssOutP)
 enum { kSsCmdPlay = 1, kSsCmdPause = 2, kSsCmdNext = 4, kSsCmdPrevious = 8 };
 
 uint32_t ssRandom() {
@@ -6242,7 +6281,7 @@ bool ssSendText(const char* text, uint32_t n) {
     uint8_t mask[4];
     const uint32_t r = ssRandom();
     for (int i = 0; i < 4; i++) mask[i] = (uint8_t)(r >> (8 * i));
-    static uint8_t frame[sizeof(g_ssOut) + 16];
+    uint8_t (&frame)[sizeof(g_ssOut) + 16] = *g_ssFrameP;
     const uint32_t len = wsFrame(frame, sizeof(frame), WS_TEXT, (const uint8_t*)text, n, mask);
     return len && sendAll(g_ss.sock, (const char*)frame, (int)len);
 }
@@ -7038,6 +7077,7 @@ void ssAsk(int app) {
         logLine("sendspin: not while the probe runs");
         return;
     }
+    if (!memPlayer()) return;
     if (g_ssSema < 0) g_ssSema = sceKernelCreateSema("ShellCompanion::Sendspin", 0, 0, 1, NULL);
     if (g_ssSema < 0) {
         logLine("sendspin: its semaphore: 0x%08X", (unsigned)g_ssSema);
@@ -7678,10 +7718,12 @@ struct DlItem {
 // page it is, for the notification's line (dlSub), "" for none; and the
 // fetch's begun and whole lines left out of the log, as a chapter has a
 // file a page.
-DlItem g_dlPage;
+DlItem* g_dlPageP;
+#define g_dlPage (*g_dlPageP)
 char g_dlPageNote[24];
 int g_dlQuiet;
-DlItem g_dl[SC_MAX_DOWNLOADS];
+DlItem (*g_dlP)[SC_MAX_DOWNLOADS];
+#define g_dl (*g_dlP)
 int g_dlCount;
 int g_dlRunning;  // under g_lock: the download thread runs
 int g_dlStop;     // under g_lock: stop after the piece being written
@@ -7703,7 +7745,8 @@ struct DlHead {
 // Under g_lock: the battery's percent while the downloads wait for power
 // (dlBatteryHold), else -1.
 int g_dlBattery = -1;
-DlHead g_dlHead;
+DlHead* g_dlHeadP;
+#define g_dlHead (*g_dlHeadP)
 // The download thread's: the list a line at a time, as the queue is read
 // (LineReader), with room for an add's profile; a piece of a file on its way
 // to the card; a URL; an answer of the server's.
@@ -7712,11 +7755,16 @@ struct DlReader {
     char buf[2048];
     int len, pos;
 };
-DlReader g_dlReader;
-char g_dlLine[4096];
-uint8_t g_dlBuf[16384];
-char g_dlUrl[1536];
-char g_dlAnswer[4096];
+DlReader* g_dlReaderP;
+#define g_dlReader (*g_dlReaderP)
+char (*g_dlLineP)[4096];
+#define g_dlLine (*g_dlLineP)
+uint8_t (*g_dlBufP)[16384];
+#define g_dlBuf (*g_dlBufP)
+char (*g_dlUrlP)[1536];
+#define g_dlUrl (*g_dlUrlP)
+char (*g_dlAnswerP)[4096];
+#define g_dlAnswer (*g_dlAnswerP)
 
 // Milliseconds since `from`, in 32 bits (splitUs has why there is no 64-bit
 // division).
@@ -8973,6 +9021,7 @@ int dlThread(SceSize, void*) {
         }
         g_dlRunning = 0;
         g_dlApp = -1;
+        memDlGive();  // under the lock: a list handed over now takes another
         unlock();
         break;
     }
@@ -8996,6 +9045,10 @@ void startDownloads(int app) {
         logLine("download: %s's list waits for %s's", appName(app), appName(g_dlApp));
         return;
     }
+    if (!memDl()) {
+        logLine("download: %s's list not carried on: no memory for it", appName(app));
+        return;
+    }
     g_dlStop = 0;
     g_dlAgain = 0;
     g_dlPaused = 0;
@@ -9007,6 +9060,7 @@ void startDownloads(int app) {
         if (thread >= 0) sceKernelDeleteThread(thread);
         logLine("download: no thread to carry them on: 0x%08X", (unsigned)rc);
         g_dlApp = -1;
+        memDlGive();
         return;
     }
     g_dlRunning = 1;
@@ -9540,6 +9594,120 @@ int statusAsOwner(int appId, uint8_t* status) {
     return 0;
 }
 
+// ── Memory, taken as a feature is first wanted ──────────────────────────────
+// SceShell has little memory to spare, and a module whose segments do not fit
+// is not loaded at all: so the plugin's own data stays small, and what a
+// feature needs is a memory block of its own, taken the first time an app asks
+// for it. A SceShell short of memory then goes without that feature, not
+// without the plugin. The music's (a queue carried on, its fetches, reports
+// and remote control) and the player's (Sendspin, the probe) are kept for the
+// boot once taken, as more than one thread holds on to them; the downloads'
+// is given back as their thread ends. A block starts zeroed, as .bss did.
+struct Carver {
+    uint8_t* base;  // NULL: only measured, every pointer set to NULL
+    uint32_t at;
+};
+template <typename T>
+void carve(Carver& c, T*& out) {
+    c.at = (c.at + 15) & ~15u;
+    out = c.base ? (T*)(c.base + c.at) : NULL;
+    c.at += sizeof(T);
+}
+
+void musicCarve(Carver& c) {
+    carve(c, g_musicHeadersP);
+    carve(c, g_cP);
+    carve(c, g_foundP);
+    carve(c, g_scanP);
+    carve(c, g_readerP);
+    carve(c, g_lineP);
+    carve(c, g_queueHeadP);
+    carve(c, g_ctlP);
+    carve(c, g_copyBufP);
+    carve(c, g_aheadP);
+    carve(c, g_fetchBufP);
+    carve(c, g_fetchHeadersP);
+    carve(c, g_mp3P);
+    carve(c, g_scrobblesP);
+    carve(c, g_reportP);
+    carve(c, g_sendingP);
+    carve(c, g_serverHeadersP);
+    carve(c, g_ctlReqP);
+    carve(c, g_ctlBodyP);
+    carve(c, g_ctlOutP);
+    carve(c, g_ctlTrackP);
+    carve(c, g_controlLineVP);
+    carve(c, g_reportMadeP);
+    carve(c, g_scrobbleMadeP);
+    carve(c, g_ctlQueryP);
+}
+void dlCarve(Carver& c) {
+    carve(c, g_dlPageP);
+    carve(c, g_dlP);
+    carve(c, g_dlHeadP);
+    carve(c, g_dlReaderP);
+    carve(c, g_dlLineP);
+    carve(c, g_dlBufP);
+    carve(c, g_dlUrlP);
+    carve(c, g_dlAnswerP);
+}
+void playerCarve(Carver& c) {
+    carve(c, g_pP);
+    carve(c, g_probeBufP);
+    carve(c, g_probeHeadP);
+    carve(c, g_ssP);
+    carve(c, g_ssTextP);
+    carve(c, g_ssOutP);
+    carve(c, g_ssFrameP);
+}
+
+SceUID g_musicBlock = -1, g_dlBlock = -1, g_playerBlock = -1;
+
+// A block for carveFn, made and carved: true when it is there. Under g_lock.
+bool memTake(SceUID* block, const char* name, void (*carveFn)(Carver&)) {
+    if (*block >= 0) return true;
+    Carver c = {NULL, 0};
+    carveFn(c);
+    const uint32_t size = (c.at + 0xFFF) & ~0xFFFu;
+    const SceUID uid = sceKernelAllocMemBlock(name, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
+    void* base = NULL;
+    if (uid < 0 || sceKernelGetMemBlockBase(uid, &base) < 0 || !base) {
+        logLine("memory: %u KB for %s not to be had: 0x%08X", (unsigned)(size >> 10), name,
+                (unsigned)uid);
+        if (uid >= 0) sceKernelFreeMemBlock(uid);
+        return false;
+    }
+    sceClibMemset(base, 0, size);
+    c.base = (uint8_t*)base;
+    c.at = 0;
+    carveFn(c);
+    *block = uid;
+    logLine("memory: %u KB taken for %s", (unsigned)(size >> 10), name);
+    return true;
+}
+
+// A block given back, its pointers NULL again. Under g_lock.
+void memGive(SceUID* block, void (*carveFn)(Carver&)) {
+    if (*block < 0) return;
+    Carver c = {NULL, 0};
+    carveFn(c);
+    sceKernelFreeMemBlock(*block);
+    *block = -1;
+}
+
+bool memMusic() {
+    return memTake(&g_musicBlock, "ShellCompanion::Music", musicCarve);
+}
+bool memDl() {
+    return memTake(&g_dlBlock, "ShellCompanion::Downloads", dlCarve);
+}
+void memDlGive() {
+    memGive(&g_dlBlock, dlCarve);
+}
+bool memPlayer() {
+    return memTake(&g_playerBlock, "ShellCompanion::Player", playerCarve);
+}
+
 }  // namespace
 
 extern "C" int module_start(SceSize args, const void* argp) {
@@ -9548,6 +9716,13 @@ extern "C" int module_start(SceSize args, const void* argp) {
     logOpen();
     logLine("start: vita-shell-companion %s, protocol %d, pipes %s", SC_PLUGIN_VERSION, SC_PROTOCOL,
             SC_PIPE_TO_PLUGIN);
+    // How much SceShell has to spare: what the features' memory comes from.
+    SceKernelFreeMemorySizeInfo mem;
+    sceClibMemset(&mem, 0, sizeof(mem));
+    mem.size = sizeof(mem);
+    const int rcMem = sceKernelGetFreeMemorySize(&mem);
+    logLine("start: SceShell's free memory: %d KB user, %d KB CDRAM, %d KB phycont (0x%08X)",
+            mem.size_user >> 10, mem.size_cdram >> 10, mem.size_phycont >> 10, (unsigned)rcMem);
 
     // The quick menu's root, as ElevenMPV-A's plugin finds it: power_manage_
     // plugin's interface has a function giving it at 0x54.

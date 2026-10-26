@@ -48,7 +48,7 @@ particular server.
 
    scInit("ABCD00001", "ux0:data/MyApp", "My App",
           SC_FEAT_ROW | SC_FEAT_MUSIC | SC_FEAT_DOWNLOADS,
-          "app0:module/shell_companion.suprx");
+          "app0:module/shell_companion.suprx");  // loaded from ux0:app/<title id>/...
    scMusicTakeBack();        // if the shell was playing our queue, stop it
    scDownloadsTakeBack();    // and our downloads
    char what[256];
