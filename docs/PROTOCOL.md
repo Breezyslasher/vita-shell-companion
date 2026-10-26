@@ -98,8 +98,8 @@ own copy. So, from version 0.2.0, the plugin answers each HELLO:
    ```
    written=...
    protocol=1
-   version=0.3.1
-   versionCode=301               <major * 10000 + minor * 100 + patch>
+   version=0.3.2
+   versionCode=302               <major * 10000 + minor * 100 + patch>
    features=0x1F                 <the SC_FEAT_* bits this plugin has>
    granted=0x12                  <the ones this app asked for that it has>
    caps=queue.seek,queue.control,downloads.battery,downloads.pages,update.vpk,sendspin.metadata,sendspin.controller,probe
@@ -549,10 +549,39 @@ to HELLO doesn't list `update.vpk`. An older plugin would install whatever
 
 ### Either way
 
-- **Installing:** the plugin waits up to 30 s for the app to exit, installs
-  the update (retrying while the title still counts as running), and writes
-  `<folder>/sc-update-result.txt`: `result=0x…`, `why=…`, `end`.
-- **Relaunch:** it relaunches the app either way. One update runs at a time.
+- **Waiting for the app:** the installer refuses a title that is open. The
+  plugin waits for the app to close, up to 10 minutes in all. That covers an
+  app opened again while its update is being unpacked: the unpacked update
+  is kept, and installed once the app has gone.
+- **Result:** the last update's `sc-update-result.txt` is removed as an update
+  begins. The new one is written at the end: `result=0x…`, `why=…`, `end`.
+- **Relaunch:** the plugin relaunches the app, unless it is open already. One
+  update runs at a time.
+
+### While it goes
+
+- **Status:** `<folder>/sc-update-status.txt` is written as each step begins,
+  and every second within one:
+
+  ```
+  written=<system time, as elsewhere>
+  state=waiting|unpacking|installing|done|failed
+  percent=<0-100 while unpacking, else -1>
+  end
+  ```
+
+- **`scUpdateInProgress(state, size, &percent)`:** 1 while that status is
+  fresh (written in the last 15 s) and says waiting, unpacking or installing.
+  An app checks it as it starts, before `scOpen`. If it's 1, the app says the
+  update is still being installed and quits, since the update waits for it.
+  It only reads the file, so it works with no plugin there.
+- **Notification:** when the downloads aren't using it, the progress
+  notification says `Updating <app>`, with the step and a bar, then
+  `<app> updated` or `<app> not updated` and why. Its button only hides it.
+- **Speed:** the update thread runs above the plugin's other threads (still
+  below SceShell's UI). It reads the VPK 64 KB at a time, decodes short
+  Huffman codes from a table, and makes a file's folders only when they differ
+  from the last file's. On a Vita, 12.7 MB took 42.5 s before these changes.
 
 ## 7. Client library (`client/`)
 
@@ -584,6 +613,7 @@ int scDownloadPauseAsked(void);
 // update
 int scUpdateInstall(void);
 int scUpdateInstallVpk(const char* vpkPath);   // section 6, plugins with update.vpk
+int scUpdateInProgress(char* state, size_t size, int* percent);  // its update under way
 // sendspin (§8)
 int scWriteSendspin(const ScSendspin* s);
 int scSendspinStart(void);  int scSendspinTakeBack(void);

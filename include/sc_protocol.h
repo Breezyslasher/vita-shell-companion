@@ -77,6 +77,7 @@ enum {
 #define SC_DOWNLOADS_PAUSE  "sc-downloads-pause"  // made when "Pause downloads?" is answered Yes
 #define SC_UPDATE_DIR       "sc-update"
 #define SC_UPDATE_RESULT    "sc-update-result.txt"
+#define SC_UPDATE_STATUS    "sc-update-status.txt"  // how an update under way goes
 #define SC_PLUGIN_INFO      "sc-plugin.txt"       // the plugin's version and features, at each HELLO
 #define SC_SENDSPIN         "sc-sendspin.txt"     // the Sendspin player handed over
 #define SC_SENDSPIN_STATUS  "sc-sendspin-status.txt"

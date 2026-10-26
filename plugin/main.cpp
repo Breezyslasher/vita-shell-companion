@@ -7131,9 +7131,13 @@ const uint32_t kUpdateLookMs = 250;
 // start as it loads, with what they take not known here: twice the fetch
 // threads'.
 const int kUpdateStack = 0x10000;
+// Its priority: above the plugin's other threads, still below SceShell's UI.
+// At the lowest, a 12.7 MB VPK took 42.5 s to unpack.
+const int kUpdatePriority = 128;
 int g_updating;        // under g_lock: the update thread runs
 int g_promoterInited;  // the update thread's: Init called once, its client kept
 App g_updateApp;       // the update thread's: the app it updates
+int g_updateAppIndex;  // and its index
 char g_updateDir[128]; // and that app's SC_UPDATE_DIR
 
 // Waits up to `ms` while the app runs. true once it has gone.
@@ -7227,8 +7231,8 @@ int updatePromote(char* why, int cap) {
 // The ZIP is read by its central directory, with sceIoPread; each file's
 // CRC-32 checked; a name with ".." or a device in it, an encrypted entry, or
 // ZIP64 refused. Its memory, 64 KB, is taken for the unpacking alone.
-const uint32_t kVpkBlock = 0x10000;
-const uint32_t kVpkInBuf = 16384;
+const uint32_t kVpkBlock = 0x20000;
+const uint32_t kVpkInBuf = 65536;  // reads of the VPK this big
 const uint32_t kVpkTail = 16384;   // where the end of the central directory is looked for
 const int kVpkNameMax = 255;
 
@@ -7247,6 +7251,8 @@ Vpk g_vpk;                  // the update thread's
 char g_updateVpk[160];      // the update thread's: the VPK, "" to install SC_UPDATE_DIR as it is
 char g_vpkName[kVpkNameMax + 1];
 char g_vpkPath[400];
+char g_vpkLastDir[400];          // the folder the last file went in, made already
+uint32_t g_vpkTotal, g_vpkDone;  // bytes the VPK unpacks to, and unpacked so far
 
 uint32_t le16At(const uint8_t* p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8;
@@ -7276,8 +7282,13 @@ int vpkIn(void*, uint8_t* buf, uint32_t cap) {
     return got;
 }
 
+void updateBeat(const char* state, int percent);
+
 int vpkOut(void*, const uint8_t* data, uint32_t n) {
     const int w = sceIoWrite(g_vpk.out, data, n);
+    g_vpkDone += n;
+    // In 32 bits: both in 256-byte steps.
+    updateBeat("unpacking", g_vpkTotal ? (int)((g_vpkDone >> 8) * 100u / ((g_vpkTotal >> 8) + 1u)) : -1);
     return w == (int)n ? 0 : (w < 0 ? w : -1);
 }
 
@@ -7362,6 +7373,15 @@ int vpkUnzip(char* why, int cap) {
         sceClibSnprintf(why, cap, "the VPK's directory is not one this reads (ZIP64?)");
         return -1;
     }
+    // What it unpacks to, for the progress: the sizes, a first time through.
+    g_vpkTotal = g_vpkDone = 0;
+    g_vpkLastDir[0] = 0;
+    for (uint32_t i = 0, q = cdOff; i < entries; i++) {
+        uint8_t h[46];
+        if (!vpkRead(q, h, sizeof(h)) || le32At(h) != 0x02014B50u) break;
+        g_vpkTotal += le32At(h + 24);
+        q += 46 + le16At(h + 28) + le16At(h + 30) + le16At(h + 32);
+    }
     const SceUInt64 began = sceKernelGetSystemTimeWide();
     uint32_t p = cdOff, files = 0, bytes = 0;
     for (uint32_t i = 0; i < entries; i++) {
@@ -7390,7 +7410,16 @@ int vpkUnzip(char* why, int cap) {
             sceClibSnprintf(why, cap, "the VPK's %.40s has too long a name", g_vpkName);
             return -1;
         }
-        vpkMkdirs(g_vpkPath);
+        // Its folders, unless the file before went in the same one: a call a
+        // level for each file was most of the time the unpacking took.
+        int dirLen = n;
+        while (dirLen > 0 && g_vpkPath[dirLen - 1] != '/') dirLen--;
+        if (dirLen != (int)sceClibStrnlen(g_vpkLastDir, sizeof(g_vpkLastDir)) ||
+            sceClibMemcmp(g_vpkPath, g_vpkLastDir, dirLen) != 0) {
+            vpkMkdirs(g_vpkPath);
+            sceClibMemcpy(g_vpkLastDir, g_vpkPath, dirLen);
+            g_vpkLastDir[dirLen] = 0;
+        }
         if (g_vpkName[nlen - 1] == '/') continue;  // a folder, made
         uint8_t l[30];
         if (!vpkRead(local, l, sizeof(l)) || le32At(l) != 0x04034B50u) {
@@ -7557,14 +7586,80 @@ int vpkPrepare(char* why, int cap) {
     return rc;
 }
 
+// ── How the update goes, for the app and the user ──
+// SC_UPDATE_STATUS, written as each step begins and each second within one:
+// state waiting (for the app to have gone), unpacking, installing, done or
+// failed, with percent. An app opened again meanwhile reads it
+// (scUpdateInProgress) and says so, rather than run while its update waits
+// for it to go. And the notification, when the downloads are not using it:
+// "Updating <app>", with the step and a bar.
+const uint32_t kUpdateWaitMs = 10u * 60u * 1000u;  // for the app to go, in all
+SceUInt64 g_updateBeatUs;
+SceUInt64 g_updateDeadlineUs;
+int g_updateNotify;  // the notification is the update's
+
+bool updateNotifyBegin(int app);
+void updateNotify(const char* text, const char* sub, float progress);
+void updateNotifyEnd(const char* text, const char* sub);
+
+void updateStatus(const char* state, int percent) {
+    char text[160], path[160];
+    uint32_t secs, micros;
+    splitUs(sceKernelGetSystemTimeWide(), &secs, &micros);
+    const int n = sceClibSnprintf(text, sizeof(text), "written=%u.%06u\nstate=%s\npercent=%d\nend\n",
+                                  (unsigned)secs, (unsigned)micros, state, percent);
+    appPath(&g_updateApp, SC_UPDATE_STATUS, path, sizeof(path));
+    writeWhole(path, text, n);
+    g_updateBeatUs = sceKernelGetSystemTimeWide();
+    if (g_updateNotify) {
+        char line[64], sub[96];
+        sceClibSnprintf(line, sizeof(line), "Updating %s", g_updateApp.name);
+        const char* step = same(state, "waiting")    ? "Waiting for it to close"
+                         : same(state, "unpacking")  ? "Unpacking"
+                         : same(state, "installing") ? "Installing"
+                                                     : state;
+        if (percent >= 0)
+            sceClibSnprintf(sub, sizeof(sub), "%s \xC2\xB7 %d%%", step, percent);
+        else
+            sceClibSnprintf(sub, sizeof(sub), "%s", step);
+        updateNotify(line, sub, percent >= 0 ? (float)percent / 100.0f : -1.0f);
+    }
+}
+
+// The status again if a second has gone by: for the steps that take long.
+void updateBeat(const char* state, int percent) {
+    if ((uint32_t)(sceKernelGetSystemTimeWide() - g_updateBeatUs) >= 1000000u)
+        updateStatus(state, percent);
+}
+
+// Waits while the app runs, up to the update's deadline, the status saying
+// so. true once it has gone.
+bool updateWaitGoneLong() {
+    bool told = false;
+    for (;;) {
+        SceUID pid = -1;
+        if (sceAppMgrGetIdByName(&pid, g_updateApp.titleId) < 0) return true;
+        if (sceKernelGetSystemTimeWide() >= g_updateDeadlineUs) return false;
+        if (!told) {
+            told = true;
+            logLine("update: %s is open; waiting for it to close", g_updateApp.name);
+        }
+        updateBeat("waiting", -1);
+        sceKernelDelayThread(kUpdateLookMs * 1000);
+    }
+}
+
 // The whole install. 0, else the code, with why.
 int updateInstall(char* why, int cap) {
-    if (!updateWaitGone(kUpdateGoneMs)) {
-        sceClibSnprintf(why, cap, "%s was still running %s s after it asked", g_updateApp.name,
-                        secsOf(kUpdateGoneMs).s);
+    g_updateDeadlineUs = sceKernelGetSystemTimeWide() + (SceUInt64)kUpdateWaitMs * 1000u;
+    updateStatus("waiting", -1);
+    if (!updateWaitGone(kUpdateGoneMs) && !updateWaitGoneLong()) {
+        sceClibSnprintf(why, cap, "%s was still open after %u min", g_updateApp.name,
+                        (unsigned)(kUpdateWaitMs / 60000u));
         return -1;
     }
     if (g_updateVpk[0]) {
+        updateStatus("unpacking", 0);
         const int rcVpk = vpkPrepare(why, cap);
         if (rcVpk < 0) return rcVpk;
     }
@@ -7589,12 +7684,27 @@ int updateInstall(char* why, int cap) {
         rc = ((FnPromInit)g_promoter[kPromInit].fn)();
         logLine("update: the installer's client begun: 0x%08X", (unsigned)rc);
     }
-    // The title can be taken for running a moment after its process has gone.
+    // The installer refuses a title that runs: the app opened again
+    // meanwhile, or taken for running a moment after its process has gone.
+    // Each time, it is waited for to go, and the install asked again, up to
+    // the deadline; the update unpacked stays as it is.
     for (int attempt = 1;; attempt++) {
+        if (!updateWaitGoneLong()) {
+            sceClibSnprintf(why, cap, "%s was open again before the install, for %u min",
+                            g_updateApp.name, (unsigned)(kUpdateWaitMs / 60000u));
+            return (int)kPromoterInUse;
+        }
+        updateStatus("installing", -1);
         rc = updatePromote(why, cap);
-        if ((unsigned)rc != kPromoterInUse || attempt == 3) return rc;
-        logLine("update: %s still taken for running (0x%08X): again in 2 s", g_updateApp.name,
-                (unsigned)rc);
+        if ((unsigned)rc != kPromoterInUse) return rc;
+        if (sceKernelGetSystemTimeWide() >= g_updateDeadlineUs) {
+            sceClibSnprintf(why, cap, "%s was taken for running until the install gave up",
+                            g_updateApp.name);
+            return rc;
+        }
+        if (attempt <= 3 || attempt % 30 == 0)
+            logLine("update: %s taken for running (0x%08X): again once it is closed",
+                    g_updateApp.name, (unsigned)rc);
         sceKernelDelayThread(2 * 1000 * 1000);
     }
 }
@@ -7613,16 +7723,34 @@ void updateResult(const App* a, int rc, const char* why) {
 int updateThread(SceSize, void*) {
     char why[128];
     why[0] = 0;
+    char path[160];
+    appPath(&g_updateApp, SC_UPDATE_RESULT, path, sizeof(path));
+    sceIoRemove(path);  // the last update's, so that none is taken for this one's
+    g_updateNotify = updateNotifyBegin(g_updateAppIndex);
     const int rc = updateInstall(why, sizeof(why));
     if (rc == 0)
         logLine("update: %s updated", g_updateApp.name);
     else
         logLine("update: not installed (0x%08X): %s", (unsigned)rc, why);
     updateResult(&g_updateApp, rc, why);
-    char uri[48];
-    sceClibSnprintf(uri, sizeof(uri), "psgm:play?titleid=%s", g_updateApp.titleId);
-    const int rcLaunch = sceAppMgrLaunchAppByUri(0x20000, uri);
-    logLine("update: %s launched again: 0x%08X", g_updateApp.name, (unsigned)rcLaunch);
+    updateStatus(rc == 0 ? "done" : "failed", -1);
+    if (g_updateNotify) {
+        char line[64];
+        sceClibSnprintf(line, sizeof(line), "%s %s", g_updateApp.name,
+                        rc == 0 ? "updated" : "not updated");
+        updateNotifyEnd(line, rc == 0 ? "" : why);
+        g_updateNotify = 0;
+    }
+    // Launched again, unless it is open already.
+    SceUID pid = -1;
+    if (sceAppMgrGetIdByName(&pid, g_updateApp.titleId) >= 0) {
+        logLine("update: %s is open already; not launched again", g_updateApp.name);
+    } else {
+        char uri[48];
+        sceClibSnprintf(uri, sizeof(uri), "psgm:play?titleid=%s", g_updateApp.titleId);
+        const int rcLaunch = sceAppMgrLaunchAppByUri(0x20000, uri);
+        logLine("update: %s launched again: 0x%08X", g_updateApp.name, (unsigned)rcLaunch);
+    }
     lock();
     g_updating = 0;
     unlock();
@@ -7650,6 +7778,7 @@ void startUpdate(int app, const char* vpk) {
         return;
     }
     g_updateApp = *a;
+    g_updateAppIndex = app;
     appPath(a, SC_UPDATE_DIR, g_updateDir, sizeof(g_updateDir));
     copyText(g_updateVpk, vpk, sizeof(g_updateVpk));
     if (vpk[0])
@@ -7658,7 +7787,7 @@ void startUpdate(int app, const char* vpk) {
         logLine("update: %s asks for its update at %s to be installed once it has gone", a->name,
                 g_updateDir);
     const SceUID thread = sceKernelCreateThread("ShellCompanion::Update", updateThread,
-                                                kThreadPriority, kUpdateStack, 0, 0, NULL);
+                                                kUpdatePriority, kUpdateStack, 0, 0, NULL);
     const int rc = thread < 0 ? thread : sceKernelStartThread(thread, 0, NULL);
     if (rc < 0) {
         if (thread >= 0) sceKernelDeleteThread(thread);
@@ -8076,6 +8205,7 @@ const SceUInt64 kNotifyHeldUs = 30ull * 1000 * 1000;
 // held: nothing here calls back into it, and the pause is the watch thread's
 // (notifyPauseTick).
 int g_notifyPauseAsked;  // atomic
+int g_notifyIsUpdate;    // under g_notifyLock: the notification is an update's, not the downloads'
 void notifyEvent(int id) {
     logLine("notification: event %d%s", id, id == 0 ? ", Yes: the downloads pause" : "");
     if (id == 0) __atomic_store_n(&g_notifyPauseAsked, 1, __ATOMIC_SEQ_CST);
@@ -8127,7 +8257,8 @@ void notifyShow16(const uint16_t* text, const uint16_t* sub, float progress) {
     if (!g_notifyLive) {
         lineOf(g_notifyParam.begin.t.text, text);
         lineOf(g_notifyParam.begin.t.sub, sub);
-        fromUtf8("Pause downloads?", g_notifyParam.begin.cancelText, 63);
+        fromUtf8(g_notifyIsUpdate ? "Hide" : "Pause downloads?", g_notifyParam.begin.cancelText,
+                 63);
         void (*handler)(int) = &notifyEvent;
         sceClibMemcpy((uint8_t*)&g_notifyParam.begin + kNotifyHandlerOffset, &handler,
                       sizeof(handler));
@@ -8183,6 +8314,7 @@ void notifyEnd16(const uint16_t* text, const uint16_t* sub) {
 // The notification shown for app from now: its icon, and the pause file.
 void notifyFor(int app) {
     sceKernelLockMutex(g_notifyLock, 1, NULL);
+    if (!g_notifyLive) g_notifyIsUpdate = 0;
     lock();
     const App* a = appAt(app);
     if (a) {
@@ -8211,6 +8343,32 @@ void notifyEnd(const char* text, const char* sub) {
 
 // Taken back with the notification showing: the app goes on with it as it
 // downloads again (SC_CMD_DL_PROGRESS). Ended by notifyHeldTick if it does not.
+// An update's notification, when the downloads are not using it. true when
+// it is the update's now.
+bool updateNotifyBegin(int app) {
+    lock();
+    const bool downloads = g_dlRunning != 0;
+    unlock();
+    sceKernelLockMutex(g_notifyLock, 1, NULL);
+    const bool free = !downloads && !g_notifyLive;
+    if (free) g_notifyIsUpdate = 1;
+    sceKernelUnlockMutex(g_notifyLock, 1);
+    if (free) notifyFor(app);
+    return free;
+}
+void updateNotify(const char* text, const char* sub, float progress) {
+    uint16_t t[64], u[64];
+    fromUtf8(text, t, 64);
+    fromUtf8(sub, u, 64);
+    notifyShow16(t, u, progress);
+}
+void updateNotifyEnd(const char* text, const char* sub) {
+    notifyEnd(text, sub);
+    sceKernelLockMutex(g_notifyLock, 1, NULL);
+    g_notifyIsUpdate = 0;
+    sceKernelUnlockMutex(g_notifyLock, 1);
+}
+
 void notifyHold() {
     sceKernelLockMutex(g_notifyLock, 1, NULL);
     if (g_notifyLive) g_notifyHeldUs = sceKernelGetSystemTimeWide();
@@ -8241,6 +8399,10 @@ void notifyHeldTick(SceUInt64 now) {
 // it ends the notification itself. Never under g_lock.
 void notifyPauseTick() {
     if (!__atomic_exchange_n(&g_notifyPauseAsked, 0, __ATOMIC_SEQ_CST)) return;
+    sceKernelLockMutex(g_notifyLock, 1, NULL);
+    const int update = g_notifyIsUpdate;
+    sceKernelUnlockMutex(g_notifyLock, 1);
+    if (update) return;  // its button only hides it
     lock();
     const int running = g_dlRunning;
     if (running) {
@@ -9721,8 +9883,9 @@ extern "C" int module_start(SceSize args, const void* argp) {
     sceClibMemset(&mem, 0, sizeof(mem));
     mem.size = sizeof(mem);
     const int rcMem = sceKernelGetFreeMemorySize(&mem);
-    logLine("start: SceShell's free memory: %d KB user, %d KB CDRAM, %d KB phycont (0x%08X)",
-            mem.size_user >> 10, mem.size_cdram >> 10, mem.size_phycont >> 10, (unsigned)rcMem);
+    logLine("start: SceShell's free memory: user 0x%08X, CDRAM 0x%08X, phycont 0x%08X (0x%08X)",
+            (unsigned)mem.size_user, (unsigned)mem.size_cdram, (unsigned)mem.size_phycont,
+            (unsigned)rcMem);
 
     // The quick menu's root, as ElevenMPV-A's plugin finds it: power_manage_
     // plugin's interface has a function giving it at 0x54.

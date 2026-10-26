@@ -131,6 +131,12 @@ int scUpdateInstall(void);
 // -2, with nothing sent, as an older one would install an SC_UPDATE_DIR left
 // from before. The VPK is left where it is.
 int scUpdateInstallVpk(const char* vpkPath);
+// Whether the plugin is installing this app's update now (SC_UPDATE_STATUS
+// written in the last 15 s, saying waiting, unpacking or installing): 1, with
+// the step in state and its percent (-1 if none) when given. An app checks it
+// as it starts, before scOpen, and if 1 says so and quits: the update waits
+// for it to close. Reads a file only; works with no plugin there.
+int scUpdateInProgress(char* state, size_t stateSize, int* percent);
 
 // ── Sendspin (SC_FEAT_SENDSPIN) ──────────────────────────────────────────────
 // As the app goes, having closed its own connection to the server: the

@@ -4,8 +4,10 @@
  * callback a buffer at a time, output goes out through a write callback each
  * time the 32 KB window fills, with its CRC-32 kept as it goes, so that no
  * file is held whole. Decoding follows Mark Adler's puff (zlib's
- * contrib/puff): canonical Huffman codes, counts and symbols, decoded a bit
- * at a time. Slower than zlib's tables, and small.
+ * contrib/puff): canonical Huffman codes, counts and symbols; codes of up to
+ * SCI_FAST bits, nearly all of them, are looked up in a table at once, and
+ * longer ones decoded a bit at a time as puff does. Bit-at-a-time alone
+ * unpacked a 12.7 MB VPK in 42.5 s on a Vita.
  *
  * Plain C with no library calls, in 32 bits and with no division, for the
  * plugin; host tests compile it as it is. The caller gives the memory
@@ -19,6 +21,7 @@
 #include <stdint.h>
 
 #define SCI_WINDOW 32768u
+#define SCI_FAST 9  // bits looked up at once
 
 // Bytes into buf, up to cap: how many, 0 at the input's end, < 0 for an error.
 typedef int (*SciRead)(void* ctx, uint8_t* buf, uint32_t cap);
@@ -34,6 +37,7 @@ enum {
 typedef struct SciHuff {
     uint16_t count[16];  // codes of each length
     uint16_t* symbol;    // symbols by code
+    uint16_t* fast;      // 1 << SCI_FAST entries: symbol | length << 9, 0 for a longer code
 } SciHuff;
 
 typedef struct ScInflate {
@@ -53,6 +57,7 @@ typedef struct ScInflate {
     int err;
     uint32_t crcTable[256];
     uint16_t lenSym[288], distSym[30];
+    uint16_t lenFast[1 << SCI_FAST], distFast[1 << SCI_FAST];
 } ScInflate;
 
 static inline void sciCrcInit(ScInflate* z) {
@@ -124,6 +129,21 @@ static inline int sciByte(ScInflate* z) {
     return z->in[z->inPos++];
 }
 
+// The bit buffer topped up to at least 24 bits while there is input, with
+// no error at its end: for a look ahead, which may want fewer.
+static inline void sciFill(ScInflate* z) {
+    while (z->bitCount <= 24) {
+        if (z->inPos == z->inLen) {
+            const int got = z->read(z->readCtx, z->in, z->inCap);
+            if (got <= 0) return;
+            z->inPos = 0;
+            z->inLen = (uint32_t)got;
+        }
+        z->bits |= (uint32_t)z->in[z->inPos++] << z->bitCount;
+        z->bitCount += 8;
+    }
+}
+
 // n bits (up to 16), least significant first. -1 at an error.
 static inline int sciBits(ScInflate* z, int n) {
     while (z->bitCount < n) {
@@ -138,8 +158,17 @@ static inline int sciBits(ScInflate* z, int n) {
     return (int)v;
 }
 
-// A symbol by h, a bit at a time, or -1.
+// A symbol by h: from its table when its code is short, else a bit at a
+// time. -1 at an error.
 static inline int sciDecode(ScInflate* z, const SciHuff* h) {
+    if (z->bitCount < SCI_FAST) sciFill(z);
+    const uint32_t e = h->fast[z->bits & ((1u << SCI_FAST) - 1)];
+    const int len = (int)(e >> 9);
+    if (e && len <= z->bitCount) {
+        z->bits >>= len;
+        z->bitCount -= len;
+        return (int)(e & 0x1FF);
+    }
     int code = 0, first = 0, index = 0;
     for (int len = 1; len < 16; len++) {
         const int b = sciBits(z, 1);
@@ -161,6 +190,7 @@ static inline int sciDecode(ScInflate* z, const SciHuff* h) {
 static inline int sciBuild(SciHuff* h, const uint8_t* length, int n) {
     uint16_t offs[16];
     for (int len = 0; len < 16; len++) h->count[len] = 0;
+    for (int i = 0; i < (1 << SCI_FAST); i++) h->fast[i] = 0;
     for (int s = 0; s < n; s++) h->count[length[s]]++;
     if (h->count[0] == n) return 0;
     int left = 1;
@@ -173,6 +203,19 @@ static inline int sciBuild(SciHuff* h, const uint8_t* length, int n) {
     for (int len = 1; len < 15; len++) offs[len + 1] = offs[len] + h->count[len];
     for (int s = 0; s < n; s++)
         if (length[s]) h->symbol[offs[length[s]]++] = (uint16_t)s;
+    // The table: each short code, its bits reversed as they come, and every
+    // entry that begins with them.
+    if (left < 0) return left;
+    int code = 0, k = 0;
+    for (int len = 1; len <= SCI_FAST; len++) {
+        for (int c = 0; c < h->count[len]; c++, k++, code++) {
+            int rev = 0;
+            for (int b = 0; b < len; b++) rev |= ((code >> b) & 1) << (len - 1 - b);
+            for (int i = rev; i < (1 << SCI_FAST); i += 1 << len)
+                h->fast[i] = (uint16_t)(h->symbol[k] | len << 9);
+        }
+        code <<= 1;
+    }
     return left;
 }
 
@@ -216,17 +259,29 @@ static inline int sciCodes(ScInflate* z, const SciHuff* lencode, const SciHuff* 
     }
 }
 
+// The next byte of a stored block: from the bit buffer while it holds whole
+// bytes (read ahead for the table), else from the input.
+static inline int sciStoredByte(ScInflate* z) {
+    if (z->bitCount >= 8) {
+        const int b = (int)(z->bits & 0xFF);
+        z->bits >>= 8;
+        z->bitCount -= 8;
+        return b;
+    }
+    return sciByte(z);
+}
+
 static inline int sciStored(ScInflate* z) {
-    z->bits = 0;  // to the byte
-    z->bitCount = 0;
+    z->bits >>= z->bitCount & 7;  // to the byte
+    z->bitCount -= z->bitCount & 7;
     int b[4];
     for (int i = 0; i < 4; i++)
-        if ((b[i] = sciByte(z)) < 0) return z->err;
+        if ((b[i] = sciStoredByte(z)) < 0) return z->err;
     const uint32_t len = (uint32_t)b[0] | (uint32_t)b[1] << 8;
     const uint32_t nlen = (uint32_t)b[2] | (uint32_t)b[3] << 8;
     if (len != (~nlen & 0xFFFF)) return z->err = SCI_ERR_DATA;
     for (uint32_t i = 0; i < len; i++) {
-        const int c = sciByte(z);
+        const int c = sciStoredByte(z);
         if (c < 0) return z->err;
         if (sciPut(z, (uint8_t)c) < 0) return z->err;
     }
@@ -238,6 +293,8 @@ static inline int sciFixed(ScInflate* z) {
     SciHuff lencode, distcode;
     lencode.symbol = z->lenSym;
     distcode.symbol = z->distSym;
+    lencode.fast = z->lenFast;
+    distcode.fast = z->distFast;
     int s = 0;
     for (; s < 144; s++) lengths[s] = 8;
     for (; s < 256; s++) lengths[s] = 9;
@@ -255,6 +312,8 @@ static inline int sciDynamic(ScInflate* z) {
     SciHuff lencode, distcode;
     lencode.symbol = z->lenSym;
     distcode.symbol = z->distSym;
+    lencode.fast = z->lenFast;
+    distcode.fast = z->distFast;
     const int nlen = sciBits(z, 5), ndist = sciBits(z, 5), ncode = sciBits(z, 4);
     if (nlen < 0 || ndist < 0 || ncode < 0) return z->err;
     const int nl = nlen + 257, nd = ndist + 1, nc = ncode + 4;

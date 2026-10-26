@@ -14,7 +14,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "toolchain")
 endif()
 
-project(shell_companion VERSION 0.3.1 LANGUAGES C CXX ASM)
+project(shell_companion VERSION 0.3.2 LANGUAGES C CXX ASM)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(SC_PAF_INCLUDE_DIR "" CACHE PATH "PAF headers (scripts/fetch_paf_headers.sh <dir>, then <dir>/include)")
