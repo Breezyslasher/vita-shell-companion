@@ -29,6 +29,12 @@ which drive Plex's server-side download queue for VitaPlex, and Sendspin
 
 - **Pipes:** `"ShellCompanion1::ToPlugin"` and `"ShellCompanion1::FromPlugin"`.
   The `1` is the protocol version.
+  - **Loading:** with no plugin there, the client loads the app's own copy
+    with taiHEN, into SceShell's process. SceShell opens the path itself and
+    has no `app0:`, so the client loads `app0:...` from
+    `ux0:app/<title id>/...`. If that fails, it copies the file to
+    `ux0:data/ShellCompanion/shell_companion.suprx` and loads that, and says
+    both codes in `scOpen`'s message.
   - **Compatibility:** a plugin of protocol N will also serve apps of every
     lower version. The client library looks for its own version's pipes
     first, then up to 7 versions higher. Only if it finds none does it load
@@ -92,8 +98,8 @@ own copy. So, from version 0.2.0, the plugin answers each HELLO:
    ```
    written=...
    protocol=1
-   version=0.3.0
-   versionCode=300               <major * 10000 + minor * 100 + patch>
+   version=0.3.1
+   versionCode=301               <major * 10000 + minor * 100 + patch>
    features=0x1F                 <the SC_FEAT_* bits this plugin has>
    granted=0x12                  <the ones this app asked for that it has>
    caps=queue.seek,queue.control,downloads.battery,downloads.pages,update.vpk,sendspin.metadata,sendspin.controller,probe

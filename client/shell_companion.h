@@ -31,7 +31,9 @@ extern "C" {
 // its data folder, where every file below goes (made if missing); name its
 // name for the plugin's log and notification; features the SC_FEAT_* it
 // wants; bundledPluginPath the plugin's .suprx in its own package, loaded
-// when no plugin of this protocol or a later one is in SceShell yet. No I/O:
+// when no plugin of this protocol or a later one is in SceShell yet ("app0:"
+// is taken as the app's folder under ux0:app, as SceShell has no app0:; a
+// copy in ux0:data/ShellCompanion is loaded should that fail). No I/O:
 // the plugin is found by scOpen. 0, or -1 when an argument is missing.
 int scInit(const char* titleId, const char* dataDir, const char* name, uint32_t features,
            const char* bundledPluginPath);

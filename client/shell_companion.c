@@ -176,6 +176,48 @@ static SceUID openToPlugin(unsigned* version) {
 }
 
 // Loads the plugin into SceShell, as ElevenMPV-A does its own.
+// Where the plugin is loaded from: SceShell opens the path itself, and has no
+// app0: of its own, so app0: is the app's folder under ux0:app, as VitaPlex
+// loaded its plugin. Taking app0: as it is gave 0x80010013 (VitaPlex build
+// 2099). Else a copy in SC_COPY_DIR is loaded, made from the bundled file.
+#define SC_COPY_DIR "ux0:data/ShellCompanion"
+#define SC_COPY_PATH SC_COPY_DIR "/shell_companion.suprx"
+
+static void shellPath(const char* bundled, char* out, size_t size) {
+    if (strncmp(bundled, "app0:", 5) == 0)
+        snprintf(out, size, "ux0:app/%s/%s", g_titleId, bundled + 5 + (bundled[5] == '/'));
+    else
+        snprintf(out, size, "%s", bundled);
+}
+
+// The bundled plugin copied to SC_COPY_PATH. 0, or the code that stopped it.
+static int copyPlugin(const char* from) {
+    sceIoMkdir(SC_COPY_DIR, 0777);
+    const SceUID in = sceIoOpen(from, SCE_O_RDONLY, 0);
+    if (in < 0) return in;
+    const SceUID out = sceIoOpen(SC_COPY_PATH ".tmp", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+    if (out < 0) {
+        sceIoClose(in);
+        return out;
+    }
+    static char buf[8192];  // under g_lock
+    int rc = 0, got;
+    while ((got = sceIoRead(in, buf, sizeof(buf))) > 0)
+        if (sceIoWrite(out, buf, got) != got) {
+            rc = -1;
+            break;
+        }
+    if (got < 0) rc = got;
+    sceIoClose(in);
+    if (sceIoClose(out) < 0 && rc == 0) rc = -1;
+    if (rc == 0) {
+        sceIoRemove(SC_COPY_PATH);
+        rc = sceIoRename(SC_COPY_PATH ".tmp", SC_COPY_PATH);
+    }
+    if (rc < 0) sceIoRemove(SC_COPY_PATH ".tmp");
+    return rc;
+}
+
 static SceUID loadIntoShell(const char* path) {
     SceUID shell = -1;
     const int rc = sceAppMgrGetIdByName(&shell, SHELL_TITLEID);
@@ -211,16 +253,32 @@ int scOpen(char* what, size_t size) {
             unlock();
             return stat;
         }
-        const SceUID module = loadIntoShell(g_bundled);
+        char path[300];
+        shellPath(g_bundled, path, sizeof(path));
+        SceUID module = loadIntoShell(path);
         if (module < 0) {
-            snprintf(what, size, "loading the plugin (%s) into SceShell: 0x%08X", g_bundled,
-                     (unsigned)module);
-            unlock();
-            return module;
+            // Again from a copy where SceShell surely reaches.
+            const SceUID first = module;
+            const int rcCopy = copyPlugin(path);
+            module = rcCopy < 0 ? rcCopy : loadIntoShell(SC_COPY_PATH);
+            if (module < 0) {
+                snprintf(what, size,
+                         "loading the plugin (%s) into SceShell: 0x%08X; from a copy (%s): %s "
+                         "0x%08X",
+                         path, (unsigned)first, SC_COPY_PATH, rcCopy < 0 ? "copy" : "load",
+                         (unsigned)module);
+                unlock();
+                return module;
+            }
+            n = snprintf(what, size,
+                         "loaded the plugin into SceShell from a copy (%s, module 0x%08X); from "
+                         "%s it gave 0x%08X",
+                         SC_COPY_PATH, (unsigned)module, path, (unsigned)first);
+        } else {
+            n = snprintf(what, size, "loaded the plugin (%s) into SceShell (module 0x%08X)", path,
+                         (unsigned)module);
         }
         to = openToPlugin(&version);
-        n = snprintf(what, size, "loaded the plugin (%s) into SceShell (module 0x%08X)", g_bundled,
-                     (unsigned)module);
     }
     char fromName[48];
     snprintf(fromName, sizeof(fromName), SC_PIPE_FROM_PLUGIN_FMT, version);
