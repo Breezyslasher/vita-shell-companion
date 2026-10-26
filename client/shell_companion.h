@@ -122,6 +122,13 @@ int scDownloadPauseAsked(void);
 // does at once after this. The app is launched again either way, and reads
 // scReadUpdateResult.
 int scUpdateInstall(void);
+// The same for a VPK as it was downloaded (UTF-8 path on the card): the plugin
+// unpacks it, checks that its TITLE_ID is this app's, makes its head.bin, and
+// installs it once the app has quit, which it does at once after this. Sent
+// only to a plugin whose answer to HELLO lists "update.vpk" (0.3.0 on): else
+// -2, with nothing sent, as an older one would install an SC_UPDATE_DIR left
+// from before. The VPK is left where it is.
+int scUpdateInstallVpk(const char* vpkPath);
 
 // ── Sendspin (SC_FEAT_SENDSPIN) ──────────────────────────────────────────────
 // As the app goes, having closed its own connection to the server: the

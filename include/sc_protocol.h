@@ -44,7 +44,8 @@ enum {
     SC_CMD_DL_PROGRESS,      // text1, text2: the notification's lines; arg: 0..1000 or SC_PROGRESS_UNKNOWN
     SC_CMD_DL_PROGRESS_END,  // text1, text2: its last two lines
     // Self-update (SC_FEAT_UPDATE).
-    SC_CMD_UPDATE_INSTALL,   // install SC_UPDATE_DIR once the app has gone, then launch it
+    SC_CMD_UPDATE_INSTALL,   // install SC_UPDATE_DIR once the app has gone, then launch it;
+                             // text1: a VPK to unpack into it first (caps "update.vpk")
     // Debug (SC_FEAT_MUSIC): arg SC_PROBE_*; text1 a WAV on the card to stream
     // (44.1 kHz, 16-bit, stereo PCM), empty for a tone, or SC_PROBE_FILE's
     // file. docs/PROTOCOL.md §10.

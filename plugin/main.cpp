@@ -55,11 +55,13 @@
  */
 
 #include <psp2/appmgr.h>
+#include <psp2/io/dirent.h>
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/modulemgr.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
 #include <psp2/rtc.h>
@@ -71,7 +73,10 @@
 
 #include <paf.h>
 
+#include "head_bin.h"
 #include "mp3_frames.h"
+#include "sc_inflate.h"
+#include "sc_sha1.h"
 #include "sendspin_wire.h"
 #include "sc_protocol.h"
 
@@ -7172,18 +7177,362 @@ int updatePromote(char* why, int cap) {
     return 0;
 }
 
+// ── A VPK, unpacked for the installer ──
+// (docs/PROTOCOL.md §6) An app may hand over the VPK it downloaded as it is
+// (SC_CMD_UPDATE_INSTALL with its path), rather than unpack it and make its
+// head.bin itself: once it has gone, the plugin unpacks the VPK, a ZIP, into
+// SC_UPDATE_DIR, checks that it is the app's own (param.sfo's TITLE_ID),
+// makes sce_sys/package/head.bin as VitaShell's package installer does
+// (makeHeadBin, from its template in head_bin.h), and installs it as above.
+// The ZIP is read by its central directory, with sceIoPread; each file's
+// CRC-32 checked; a name with ".." or a device in it, an encrypted entry, or
+// ZIP64 refused. Its memory, 64 KB, is taken for the unpacking alone.
+const uint32_t kVpkBlock = 0x10000;
+const uint32_t kVpkInBuf = 16384;
+const uint32_t kVpkTail = 16384;   // where the end of the central directory is looked for
+const int kVpkNameMax = 255;
+
+struct Vpk {
+    SceUID fd;
+    uint32_t size;
+    uint32_t at, end;    // the entry's data, as the inflater reads it
+    SceUID out;          // the file it goes to
+    int readErr;
+    SceUID block;
+    ScInflate* z;
+    uint8_t* window;
+    uint8_t* in;
+};
+Vpk g_vpk;                  // the update thread's
+char g_updateVpk[160];      // the update thread's: the VPK, "" to install SC_UPDATE_DIR as it is
+char g_vpkName[kVpkNameMax + 1];
+char g_vpkPath[400];
+
+uint32_t le16At(const uint8_t* p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8;
+}
+uint32_t le32At(const uint8_t* p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+uint32_t be32At(const uint8_t* p) {
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+// n bytes at off into buf: true when all were read.
+bool vpkRead(uint32_t off, void* buf, uint32_t n) {
+    return n == 0 || sceIoPread(g_vpk.fd, buf, n, (SceOff)off) == (int)n;
+}
+
+int vpkIn(void*, uint8_t* buf, uint32_t cap) {
+    const uint32_t left = g_vpk.end - g_vpk.at;
+    const uint32_t n = left < cap ? left : cap;
+    if (n == 0) return 0;
+    const int got = sceIoPread(g_vpk.fd, buf, n, (SceOff)g_vpk.at);
+    if (got <= 0) {
+        g_vpk.readErr = got;
+        return got < 0 ? got : -1;
+    }
+    g_vpk.at += (uint32_t)got;
+    return got;
+}
+
+int vpkOut(void*, const uint8_t* data, uint32_t n) {
+    const int w = sceIoWrite(g_vpk.out, data, n);
+    return w == (int)n ? 0 : (w < 0 ? w : -1);
+}
+
+// Every folder in path up to its last '/', made.
+void vpkMkdirs(char* path) {
+    char* colon = path;
+    while (*colon && *colon != ':') colon++;
+    for (char* p = *colon ? colon + 2 : path + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        sceIoMkdir(path, 0777);
+        *p = '/';
+    }
+}
+
+// path, a folder, removed with all in it (up to 16 deep). path is a buffer
+// of sizeof(g_vpkPath) that it works in, and leaves as it was.
+void removeTree(char* path, int depth) {
+    const SceUID d = sceIoDopen(path);
+    if (d >= 0) {
+        const int len = (int)sceClibStrnlen(path, sizeof(g_vpkPath));
+        SceIoDirent e;
+        while (sceIoDread(d, &e) > 0) {
+            if (same(e.d_name, ".") || same(e.d_name, "..")) continue;
+            sceClibSnprintf(path + len, sizeof(g_vpkPath) - len, "/%s", e.d_name);
+            if (SCE_S_ISDIR(e.d_stat.st_mode)) {
+                if (depth < 16) removeTree(path, depth + 1);
+            } else {
+                sceIoRemove(path);
+            }
+            path[len] = 0;
+        }
+        sceIoDclose(d);
+    }
+    sceIoRmdir(path);
+}
+
+// Whether an entry's name is safe to put under the folder: relative, with
+// no ".." in it, no device and no '\'.
+bool vpkNameOk(const char* n) {
+    if (!n[0] || n[0] == '/') return false;
+    for (const char* p = n; *p; p++) {
+        if (*p == ':' || *p == '\\') return false;
+        if (p[0] == '.' && p[1] == '.' && (p == n || p[-1] == '/') && (p[2] == '/' || !p[2]))
+            return false;
+    }
+    return true;
+}
+
+// The VPK at g_updateVpk unpacked into g_updateDir. 0, else the code, with why.
+int vpkUnzip(char* why, int cap) {
+    SceIoStat st;
+    sceClibMemset(&st, 0, sizeof(st));
+    if (sceIoGetstat(g_updateVpk, &st) < 0 || st.st_size < 22 || (uint64_t)st.st_size > 0xFFFFFFFFull) {
+        sceClibSnprintf(why, cap, "no VPK at %s, or one too big", g_updateVpk);
+        return -1;
+    }
+    g_vpk.size = (uint32_t)st.st_size;
+    g_vpk.fd = sceIoOpen(g_updateVpk, SCE_O_RDONLY, 0);
+    if (g_vpk.fd < 0) {
+        sceClibSnprintf(why, cap, "the VPK would not open (0x%08X)", (unsigned)g_vpk.fd);
+        return g_vpk.fd;
+    }
+    // The end of the central directory, from the end back.
+    uint8_t* const buf = g_vpk.in;
+    const uint32_t tail = g_vpk.size < kVpkTail ? g_vpk.size : kVpkTail;
+    if (!vpkRead(g_vpk.size - tail, buf, tail)) {
+        sceClibSnprintf(why, cap, "the VPK could not be read");
+        return -1;
+    }
+    int eocd = -1;
+    for (int i = (int)tail - 22; i >= 0 && eocd < 0; i--)
+        if (le32At(buf + i) == 0x06054B50u) eocd = i;
+    if (eocd < 0) {
+        sceClibSnprintf(why, cap, "the VPK is not a ZIP");
+        return -1;
+    }
+    const uint32_t entries = le16At(buf + eocd + 10);
+    const uint32_t cdSize = le32At(buf + eocd + 12), cdOff = le32At(buf + eocd + 16);
+    if (entries == 0xFFFF || cdOff == 0xFFFFFFFFu || cdOff > g_vpk.size ||
+        cdSize > g_vpk.size - cdOff) {
+        sceClibSnprintf(why, cap, "the VPK's directory is not one this reads (ZIP64?)");
+        return -1;
+    }
+    const SceUInt64 began = sceKernelGetSystemTimeWide();
+    uint32_t p = cdOff, files = 0, bytes = 0;
+    for (uint32_t i = 0; i < entries; i++) {
+        uint8_t h[46];
+        if (!vpkRead(p, h, sizeof(h)) || le32At(h) != 0x02014B50u) {
+            sceClibSnprintf(why, cap, "the VPK's entry %u is not whole", (unsigned)i);
+            return -1;
+        }
+        const uint32_t flags = le16At(h + 8), method = le16At(h + 10), crc = le32At(h + 16);
+        const uint32_t csize = le32At(h + 20), usize = le32At(h + 24);
+        const uint32_t nlen = le16At(h + 28), elen = le16At(h + 30), clen = le16At(h + 32);
+        const uint32_t local = le32At(h + 42);
+        if (nlen == 0 || nlen > (uint32_t)kVpkNameMax || !vpkRead(p + 46, g_vpkName, nlen)) {
+            sceClibSnprintf(why, cap, "the VPK's entry %u has no name this takes", (unsigned)i);
+            return -1;
+        }
+        g_vpkName[nlen] = 0;
+        p += 46 + nlen + elen + clen;
+        if (!vpkNameOk(g_vpkName) || (flags & 1) || csize == 0xFFFFFFFFu || usize == 0xFFFFFFFFu ||
+            (method != 0 && method != 8)) {
+            sceClibSnprintf(why, cap, "the VPK's %.40s cannot be unpacked here", g_vpkName);
+            return -1;
+        }
+        const int n = sceClibSnprintf(g_vpkPath, sizeof(g_vpkPath), "%s/%s", g_updateDir, g_vpkName);
+        if (n >= (int)sizeof(g_vpkPath)) {
+            sceClibSnprintf(why, cap, "the VPK's %.40s has too long a name", g_vpkName);
+            return -1;
+        }
+        vpkMkdirs(g_vpkPath);
+        if (g_vpkName[nlen - 1] == '/') continue;  // a folder, made
+        uint8_t l[30];
+        if (!vpkRead(local, l, sizeof(l)) || le32At(l) != 0x04034B50u) {
+            sceClibSnprintf(why, cap, "the VPK's %.40s is not whole", g_vpkName);
+            return -1;
+        }
+        const uint32_t data = local + 30 + le16At(l + 26) + le16At(l + 28);
+        if (data > g_vpk.size || csize > g_vpk.size - data) {
+            sceClibSnprintf(why, cap, "the VPK's %.40s runs past its end", g_vpkName);
+            return -1;
+        }
+        g_vpk.out = sceIoOpen(g_vpkPath, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+        if (g_vpk.out < 0) {
+            sceClibSnprintf(why, cap, "%.40s not made (0x%08X)", g_vpkName, (unsigned)g_vpk.out);
+            return g_vpk.out;
+        }
+        g_vpk.at = data;
+        g_vpk.end = data + csize;
+        g_vpk.readErr = 0;
+        ScInflate* z = g_vpk.z;
+        sciInit(z, g_vpk.window, g_vpk.in, kVpkInBuf, vpkIn, NULL, vpkOut, NULL);
+        int rc = method == 0 ? (csize == usize ? sciStore(z, csize) : SCI_ERR_DATA) : sciInflate(z);
+        const int rcClose = sceIoClose(g_vpk.out);
+        if (rc == 0 && rcClose < 0) rc = rcClose;
+        if (rc == 0 && (z->total != usize || sciCrcEnd(z) != crc)) rc = SCI_ERR_DATA;
+        if (rc < 0) {
+            sceClibSnprintf(why, cap, "the VPK's %.40s did not unpack (%d%s)", g_vpkName, rc,
+                            rc == SCI_ERR_DATA ? ": damaged" : "");
+            return rc;
+        }
+        files++;
+        bytes += usize;
+    }
+    logLine("update: the VPK unpacked: %u files, %s MB, in %s s", (unsigned)files,
+            mbOf(bytes).s, secsOf((uint32_t)(sceKernelGetSystemTimeWide() - began) / 1000u).s);
+    return 0;
+}
+
+// A string of the param.sfo in buf (n bytes) into out: true when there.
+bool sfoString(const uint8_t* buf, uint32_t n, const char* key, char* out, int cap) {
+    out[0] = 0;
+    if (n < 20 || le32At(buf) != 0x46535000u) return false;
+    const uint32_t keyOff = le32At(buf + 8), valOff = le32At(buf + 12), count = le32At(buf + 16);
+    if (keyOff > n || valOff > n || count > (n - 20) / 16) return false;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t* e = buf + 20 + 16 * i;
+        const uint32_t name = keyOff + le16At(e), len = le32At(e + 4), data = valOff + le32At(e + 12);
+        if (name >= n || data > n || len > n - data) continue;
+        const char* k = (const char*)buf + name;
+        int m = 0;
+        while (name + m < n && key[m] && k[m] == key[m]) m++;
+        if (key[m] || name + m >= n || k[m]) continue;
+        int o = 0;
+        for (uint32_t c = 0; c < len && o < cap - 1 && buf[data + c]; c++) out[o++] = (char)buf[data + c];
+        out[o] = 0;
+        return true;
+    }
+    return false;
+}
+
+// VitaShell's fpkg_hmac: SHA-1 of the data, made into a key, and SHA-1 of
+// that, its first 16 bytes.
+void fpkgHmac(const uint8_t* data, uint32_t len, uint8_t hmac[16]) {
+    ScSha1 s;
+    uint8_t sha[20], b[64];
+    scSha1Init(&s);
+    scSha1Update(&s, data, len);
+    scSha1Final(&s, sha);
+    sceClibMemset(b, 0, sizeof(b));
+    sceClibMemcpy(b, sha + 4, 8);
+    sceClibMemcpy(b + 8, sha + 4, 8);
+    sceClibMemcpy(b + 16, sha + 12, 4);
+    b[20] = sha[16];
+    b[21] = sha[1];
+    b[22] = sha[2];
+    b[23] = sha[3];
+    sceClibMemcpy(b + 24, b + 16, 8);
+    scSha1Init(&s);
+    scSha1Update(&s, b, 64);
+    scSha1Final(&s, sha);
+    sceClibMemcpy(hmac, sha, 16);
+}
+
+// head.bin for the content id in buf (sizeof(kHeadBin)), as VitaShell's
+// makeHeadBin makes it.
+void makeHeadBin(uint8_t* h, const char* titleId, const char* contentId) {
+    sceClibMemcpy(h, kHeadBin, sizeof(kHeadBin));
+    char full[48];
+    sceClibMemset(full, 0, sizeof(full));
+    if (contentId[0])
+        copyText(full, contentId, sizeof(full));
+    else
+        sceClibSnprintf(full, sizeof(full), "EP9000-%s_00-0000000000000000", titleId);
+    sceClibMemcpy(h + 0x30, full, 48);  // as strncpy: zeros after it
+    uint8_t mac[16];
+    uint32_t len = be32At(h + 0xD0);
+    fpkgHmac(h, len, mac);
+    sceClibMemcpy(h + len, mac, 16);
+    const uint32_t off = be32At(h + 0x8), infoLen = be32At(h + 0x10), out = be32At(h + 0xD4);
+    fpkgHmac(h + off, infoLen - 64, mac);
+    sceClibMemcpy(h + out, mac, 16);
+    len = be32At(h + 0xE8);
+    fpkgHmac(h, len, mac);
+    sceClibMemcpy(h + len, mac, 16);
+}
+
+// The unpacked VPK checked to be the app's, and its head.bin made unless
+// it brought one. 0, else the code, with why.
+int vpkHead(char* why, int cap) {
+    sceClibSnprintf(g_vpkPath, sizeof(g_vpkPath), "%s/sce_sys/param.sfo", g_updateDir);
+    const int n = readFile(g_vpkPath, (char*)g_vpk.in, (int)kVpkInBuf);
+    char titleId[12], contentId[48];
+    if (n <= 0 || !sfoString(g_vpk.in, (uint32_t)n, "TITLE_ID", titleId, sizeof(titleId))) {
+        sceClibSnprintf(why, cap, "the VPK has no param.sfo with a TITLE_ID");
+        return -1;
+    }
+    if (!same(titleId, g_updateApp.titleId)) {
+        sceClibSnprintf(why, cap, "the VPK is %s's, not %s's", titleId, g_updateApp.titleId);
+        return -1;
+    }
+    sfoString(g_vpk.in, (uint32_t)n, "CONTENT_ID", contentId, sizeof(contentId));
+    sceClibSnprintf(g_vpkPath, sizeof(g_vpkPath), "%s/sce_sys/package/head.bin", g_updateDir);
+    if (exists(g_vpkPath)) return 0;
+    makeHeadBin(g_vpk.window, titleId, contentId);
+    vpkMkdirs(g_vpkPath);
+    const int rc = writeWhole(g_vpkPath, (const char*)g_vpk.window, (int)sizeof(kHeadBin));
+    if (rc < 0) {
+        sceClibSnprintf(why, cap, "head.bin not written (0x%08X)", (unsigned)rc);
+        return rc;
+    }
+    logLine("update: head.bin made for %s%s", titleId, contentId[0] ? ", with its content id" : "");
+    return 0;
+}
+
+// The VPK made ready for the installer in g_updateDir: the folder cleared,
+// the VPK unpacked, checked and given its head.bin. 0, else the code, with
+// why; the folder removed again then.
+int vpkPrepare(char* why, int cap) {
+    copyText(g_vpkPath, g_updateDir, sizeof(g_vpkPath));
+    removeTree(g_vpkPath, 0);
+    sceIoMkdir(g_updateDir, 0777);
+    sceClibMemset(&g_vpk, 0, sizeof(g_vpk));
+    g_vpk.fd = -1;
+    g_vpk.block = sceKernelAllocMemBlock("ShellCompanion::Vpk", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW,
+                                         kVpkBlock, NULL);
+    void* base = NULL;
+    if (g_vpk.block < 0 || sceKernelGetMemBlockBase(g_vpk.block, &base) < 0) {
+        sceClibSnprintf(why, cap, "no memory to unpack the VPK (0x%08X)", (unsigned)g_vpk.block);
+        return g_vpk.block < 0 ? g_vpk.block : -1;
+    }
+    static_assert(sizeof(ScInflate) + SCI_WINDOW + kVpkInBuf <= kVpkBlock, "the VPK's memory");
+    static_assert(sizeof(kHeadBin) <= SCI_WINDOW, "head.bin is made in the window");
+    g_vpk.z = (ScInflate*)base;
+    g_vpk.window = (uint8_t*)base + ((sizeof(ScInflate) + 63) & ~63u);
+    g_vpk.in = g_vpk.window + SCI_WINDOW;
+    int rc = vpkUnzip(why, cap);
+    if (g_vpk.fd >= 0) sceIoClose(g_vpk.fd);
+    if (rc == 0) rc = vpkHead(why, cap);
+    sceKernelFreeMemBlock(g_vpk.block);
+    if (rc < 0) {
+        copyText(g_vpkPath, g_updateDir, sizeof(g_vpkPath));
+        removeTree(g_vpkPath, 0);
+    }
+    return rc;
+}
+
 // The whole install. 0, else the code, with why.
 int updateInstall(char* why, int cap) {
+    if (!updateWaitGone(kUpdateGoneMs)) {
+        sceClibSnprintf(why, cap, "%s was still running %s s after it asked", g_updateApp.name,
+                        secsOf(kUpdateGoneMs).s);
+        return -1;
+    }
+    if (g_updateVpk[0]) {
+        const int rcVpk = vpkPrepare(why, cap);
+        if (rcVpk < 0) return rcVpk;
+    }
     char eboot[160], head[160];
     sceClibSnprintf(eboot, sizeof(eboot), "%s/eboot.bin", g_updateDir);
     sceClibSnprintf(head, sizeof(head), "%s/sce_sys/package/head.bin", g_updateDir);
     if (!exists(eboot) || !exists(head)) {
         sceClibSnprintf(why, cap, "nothing to install at %s", g_updateDir);
-        return -1;
-    }
-    if (!updateWaitGone(kUpdateGoneMs)) {
-        sceClibSnprintf(why, cap, "%s was still running %s s after it asked", g_updateApp.name,
-                        secsOf(kUpdateGoneMs).s);
         return -1;
     }
     int rc = updateFindPromoter(why, cap);
@@ -7241,17 +7590,33 @@ int updateThread(SceSize, void*) {
 }
 
 // From an app as it quits to be updated (SC_CMD_UPDATE_INSTALL), the update
-// thread begun. Under g_lock.
-void startUpdate(int app) {
+// thread begun: SC_UPDATE_DIR installed as the app made it, or with vpk, that
+// VPK unpacked into it first. Under g_lock.
+void startUpdate(int app, const char* vpk) {
     const App* a = appAt(app);
     if (g_updating) {
         logLine("update: %s asks while one is under way", a->name);
         return;
     }
+    // A VPK on a device, in full, with no way out of it.
+    bool colon = false, dots = false;
+    for (const char* p = vpk; *p; p++) {
+        colon = colon || *p == ':';
+        dots = dots || (p[0] == '.' && p[1] == '.');
+    }
+    if (vpk[0] && (!colon || dots)) {
+        logLine("update: %s's VPK refused: \"%s\"", a->name, vpk);
+        updateResult(a, -1, "the VPK's path is not a whole one");
+        return;
+    }
     g_updateApp = *a;
     appPath(a, SC_UPDATE_DIR, g_updateDir, sizeof(g_updateDir));
-    logLine("update: %s asks for its update at %s to be installed once it has gone", a->name,
-            g_updateDir);
+    copyText(g_updateVpk, vpk, sizeof(g_updateVpk));
+    if (vpk[0])
+        logLine("update: %s asks for its VPK %s to be installed once it has gone", a->name, vpk);
+    else
+        logLine("update: %s asks for its update at %s to be installed once it has gone", a->name,
+                g_updateDir);
     const SceUID thread = sceKernelCreateThread("ShellCompanion::Update", updateThread,
                                                 kThreadPriority, kUpdateStack, 0, 0, NULL);
     const int rc = thread < 0 ? thread : sceKernelStartThread(thread, 0, NULL);
@@ -8829,7 +9194,8 @@ int appOf(const ScMessage& m) {
 const uint32_t kFeatures = SC_FEAT_ROW | SC_FEAT_MUSIC | SC_FEAT_DOWNLOADS | SC_FEAT_UPDATE |
                            SC_FEAT_SENDSPIN;
 const char* const kCaps =
-    "queue.seek,queue.control,downloads.battery,sendspin.metadata,sendspin.controller,probe";
+    "queue.seek,queue.control,downloads.battery,downloads.pages,update.vpk,sendspin.metadata,"
+    "sendspin.controller,probe";
 // Under g_lock: the app a HELLO is to be answered for, -1 for none: answered
 // by the receiving thread once it has let the lock go (helloReply).
 int g_helloReplyApp = -1;
@@ -9064,9 +9430,12 @@ private:
             if (g_playQueueDue && g_playQueueApp == app) g_playQueueDue = 0;
             if (g_carryApp == app) stopCarry("the app takes the music back", kEndTakeBack);
             break;
-        case SC_CMD_UPDATE_INSTALL:
-            startUpdate(app);
+        case SC_CMD_UPDATE_INSTALL: {
+            char vpk[160];
+            toUtf8(m.text1, 256, vpk, sizeof(vpk));
+            startUpdate(app, vpk);
             break;
+        }
         case SC_CMD_SENDSPIN_START:
             logLine("sendspin: %s hands its player over", appName(app));
             ssAsk(app);
