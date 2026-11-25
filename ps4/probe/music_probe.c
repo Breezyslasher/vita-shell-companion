@@ -307,6 +307,15 @@ int probeMain(void) {
     firmware(fw, sizeof(fw));
     logLine("music probe: firmware %s", fw);
     g_stepUs = sysNowUs();
+    // A thread of its own is not to be had here: the second run (GoldHEN
+    // 2.4b18.6) never came back from scePthreadCreate, its log ending at the
+    // firmware. Only with /data/ShellCompanion/ps4probe.thread is it tried;
+    // else the service is driven from this thread, unwatched, and a call
+    // that does not return ends the log, hang or crash alike.
+    if (!sysExists(DIR "/ps4probe.thread")) {
+        logLine("the service on the probe's own thread, unwatched");
+        return musicRun();
+    }
     const int rc = threadStart(musicThread, NULL, "ScProbeMusic");
     logLine("the service's thread: 0x%08X", (unsigned)rc);
     if (rc != 0) return musicRun();  // no thread: on this one, unwatched
