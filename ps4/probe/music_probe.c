@@ -255,7 +255,12 @@ static int musicRun(void) {
     logLine("status before playing: %s", line);
     notify("Music probe: trying the system music service");
 
-    const char* files[2] = {DIR "/test.mp3", DIR "/probe-tone.wav"};
+    // Set in code, not as an initialised array, which the compiler may keep
+    // in data as two pointers a raw payload would have nobody to relocate.
+    const char* files[2];
+    files[0] = DIR "/test.mp3";
+    __asm__ volatile("" ::: "memory");
+    files[1] = DIR "/probe-tone.wav";
     int played = 0;
     for (int f = 0; f < 2 && !played; f++) {
         if (!sysExists(files[f])) {

@@ -80,6 +80,21 @@ void* sysMap(size_t size) {
                            -1, 0);
     return p < 0 && p > -4096 ? NULL : (void*)p;
 }
+void sysUnmap(void* p, size_t size) {
+    sysCall(73, (long)p, (long)size, 0, 0, 0, 0);
+}
+int sysUnlink(const char* path) {
+    return (int)sysCall(10, (long)path, 0, 0, 0, 0, 0);
+}
+int sysRename(const char* from, const char* to) {
+    return (int)sysCall(128, (long)from, (long)to, 0, 0, 0, 0);
+}
+int64_t sysSeek(int fd, int64_t off, int whence) {
+    return sysCall(478, fd, off, whence, 0, 0, 0);
+}
+int sysGetdents(int fd, void* buf, size_t n) {
+    return (int)sysCall(272, fd, (long)buf, (long)n, 0, 0, 0);
+}
 void sysExit(int code) {
     sysCall(1, code, 0, 0, 0, 0, 0);
     for (;;) {
@@ -96,6 +111,23 @@ void* memcpy(void* d, const void* s, size_t n) {
     const uint8_t* q = (const uint8_t*)s;
     while (n--) *p++ = *q++;
     return d;
+}
+void* memmove(void* d, const void* s, size_t n) {
+    uint8_t* p = (uint8_t*)d;
+    const uint8_t* q = (const uint8_t*)s;
+    if (p < q) {
+        while (n--) *p++ = *q++;
+    } else {
+        while (n--) p[n] = q[n];
+    }
+    return d;
+}
+int memcmp(const void* a, const void* b, size_t n) {
+    const uint8_t* p = (const uint8_t*)a;
+    const uint8_t* q = (const uint8_t*)b;
+    for (; n; n--, p++, q++)
+        if (*p != *q) return *p - *q;
+    return 0;
 }
 size_t strlen(const char* s) {
     size_t n = 0;

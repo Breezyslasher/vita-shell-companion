@@ -15,3 +15,7 @@ resources/head.bin and package_installer.c's makeHeadBin), licensed under
 the GNU General Public License, version 3: vita/plugin/head_bin.h, and the VPK
 section of vita/plugin/main.cpp. Its inflater (common/sc_inflate.h) follows
 puff, by Mark Adler (zlib's contrib/puff, zlib licence).
+
+The PS4 background music module (ps4/bgm) decodes MP3 with minimp3, by
+lieff (https://github.com/lieff/minimp3, ps4/bgm/minimp3.h), dedicated to
+the public domain under CC0 1.0.

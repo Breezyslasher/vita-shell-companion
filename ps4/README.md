@@ -1,5 +1,60 @@
 # PS4: background music and quick menu controls
 
+## Background music (first version)
+
+`sc_bgm.bin` loads a music player into the PS4's shell (`SceShellUI`), so
+it keeps playing while you are on the home screen and, we hope, in games.
+It is built on what the probes below found: a payload is not heard, so the
+player runs inside the shell, loaded by GoldHEN, as the shell probe is.
+It does not show in the quick menu yet; that comes later.
+
+### Trying it
+
+1. By FTP (GoldHEN's, port 2121), put some MP3s (or 16-bit WAVs) in
+   `/data/ShellCompanion/ps4/music/`. They play in name order.
+2. Send `sc_bgm.bin` to the BinLoader: `nc -v <ps4-ip> 9020 < sc_bgm.bin`.
+3. A notification says "Now playing: ..." and the first track plays.
+4. Start a game. Does it keep playing?
+5. Send `/data/ShellCompanion/ps4/bgm.log` and `bgm-load.log`, and
+   `status.txt`.
+
+Sending `sc_bgm.bin` again while it runs does not load a second player: it
+starts the queue again.
+
+### Controlling it
+
+Everything is in `/data/ShellCompanion/ps4/`:
+
+| File | What |
+|---|---|
+| `music/` | the tracks played when there is no `queue.txt` |
+| `queue.txt` | the queue instead: one absolute path a line (`/data/...mp3`); `#start 3` starts at the fourth |
+| `cmd` | upload a file with one word in it: `play`, `pause`, `toggle`, `next`, `prev`, `stop`, `reload` (read the queue again), `quit`. The player reads it and deletes it. |
+| `port.txt` | the audio port type, if MAIN (0) is not heard: `1` is BGM, or `14` |
+| `status.txt` | written every second: state, track, position |
+
+An app will later drive these the way the Vita client does (`scWriteQueue`
+then `scMusicPlay`).
+
+### If it is not heard
+
+- If nothing plays and `bgm-load.log` shows `PROCESS_PRX_LOAD` failing, the
+  shell probe below will say more.
+- If it plays on the home screen but not in a game, try `port.txt` with `1`,
+  then `14`, and send `reload` then `play` as `cmd`.
+
+### Building
+
+```sh
+docker run --rm -v "$PWD":/src -w /src golang:1.22 sh ps4/probe/get_create_fself.sh
+docker run --rm --user 0 -v "$PWD":/src -w /src openorbisofficial/toolchain:latest sh ps4/bgm/build.sh
+```
+
+`build-ps4/sc_bgm.bin` is the payload (the module, `sc_bgm.prx`, is inside
+it). The CI builds it with the probes.
+
+## The probes
+
 The PS4 counterpart of the Vita plugin is being worked out. On the Vita, the
 plugin plays an app's queue through SceShell's own music service, which
 gives it the quick menu's Music row. The PS4 has nothing as direct, so two

@@ -28,10 +28,18 @@ int sysExists(const char* path);
 void sysSleepMs(uint32_t ms);
 uint64_t sysNowUs(void);
 void* sysMap(size_t size);  // anonymous read/write memory, or NULL
+void sysUnmap(void* p, size_t size);
+int sysUnlink(const char* path);
+int sysRename(const char* from, const char* to);
+int64_t sysSeek(int fd, int64_t off, int whence);  // whence: 0 set, 2 end
+// A directory's entries, FreeBSD's struct dirent, into buf: bytes, 0 at the
+// end, or < 0.
+int sysGetdents(int fd, void* buf, size_t n);
 void sysExit(int code);
 
 #define SC_O_RDONLY 0x0000
 #define SC_O_WRONLY 0x0001
+#define SC_O_DIRECTORY 0x20000
 #define SC_O_CREAT 0x0200
 #define SC_O_TRUNC 0x0400
 
@@ -42,6 +50,8 @@ void* libSym(int handle, const char* symbol);
 
 void* memset(void* d, int c, size_t n);
 void* memcpy(void* d, const void* s, size_t n);
+void* memmove(void* d, const void* s, size_t n);
+int memcmp(const void* a, const void* b, size_t n);
 size_t strlen(const char* s);
 int fmtv(char* out, size_t cap, const char* f, va_list ap);
 int fmt(char* out, size_t cap, const char* f, ...) __attribute__((format(printf, 3, 4)));
