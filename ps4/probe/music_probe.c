@@ -57,7 +57,8 @@ typedef struct {
 static FnInit g_init3, g_init2, g_init;
 
 // The step the service's thread is in, and since when; done once it ends.
-static const char* volatile g_step = "starting";
+static const char* volatile g_step;  // set as it starts: a pointer kept in data needs a
+                                     // relocation, which a raw payload does not get
 static volatile uint64_t g_stepUs;
 static volatile int g_done;
 
@@ -306,6 +307,7 @@ int probeMain(void) {
     char fw[64];
     firmware(fw, sizeof(fw));
     logLine("music probe: firmware %s", fw);
+    g_step = "starting";
     g_stepUs = sysNowUs();
     // A thread of its own is not to be had here: the second run (GoldHEN
     // 2.4b18.6) never came back from scePthreadCreate, its log ending at the

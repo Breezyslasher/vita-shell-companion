@@ -12,6 +12,9 @@ SECTIONS
     .rodata : ALIGN(16) { *(.rodata .rodata.*) }
     .data : ALIGN(16) { *(.data .data.*) *(.got .got.*) }
     .bss : ALIGN(16) { *(.bss .bss.*) *(COMMON) . = ALIGN(16); }
+    /* Relocations are kept, for the build to find and refuse: an absolute
+       address in data is only right at the address it was linked for. */
+    .rela.dyn : { *(.rela*) }
     /DISCARD/ : { *(.eh_frame*) *(.comment) *(.note*) *(.dynamic) *(.dynsym) *(.dynstr)
-                  *(.hash) *(.gnu.hash) *(.interp) *(.rela*) }
+                  *(.hash) *(.gnu.hash) *(.interp) }
 }

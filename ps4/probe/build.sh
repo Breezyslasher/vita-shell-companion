@@ -25,13 +25,18 @@ for probe in audio music; do
         -o "$OUT/sc_ps4probe_$probe.elf" "$OUT/sys.o" "$OUT/$probe.o"
     # The raw payload (.bin), for GoldHEN's BinLoader: the image from 0,
     # .bss included as zeros.
-    ld.lld -m elf_x86_64 --script "$SRC/raw.x" -e _start \
+    # Linked as PIE, so that an absolute address in data shows as a
+    # relocation, which a raw loader would not apply: the check below then
+    # refuses it.
+    ld.lld -m elf_x86_64 -pie --script "$SRC/raw.x" -e _start \
         -o "$OUT/sc_ps4probe_${probe}_raw.elf" "$OUT/sys.o" "$OUT/$probe.o"
-    if readelf -rW "$OUT/sc_ps4probe_${probe}_raw.elf" | grep -q R_X86_64; then
-        echo "$probe: the raw payload has relocations" >&2
+    # GNU objdump: the image's readelf is OpenOrbis's own, which prints
+    # nothing for this.
+    if objdump -R "$OUT/sc_ps4probe_${probe}_raw.elf" | grep R_X86_64; then
+        echo "$probe: the raw payload has relocations: a pointer kept in data" >&2
         exit 1
     fi
-    objcopy --set-section-flags .bss=alloc,load,contents -O binary \
+    objcopy --set-section-flags .bss=alloc,load,contents -O binary -R .rela.dyn \
         "$OUT/sc_ps4probe_${probe}_raw.elf" "$OUT/sc_ps4probe_$probe.bin"
 done
 ls -l "$OUT"/*.elf "$OUT"/*.bin
