@@ -10,6 +10,7 @@ int probeMain(void);
 
 // The entry point: the payload loader jumps here, with no C runtime.
 __asm__(
+    ".section .text.start, \"ax\"\n"
     ".global _start\n"
     "_start:\n"
     "  pushq %rbp\n"
@@ -18,7 +19,8 @@ __asm__(
     "  callq probeEntry\n"
     "  movq %rbp, %rsp\n"
     "  popq %rbp\n"
-    "  retq\n");
+    "  retq\n"
+    ".text\n");
 
 __attribute__((noinline)) long sysCall(long num, long a, long b, long c, long d, long e, long f) {
     register long r10 __asm__("r10") = d;

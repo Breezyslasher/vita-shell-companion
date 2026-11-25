@@ -13,13 +13,25 @@ OO=${OO_PS4_TOOLCHAIN:?OO_PS4_TOOLCHAIN is not set}
 SRC=$(dirname "$0")
 OUT=${OUT:-build-ps4}
 mkdir -p "$OUT"
-CFLAGS="--target=x86_64-pc-freebsd12-elf -fPIC -ffreestanding -fno-builtin -fno-stack-protector
-        -funwind-tables -O2 -Wall -Wextra -Werror -isystem $OO/include"
+# Hidden visibility: every reference to data is relative to the code, with
+# no GOT entry or relocation for a raw loader to fill in.
+CFLAGS="--target=x86_64-pc-freebsd12-elf -fPIC -fvisibility=hidden -ffreestanding -fno-builtin
+        -fno-stack-protector -fno-jump-tables -O2 -Wall -Wextra -Werror -isystem $OO/include"
 for probe in audio music; do
     clang $CFLAGS -c "$SRC/sys.c" -o "$OUT/sys.o"
     clang $CFLAGS -c "$SRC/${probe}_probe.c" -o "$OUT/${probe}.o"
+    # An ELF, for an ELF loader.
     ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _start \
         -o "$OUT/sc_ps4probe_$probe.elf" "$OUT/sys.o" "$OUT/$probe.o"
-    cp "$OUT/sc_ps4probe_$probe.elf" "$OUT/sc_ps4probe_$probe.bin"
+    # The raw payload (.bin), for GoldHEN's BinLoader: the image from 0,
+    # .bss included as zeros.
+    ld.lld -m elf_x86_64 --script "$SRC/raw.x" -e _start \
+        -o "$OUT/sc_ps4probe_${probe}_raw.elf" "$OUT/sys.o" "$OUT/$probe.o"
+    if readelf -rW "$OUT/sc_ps4probe_${probe}_raw.elf" | grep -q R_X86_64; then
+        echo "$probe: the raw payload has relocations" >&2
+        exit 1
+    fi
+    objcopy --set-section-flags .bss=alloc,load,contents -O binary \
+        "$OUT/sc_ps4probe_${probe}_raw.elf" "$OUT/sc_ps4probe_$probe.bin"
 done
-ls -l "$OUT"/*.elf
+ls -l "$OUT"/*.elf "$OUT"/*.bin

@@ -21,8 +21,14 @@ libraries are loaded at run time (`probe/sys.c`).
 docker run --rm --user 0 -v "$PWD":/src -w /src openorbisofficial/toolchain:latest sh ps4/probe/build.sh
 ```
 
-The output is `build-ps4/sc_ps4probe_audio.bin` and `sc_ps4probe_music.bin`,
-the same as their `.elf`. The CI builds them too.
+The output is two forms of each probe in `build-ps4/`:
+
+- **`.bin`, a raw payload:** the image as it runs, from its first byte, for
+  GoldHEN's BinLoader. The loader jumps to the start of what it is sent.
+- **`.elf`:** the same probe as an ELF, for an ELF loader.
+
+The CI builds both. The first test sent the ELF to the BinLoader on 9020,
+and the probe never ran: no log, and the port closed after it.
 
 ## Running them
 
