@@ -30,15 +30,21 @@ Each app turns on only the features it wants, and describes its work with
 plain URLs, headers and report templates. The plugin knows nothing about any
 particular server.
 
-> **Status:** protocol 1 is implemented ([`docs/PROTOCOL.md`](docs/PROTOCOL.md))
-> but not yet tested on a console. It is VitaPlex's quick menu plugin made
-> app-agnostic; the parts that talk to SceShell are unchanged from it.
+> **Status:** the Vita plugin runs on a real Vita with VitaPlex: background
+> music, the quick menu's controls, background downloads and updates. A PS4
+> counterpart is planned in `ps4/`; the two will share `common/`.
+
+> **Moving an app to this layout:** `client/` is now `vita/client/` and
+> `include/` is now `common/`. Build `vita/client/*.c` as before, and put
+> `common/` and `vita/client/` on the include path. Nothing in the files or
+> the protocol changed.
 
 ## Using it in an app
 
-1. Add `include/` and `client/` to the app's build: `client/shell_companion.c`,
-   `client/sc_files.c` and `client/sc_link_stub.S`, plus `client/sc_cover.c`
-   for covers (it needs `stb_image.h`).
+1. Add `common/` and `vita/client/` to the app's include path, and build
+   `vita/client/shell_companion.c`, `vita/client/sc_files.c` and
+   `vita/client/sc_link_stub.S`, plus `vita/client/sc_cover.c` for covers (it
+   needs `stb_image.h`).
 2. Ship `shell_companion.suprx` in the app's package, for example in
    `module/`.
 3. At start-up:
@@ -64,11 +70,12 @@ particular server.
 
 | Path | What |
 |---|---|
-| `plugin/` | the plugin itself (GPL-3.0, based on [ElevenMPV-A](https://github.com/GrapheneCt/ElevenMPV-A)'s by GrapheneCt) |
-| `include/` | the protocol and file formats the plugin and apps share |
-| `client/` | the C library an app links to load the plugin and talk to it (Apache-2.0) |
+| `vita/plugin/` | the Vita plugin itself (GPL-3.0, based on [ElevenMPV-A](https://github.com/GrapheneCt/ElevenMPV-A)'s by GrapheneCt) |
+| `vita/client/` | the C library a Vita app links to load the plugin and talk to it (Apache-2.0) |
+| `vita/scripts/` | PAF header fetch and PAF stub generator |
+| `ps4/` | the PS4 counterpart (planned) |
+| `common/` | what both share: the protocol and file formats, and the plugin's own code for Sendspin (`sendspin_wire.h`), DEFLATE (`sc_inflate.h`), SHA-1 and MP3 framing |
 | `docs/PROTOCOL.md` | the protocol: commands, files, and the client's calls |
-| `scripts/` | PAF header fetch and PAF stub generator |
 
 ## Building
 
@@ -76,8 +83,8 @@ You need [vitasdk](https://vitasdk.org), or the `vitasdk/vitasdk:2026.08`
 Docker image.
 
 ```sh
-sh scripts/fetch_paf_headers.sh build-paf
-cmake -B build -G Ninja -DSC_PAF_INCLUDE_DIR=$PWD/build-paf/include
+sh vita/scripts/fetch_paf_headers.sh build-paf
+cmake -S vita -B build -G Ninja -DSC_PAF_INCLUDE_DIR=$PWD/build-paf/include
 cmake --build build        # -> build/shell_companion.suprx, libshell_companion_client.a
 ```
 
@@ -96,6 +103,6 @@ The CI does the same and uploads the `.suprx` as an artifact.
 | Part | Licence |
 |---|---|
 | The plugin | GPL-3.0 (`LICENSE`, `NOTICE.txt`) |
-| `client/` | Apache-2.0 (`client/LICENSE`), so apps under any licence can link it |
+| `vita/client/` | Apache-2.0 (`vita/client/LICENSE`), so apps under any licence can link it |
 
 Apps only talk to the plugin through message pipes and files.

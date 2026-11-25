@@ -28,13 +28,13 @@ jobs:
       - name: Fetch PAF headers
         run: |
           for try in 1 2 3; do
-            sh scripts/fetch_paf_headers.sh "$GITHUB_WORKSPACE/build-paf" && exit 0
+            sh vita/scripts/fetch_paf_headers.sh "$GITHUB_WORKSPACE/build-paf" && exit 0
             echo "fetch failed (try $try)"; sleep $((try * 10))
           done
           exit 1
       - name: Build
         run: |
-          cmake -B build -G Ninja -DSC_PAF_INCLUDE_DIR="$GITHUB_WORKSPACE/build-paf/include"
+          cmake -S vita -B build -G Ninja -DSC_PAF_INCLUDE_DIR="$GITHUB_WORKSPACE/build-paf/include"
           cmake --build build
       - uses: actions/upload-artifact@v4
         with:

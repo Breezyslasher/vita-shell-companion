@@ -12,6 +12,6 @@ folder src/qm_plugin_psv, with how it is built.
 The plugin also carries the head.bin template and the way to make it of
 VitaShell, by TheFloW (https://github.com/TheOfficialFloW/VitaShell,
 resources/head.bin and package_installer.c's makeHeadBin), licensed under
-the GNU General Public License, version 3: plugin/head_bin.h, and the VPK
-section of plugin/main.cpp. Its inflater (include/sc_inflate.h) follows
+the GNU General Public License, version 3: vita/plugin/head_bin.h, and the VPK
+section of vita/plugin/main.cpp. Its inflater (common/sc_inflate.h) follows
 puff, by Mark Adler (zlib's contrib/puff, zlib licence).

@@ -18,8 +18,8 @@ are the feature itself: the `plexqueue`/`plexadd` download kinds (§5.2),
 which drive Plex's server-side download queue for VitaPlex, and Sendspin
 (§8), Music Assistant's player protocol.
 
-`include/sc_protocol.h` holds the constants and structures below;
-`client/` is a C library that does all of it for an app (§7).
+`common/sc_protocol.h` holds the constants and structures below;
+`vita/client/` is a C library that does all of it for an app (§7).
 
 > **Status:** implemented, not yet tested on a console. It is VitaPlex's
 > quick menu plugin generalised; the parts that talk to SceShell are
@@ -583,11 +583,12 @@ to HELLO doesn't list `update.vpk`. An older plugin would install whatever
   Huffman codes from a table, and makes a file's folders only when they differ
   from the last file's. On a Vita, 12.7 MB took 42.5 s before these changes.
 
-## 7. Client library (`client/`)
+## 7. Client library (`vita/client/`)
 
-Plain C, Apache-2.0, for any app. Build `client/shell_companion.c`,
-`client/sc_files.c` and `client/sc_link_stub.S` with the app, plus
-`client/sc_cover.c` for covers (it needs the app's `stb_image.h`), and ship
+Plain C, Apache-2.0, for any app. Build `vita/client/shell_companion.c`,
+`vita/client/sc_files.c` and `vita/client/sc_link_stub.S` with the app, with
+`common/` and `vita/client/` on the include path, plus
+`vita/client/sc_cover.c` for covers (it needs the app's `stb_image.h`), and ship
 `shell_companion.suprx` in the app's package.
 
 ```c
