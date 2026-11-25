@@ -32,7 +32,7 @@ particular server.
 
 > **Status:** the Vita plugin runs on a real Vita with VitaPlex: background
 > music, the quick menu's controls, background downloads and updates. A PS4
-> counterpart is planned in `ps4/`; the two will share `common/`.
+> counterpart is begun in `ps4/`: its first probes; the two share `common/`.
 
 > **Moving an app to this layout:** `client/` is now `vita/client/` and
 > `include/` is now `common/`. Build `vita/client/*.c` as before, and put
@@ -73,7 +73,7 @@ particular server.
 | `vita/plugin/` | the Vita plugin itself (GPL-3.0, based on [ElevenMPV-A](https://github.com/GrapheneCt/ElevenMPV-A)'s by GrapheneCt) |
 | `vita/client/` | the C library a Vita app links to load the plugin and talk to it (Apache-2.0) |
 | `vita/scripts/` | PAF header fetch and PAF stub generator |
-| `ps4/` | the PS4 counterpart (planned) |
+| `ps4/` | the PS4 counterpart: its probes, for background music and the quick menu, so far (`ps4/README.md`) |
 | `common/` | what both share: the protocol and file formats, and the plugin's own code for Sendspin (`sendspin_wire.h`), DEFLATE (`sc_inflate.h`), SHA-1 and MP3 framing |
 | `docs/PROTOCOL.md` | the protocol: commands, files, and the client's calls |
 
