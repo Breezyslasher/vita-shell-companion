@@ -8,7 +8,9 @@
 
 int probeMain(void);
 
-// The entry point: the payload loader jumps here, with no C runtime.
+#ifndef SC_PRX
+// The entry point: the payload loader jumps here, with no C runtime. A
+// module (SC_PRX) has the system's loader and crtlib's _init instead.
 __asm__(
     ".section .text.start, \"ax\"\n"
     ".global _start\n"
@@ -21,6 +23,7 @@ __asm__(
     "  popq %rbp\n"
     "  retq\n"
     ".text\n");
+#endif
 
 __attribute__((noinline)) long sysCall(long num, long a, long b, long c, long d, long e, long f) {
     register long r10 __asm__("r10") = d;
@@ -305,7 +308,9 @@ void firmware(char* out, size_t cap) {
 // daemon returns. Not exit(): whether GoldHEN runs a payload in a process
 // of its own or in one of the system's is not known here, and exit() in the
 // latter would end it.
+#ifndef SC_PRX
 void probeEntry(void) {
     const int rc = probeMain();
     logLine("probe: returning %d to the loader", rc);
 }
+#endif

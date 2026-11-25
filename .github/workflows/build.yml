@@ -52,6 +52,13 @@ jobs:
       options: --user 0
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build create-fself
+        run: |
+          command -v git >/dev/null || (apt-get update && apt-get install -y --no-install-recommends git ca-certificates)
+          sh ps4/probe/get_create_fself.sh
       - name: Build
         run: sh ps4/probe/build.sh
       - uses: actions/upload-artifact@v4
@@ -59,4 +66,5 @@ jobs:
           name: ps4-probes-${{ github.run_number }}
           path: |
             build-ps4/*.bin
+            build-ps4/*.prx
             ps4/README.md

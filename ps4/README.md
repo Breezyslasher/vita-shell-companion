@@ -10,6 +10,7 @@ question and logs what it finds.
 |---|---|
 | `sc_ps4probe_audio` | Does a background process's audio keep playing while a game runs, on the main port and on the background-music (BGM) port? |
 | `sc_ps4probe_music` | Will the system's own music service (`libSceMusicPlayerService`) play a track handed to it from homebrew, and does it then show in the quick menu with working buttons? |
+| `sc_ps4probe_shell` | Is audio played from inside the shell (`SceShellUI`) heard, and which modules does the shell have, Mono's among them? |
 
 Both use no user service, as GoldHEN before 2.4b18.10 hangs it in ELF
 payloads, and neither needs anything resolved when it loads: system
@@ -58,4 +59,27 @@ example `nc -v <ps4-ip> 9020 < sc_ps4probe_audio.bin`.
 4. It watches for 2 minutes, then stops.
 5. Send `/data/ShellCompanion/ps4probe-music.log`.
 
-`/data/ShellCompanion/ps4probe.stop` (any file) ends either probe early.
+### 3. Shell probe
+
+What the first two found on GoldHEN 2.4b18.6 (firmware 11.50): a payload's
+audio is heard on no port, though each takes its output at the hardware's
+pace; and the music service's initialisation never returns in a payload,
+nor does a payload's `scePthreadCreate`. So this probe runs inside the
+shell, which is always heard and owns the quick menu.
+
+`sc_ps4probe_shell.bin` carries a module, `sc_shellprobe.prx`. It writes the
+module to `/data/ShellCompanion/`, then has GoldHEN load it into
+`SceShellUI` (its SDK's `PROCESS_PRX_LOAD`, system call 500).
+
+1. Send `sc_ps4probe_shell.bin` from the home screen.
+2. Notifications should say "Inject probe: loaded into the shell?", then
+   "Shell probe: running inside the shell".
+3. Count the beeps, 20 s each: **1** main port, **2** BGM port, **3** type 14.
+4. Send `ps4probe-inject.log` and `ps4probe-shell.log`.
+
+A module that goes wrong inside the shell can take the home screen down with
+it; restarting the PS4 brings it back. The `.prx` is made with OpenOrbis's
+`create-fself --lib`, as GoldHEN's plugins are (`probe/get_create_fself.sh`
+builds it).
+
+`/data/ShellCompanion/ps4probe.stop` (any file) ends the first two probes early.
