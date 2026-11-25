@@ -11,7 +11,7 @@
 
 // The protocol's version, in the pipes' names. A plugin of version N serves
 // apps of every version up to N; an app looks for its own version's pipes,
-// then higher ones (client/shell_companion.c).
+// then higher ones (vita/client/shell_companion.c).
 #define SC_PROTOCOL 1
 #define SC_PIPE_TO_PLUGIN_FMT   "ShellCompanion%u::ToPlugin"
 #define SC_PIPE_FROM_PLUGIN_FMT "ShellCompanion%u::FromPlugin"

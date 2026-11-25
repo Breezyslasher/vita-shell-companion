@@ -9,7 +9,7 @@
 # here rather than kept in this repository. Both are pinned to the commits
 # below. The plugin's import stubs (paf_stubs.S) come from the same commits.
 #
-# usage: scripts/fetch_paf_headers.sh <out_dir>
+# usage: vita/scripts/fetch_paf_headers.sh <out_dir>
 # needs: git, patch
 
 set -eu

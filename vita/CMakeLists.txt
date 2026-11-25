@@ -1,7 +1,9 @@
-# vita-shell-companion: the SceShell plugin (shell_companion.suprx).
+# vita-shell-companion: the SceShell plugin (shell_companion.suprx), the
+# Vita half of the repository; ../common holds what it shares with the PS4's.
+# From the repository's root:
 #
-#   scripts/fetch_paf_headers.sh build-paf
-#   cmake -B build -G Ninja -DSC_PAF_INCLUDE_DIR=$PWD/build-paf/include
+#   sh vita/scripts/fetch_paf_headers.sh build-paf
+#   cmake -S vita -B build -G Ninja -DSC_PAF_INCLUDE_DIR=$PWD/build-paf/include
 #   cmake --build build
 #
 # The plugin speaks protocol 1 (docs/PROTOCOL.md); client/ is what apps link.
@@ -29,7 +31,7 @@ add_executable(shell_companion
     plugin/taihen_stub.S)
 target_include_directories(shell_companion PRIVATE
     ${SC_PAF_INCLUDE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 # No C runtime, PAF's 16-bit wchar_t, always -O2 (the PAF stubs cover what
 # the compiler leaves out of line at -O2), and GCC 15's template-body check
 # off for PAF's headers.
@@ -68,6 +70,6 @@ add_library(shell_companion_client STATIC
     client/sc_files.c
     client/sc_link_stub.S)
 target_include_directories(shell_companion_client PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common
     ${CMAKE_CURRENT_SOURCE_DIR}/client)
 target_compile_options(shell_companion_client PRIVATE -Wall -Wextra)

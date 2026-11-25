@@ -1,6 +1,6 @@
 /**
  * SHA-1 (FIPS 180-1), for the head.bin the plugin makes for a VPK
- * (plugin/head_bin.h), as VitaShell's package installer makes it with its
+ * (vita/plugin/head_bin.h), as VitaShell's package installer makes it with its
  * own SHA-1. Plain C, no library calls; host tests compile it as it is.
  */
 

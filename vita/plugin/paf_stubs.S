@@ -1,6 +1,6 @@
 /*
  * PAF imports of VitaPlex's quick menu plugin, written by
- * scripts/vita/gen_paf_stubs.py from ScePaf-RE's NIDs. Not weak, so a
+ * vita/scripts/gen_paf_stubs.py from ScePaf-RE's NIDs. Not weak, so a
  * firmware without one of them refuses to load the plugin.
  */
 

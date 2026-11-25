@@ -1,5 +1,5 @@
 /**
- * What the plugin's Sendspin player (plugin/main.cpp, "Sendspin") needs on
+ * What the plugin's Sendspin player (vita/plugin/main.cpp, "Sendspin") needs on
  * the wire, with no library under it: a WebSocket's frames read as they
  * come and written masked, as a client writes them (RFC 6455), base64 for
  * the handshake's key, and JSON read in place and written by hand.

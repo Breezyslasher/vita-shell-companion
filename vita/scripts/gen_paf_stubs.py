@@ -6,7 +6,7 @@ undefined, with the library and NID that ScePaf-RE gives it.
 
 The NIDs come from a vitasdk YAML table, ScePaf.yml, made by
 vitasdk-paf-component's emd2yml (libpaf/emd2yml) from ScePaf-RE's lib/*.emd,
-at the commits scripts/vita/fetch_paf_headers.sh pins. The stubs are not weak:
+at the commits vita/scripts/fetch_paf_headers.sh pins. The stubs are not weak:
 a module importing a NID the firmware lacks fails to load, and VitaPlex then
 falls back to ElevenMPV-A's plugin, rather than jumping through an empty stub.
 
@@ -67,7 +67,7 @@ def main():
 
     print("/*")
     print(" * PAF imports of VitaPlex's quick menu plugin, written by")
-    print(" * scripts/vita/gen_paf_stubs.py from ScePaf-RE's NIDs. Not weak, so a")
+    print(" * vita/scripts/gen_paf_stubs.py from ScePaf-RE's NIDs. Not weak, so a")
     print(" * firmware without one of them refuses to load the plugin.")
     print(" */")
     print()
