@@ -26,9 +26,9 @@ the same as their `.elf`. The CI builds them too.
 
 ## Running them
 
-Send each with a payload sender to GoldHEN's BinLoader (port 9090), for
-example `nc <ps4-ip> 9090 < sc_ps4probe_audio.bin`, or load it through
-GoldHEN's payload menu.
+Send each to GoldHEN's BinLoader, on port **9020** on GoldHEN 2.4b18.6
+(check with `nmap -p 9020,9090 <ps4-ip>`; GoldHEN's FTP is on 2121), for
+example `nc -v <ps4-ip> 9020 < sc_ps4probe_audio.bin`.
 
 ### 1. Audio probe
 
