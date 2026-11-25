@@ -17,6 +17,13 @@
  * Files tried, each as a path and as a file:// URI: test.mp3 (copied there
  * by you) if it is there, then probe-tone.wav, made here: 30 s of 440 Hz
  * beeps. All in /data/ShellCompanion; the log is ps4probe-music.log there.
+ *
+ * The service is driven from a thread of its own, the main thread watching
+ * it: each call is a step (step()), and a step that has not returned is
+ * logged every 2 s, so that a call that hangs shows as one, a crash as the
+ * log's end. The first run hung, or crashed, in Initialize3 with its last
+ * two arguments 0 (GoldHEN 2.4b18.6, firmware 11.50): Initialize, with the
+ * pool alone, is tried first now.
  */
 
 #include "sys.h"
@@ -48,6 +55,17 @@ typedef struct {
 } StatusExt;  // sceMusicPlayerServiceGetPlayStatusExtension's, 0x48
 
 static FnInit g_init3, g_init2, g_init;
+
+// The step the service's thread is in, and since when; done once it ends.
+static const char* volatile g_step = "starting";
+static volatile uint64_t g_stepUs;
+static volatile int g_done;
+
+static void step(const char* what) {
+    g_step = what;
+    g_stepUs = sysNowUs();
+    logLine("calling %s", what);
+}
 static FnSetTrackList g_set, g_set2;
 static FnPlay g_play;
 static FnVoid g_stop, g_terminate;
@@ -137,19 +155,20 @@ static int tryUri(const char* uri) {
     const size_t n = strlen(uri) + 1;
     memcpy(entries, uri, n);
     memcpy(entries + ENTRY, uri, n);
-    logLine("try \"%s\": calling SetTrackList(0, 2 entries of 0x%X)", uri, ENTRY);
+    logLine("try \"%s\"", uri);
+    step("SetTrackList(0, 2 entries of 0xC2F)");
     int32_t rc = g_set ? g_set(0, entries, 2, 0) : -1;
     logLine("  SetTrackList: 0x%08X", (unsigned)rc);
     if (rc < 0 && g_set2) {
         memset(entries, 0, sizeof(entries));
         memcpy(entries, uri, n);
         memcpy(entries + ENTRY2, uri, n);
-        logLine("  calling SetTrackList2(0, 2 entries of 0x%X, flags 0)", ENTRY2);
+        step("SetTrackList2(0, 2 entries of 0xC48, flags 0)");
         rc = g_set2(0, entries, 2, 0);
         logLine("  SetTrackList2: 0x%08X", (unsigned)rc);
     }
     if (rc < 0) return 0;
-    logLine("  calling Play(0, track 0, from 0 s, flags 0)");
+    step("Play(0, track 0, from 0 s, flags 0)");
     rc = g_play(0, 0, 0, 0);
     logLine("  Play: 0x%08X", (unsigned)rc);
     if (rc < 0) return 0;
@@ -157,6 +176,7 @@ static int tryUri(const char* uri) {
     uint64_t firstTime = (uint64_t)-1;
     for (int i = 0; i < 30; i++) {
         sysSleepMs(500);
+        step("the play status");
         const int changed = readStatus(line, sizeof(line));
         if (changed || i == 0 || i == 29) logLine("  %3d: %s", i, line);
         const uint64_t t = g_es.currentS ? g_es.currentS : g_cs.playbackTimeS;
@@ -171,11 +191,7 @@ static int tryUri(const char* uri) {
     return 0;
 }
 
-int probeMain(void) {
-    logOpen("ps4probe-music.log");
-    char fw[64];
-    firmware(fw, sizeof(fw));
-    logLine("music probe: firmware %s", fw);
+static int musicRun(void) {
     sysMkdir(DIR, 0777);
     const int rcTone = writeTone(DIR "/probe-tone.wav");
     logLine("probe-tone.wav written: %d", rcTone);
@@ -217,22 +233,23 @@ int probeMain(void) {
     void* pool = sysMap(POOL);
     logLine("pool: %p, %u KB", pool, POOL / 1024);
     int32_t rc = -1;
-    if (g_init3) {
-        logLine("calling Initialize3(pool)");
-        rc = g_init3(POOL, pool, 0, 0);
-        logLine("Initialize3: 0x%08X", (unsigned)rc);
-    }
-    if (rc < 0 && g_init2) {
-        logLine("calling Initialize2(pool)");
-        rc = g_init2(POOL, pool, 0, 0);
-        logLine("Initialize2: 0x%08X", (unsigned)rc);
-    }
-    if (rc < 0 && g_init) {
-        logLine("calling Initialize(pool)");
+    if (g_init) {
+        step("Initialize(pool)");
         rc = g_init(POOL, pool, 0, 0);
         logLine("Initialize: 0x%08X", (unsigned)rc);
     }
+    if (rc < 0 && g_init2) {
+        step("Initialize2(pool)");
+        rc = g_init2(POOL, pool, 0, 0);
+        logLine("Initialize2: 0x%08X", (unsigned)rc);
+    }
+    if (rc < 0 && g_init3) {
+        step("Initialize3(pool)");
+        rc = g_init3(POOL, pool, 0, 0);
+        logLine("Initialize3: 0x%08X", (unsigned)rc);
+    }
     char line[512];
+    step("the play status, before playing");
     readStatus(line, sizeof(line));
     logLine("status before playing: %s", line);
     notify("Music probe: trying the system music service");
@@ -263,6 +280,7 @@ int probeMain(void) {
     logLine("watching the status for 2 min: press the quick menu's buttons now");
     for (int i = 0; i < 240; i++) {
         sysSleepMs(500);
+        step("the play status");
         if (readStatus(line, sizeof(line))) logLine("  %3d s: %s", i / 2, line);
         if (sysExists(DIR "/ps4probe.stop")) break;
     }
@@ -271,4 +289,52 @@ int probeMain(void) {
     logLine("music probe: done");
     notify("Music probe done: send /data/ShellCompanion/ps4probe-music.log");
     return 0;
+}
+
+static void* musicThread(void* arg) {
+    (void)arg;
+    const int rc = musicRun();
+    logLine("the service's thread: done (%d)", rc);
+    g_done = 1;
+    return NULL;
+}
+
+// The service's thread started, and watched: up to 6 min, a line every 2 s
+// for a step that has gone on 2 s or more.
+int probeMain(void) {
+    logOpen("ps4probe-music.log");
+    char fw[64];
+    firmware(fw, sizeof(fw));
+    logLine("music probe: firmware %s", fw);
+    g_stepUs = sysNowUs();
+    const int rc = threadStart(musicThread, NULL, "ScProbeMusic");
+    logLine("the service's thread: 0x%08X", (unsigned)rc);
+    if (rc != 0) return musicRun();  // no thread: on this one, unwatched
+    const char* lastLogged = NULL;
+    for (int t = 0; t < 180 && !g_done; t++) {
+        sysSleepMs(2000);
+        const char* now = g_step;
+        const uint32_t secs = (uint32_t)((sysNowUs() - g_stepUs) / 1000000u);
+        // A status read every 500 ms is a step that is never long.
+        if (secs >= 2) {
+            logLine("watch: in %s for %u s", now, (unsigned)secs);
+            if (now != lastLogged && secs >= 10)
+                notify("Music probe: waiting in %s (%u s)", now, (unsigned)secs);
+            if (secs >= 10) lastLogged = now;
+        }
+    }
+    if (g_done) {
+        logLine("music probe: the watch ends");
+        return 0;
+    }
+    // Still in a call: the payload's memory is not given back to the loader
+    // under it, which a call that ended later would run into. It waits here,
+    // logging a line a minute, until the PS4 restarts.
+    logLine("music probe: the service's thread is still in %s; waiting for good", g_step);
+    notify("Music probe: stuck in %s. Send the log, then restart the PS4", g_step);
+    for (;;) {
+        sysSleepMs(60000);
+        logLine("watch: in %s for %u s", g_step, (unsigned)((sysNowUs() - g_stepUs) / 1000000u));
+        if (g_done) return 0;
+    }
 }

@@ -54,6 +54,10 @@ void logLine(const char* f, ...) __attribute__((format(printf, 1, 2)));
 // A system notification, at the top left of the screen.
 void notify(const char* f, ...) __attribute__((format(printf, 1, 2)));
 
+// A thread of libkernel's (scePthreadCreate) running fn(arg): 0, or its
+// code.
+int threadStart(void* (*fn)(void*), void* arg, const char* name);
+
 // The firmware, as libkernel gives it ("11.00"), into out.
 void firmware(char* out, size_t cap);
 

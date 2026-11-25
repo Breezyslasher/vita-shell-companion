@@ -277,6 +277,13 @@ void notify(const char* f, ...) {
     logLine("notification \"%s\": 0x%08X", req.message, (unsigned)rc);
 }
 
+int threadStart(void* (*fn)(void*), void* arg, const char* name) {
+    typedef int (*Create)(void* thread, const void* attr, void* (*)(void*), void*, const char*);
+    Create create = (Create)kernelSym("scePthreadCreate");
+    static uint64_t thread;
+    return create ? create(&thread, NULL, fn, arg, name) : -1;
+}
+
 void firmware(char* out, size_t cap) {
     struct {
         uint64_t size;
