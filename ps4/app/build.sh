@@ -42,7 +42,7 @@ cp "$SRC/sce_module/libc.prx" "$SRC/sce_module/libSceFios2.prx" "$PKG/sce_module
 # The module, in the package too: a place the system may let it load from.
 cp "$OUT/sc_bgm.prx" "$PKG/"
 # A test module built as ps4-hen-rest builds its shell module (recipe/).
-sh "$SRC/recipe/build.sh" "$OUT/recipe"
+CREATE_FSELF="$CREATE_FSELF" sh "$SRC/recipe/build.sh" "$OUT/recipe"
 cp "$OUT/recipe/hello.prx" "$PKG/"
 
 cd "$PKG"
