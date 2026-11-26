@@ -287,6 +287,16 @@ service's are, not the managed wrappers 0.85 hooked.
   1093's values), the service's app data size call (its names tried,
   logged) is answered with the song's size, finished ones stay Package in
   section 9.
+- **1.25 on the PS4:** `sceBgftServiceIntDownloadGetApplicationDataSize`
+  was found and answered: the rows read "8.95 MB/8.95 MB", "9.31 MB/10.23
+  MB (1 Second Left)", "Queued for downloading." for waiting ones. The
+  time left is our restSecTotal (UpdateProgress stores the progress's
+  restSecTotal as the row's RestSec). Finished ones, answered "going,
+  every byte, 0 s" till moved, read "(1 Second Left)". The dump shows each
+  poll also takes the row's state and runstate from the progress answer
+  (b__1 writes param 0x3c, 0x40): 1.26 answers a finished one as package
+  1099 did when finished (Game, Stop/Download, every byte, `...88`,
+  preparing 0) at once, its section 3 param `0x10008063`.
 
 ### One module, and the cleanup (0.95)
 

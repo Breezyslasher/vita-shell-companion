@@ -122,6 +122,23 @@ static void dllFill(int k, BgftProgress* pr) {
     // again. So it answers going, every byte there, until it has been left
     // out of a section 3 answer (and put in section 9's).
     int st = it->state;
+    // Finished, not moved to section 9 yet (1.26): as the PS4's own game
+    // does when finished (package 1099: Stop/Download with every byte,
+    // ...88, preparing 0). The list takes a row's state and runstate from
+    // each progress answer (UpdateProgress's b__1, the debug dump), so it
+    // shows finished at once; 1.25's "going, every byte, 0 s" read
+    // "(1 Second Left)" till the row moved.
+    if (st == DLS_DONE && !g_dll.e[k].movedOut) {
+        const uint64_t all = it->bytes ? it->bytes : it->size;
+        pr->errorResult = 0;
+        pr->bits = (pr->bits & ~0x3FFu) | 0x188u;  // Game, Stop, Download
+        pr->length = pr->lengthTotal = all;
+        pr->transferred = pr->transferredTotal = all;
+        pr->numIndex = pr->numTotal = 1;
+        pr->preparingPercent = 0;
+        pr->restSec = pr->restSecTotal = 0;
+        return;
+    }
     if (st == DLS_FAILED || st == DLS_GONE) {
         // Failed for good (1.15): as package 1097, which the service failed
         // (1.05's log): Stop/Download, its error, in section 5. The error
@@ -436,8 +453,11 @@ void dlListQueryHook(Frame* f) {
                     // in section 3 beside going progress).
                     // (Not in section 9's answer, where it is finished: 1.20's
                     // log had them there with the going param.)
-                    if (st == DLS_DONE && !g_dll.e[k].movedOut && f->gpr[2] != 9) st = DLS_GOING;
-                    const uint32_t prm = st == DLS_FAILED || st == DLS_GONE ? 0x40080c1u  // 1097's 0x14008061: error, Stop/Download; Package
+                    // (1.26: finished, still in section 3, as a finished game's
+                    // param, 0x10008063, as its progress answers.)
+                    const int doneHere = st == DLS_DONE && !g_dll.e[k].movedOut && f->gpr[2] != 9;
+                    const uint32_t prm = doneHere ? 0x10008063u
+                                       : st == DLS_FAILED || st == DLS_GONE ? 0x40080c1u  // 1097's 0x14008061: error, Stop/Download; Package
                                        : st == DLS_DONE && g_dll.trying ? g_dllTry[i % 6].param
                                        : st != DLS_DONE && st != DLS_GOING && g_dll.trying ? g_dllTryWait[i % 6].param
                                        : st == DLS_DONE    ? g_dll.paramDone
