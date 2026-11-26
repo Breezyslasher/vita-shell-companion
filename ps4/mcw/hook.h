@@ -50,7 +50,7 @@ struct Hook {
     int quiet;           // a getter: logged only when its answer changes
     uint32_t logged;     // calls logged
     int installed;
-    int json;            // a JsonObject method's: its key logged, nothing else (mcw.c)
+    int json;            // a managed method's (mcw.c, monoHooks): 1 a JSON key, 2 forced true, 3 a float logged
     uint8_t original[16];  // its first bytes before the hook
     uint32_t stolen;       // how many were moved
 };

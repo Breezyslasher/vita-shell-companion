@@ -338,6 +338,23 @@ Reading our answers, the shell asked for:
 "US"}}` and `{"views": [{"name": "Shell Companion", "lists": [ ... ]}],
 "upgrade_scopes_required": false}`; a list's own keys come next.
 
+### Our playlist in the Music section (0.43)
+
+With the answers in the shape the shell reads, the Music section showed a
+"Shell Companion" section with "Shell Companion queue, 2 Songs", beside
+Spotify's player panel for our track. A list's keys, as the shell read them:
+`image_url`, `name`, `total`. To its right: "Enhance your gaming experience
+with music. Download Spotify": selecting the playlist made no request, no
+`PlaySpUri`.
+
+0.44: the playlist's picture is the test app's icon
+(`file:///user/data/ShellCompanion/ps4/ebgm/playlist.png?v=1`; the shell adds
+`&w=..&h=..` to `image_url`), and the Music section's own check that Spotify's
+app is there and recent enough,
+`PlayStationMusicContext.IsValidAppVer(bool)`, a managed method in the
+shell's `app.exe`, is hooked through Mono like `JsonObject`'s and answered
+true while `ebgm/` is there; `get_AppVer`, the version it found, is logged.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

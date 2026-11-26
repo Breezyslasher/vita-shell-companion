@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.43"
+#define APP_VERSION "0.44"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -862,7 +862,8 @@ static void draw(void) {
 #define PLAYLIST_FIELDS                                                                        \
     "\"name\":\"Shell Companion queue\",\"title\":\"Shell Companion queue\","               \
     "\"uri\":\"spotify:user:shellcompanion:playlist:queue\",\"id\":\"queue\","               \
-    "\"type\":\"playlist\",\"description\":\"Music on this PS4\",\"image_url\":\"\","        \
+    "\"type\":\"playlist\",\"description\":\"Music on this PS4\","                            \
+    "\"image_url\":\"file:///user/data/ShellCompanion/ps4/ebgm/playlist.png?v=1\","              \
     "\"images\":[],\"total\":2,\"track_count\":2,\"tracks\":{\"total\":2}"
 #define PLAYLIST_GUESS "{" PLAYLIST_FIELDS "}"
 
@@ -879,6 +880,9 @@ static void writeEbgm(void) {
         "{\"upgrade_scopes_required\":false,\"views\":[{\"name\":\"Shell Companion\","
         "\"section_title\":\"Shell Companion\",\"lists\":[" PLAYLIST_GUESS "]}]}\n";
     writeFile(SC_BGM_DIR "/ebgm/recommended_views.json", views, sizeof(views) - 1);
+    // The playlist's picture: this app's icon. The shell adds &w=..&h=.. to
+    // image_url (its strings), hence the ? in it.
+    copyFromPackage("sce_sys/icon0.png", SC_BGM_DIR "/ebgm/playlist.png");
 }
 
 // ---- the app ----

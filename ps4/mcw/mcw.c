@@ -850,9 +850,39 @@ static void jsonLog(Frame* f) {
             f->gpr[0], scePthreadGetthreadid());
 }
 
-static Hook g_jsonHooks[4];
+// Managed methods hooked through Mono: JsonObject's key lookups (1, their
+// keys logged while an answer is read); the Music section's check that
+// Spotify's app is there and recent enough (2, answered true while ebgm/ is
+// there: Spotify is not installed, and the section offered to download it);
+// the version it found (3, logged).
+#define MONO_HOOKS 6
+static Hook g_monoHooks[MONO_HOOKS];
+static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
+
+static void monoLog(Frame* f) {
+    const Hook* h = f->hook;
+    if (h->json == 1) {
+        jsonLog(f);
+        return;
+    }
+    const int first = f->seq <= 20;
+    if (h->json == 2) {
+        const int was = (int)(f->retRax & 0xFF);
+        if (g_forceApp) f->retRax = (f->retRax & ~(uint64_t)0xFF) | 1;
+        if (first)
+            say("mono: %s(%lu) = %d%s  [#%u, thread %d]", h->name, f->gpr[1] & 0xFF, was,
+                g_forceApp && !was ? ", answered 1" : "", f->seq, scePthreadGetthreadid());
+    } else if (h->json == 3 && first) {
+        float v;
+        memcpy(&v, f->retXmm0, 4);
+        const int hundredths = (int)(v * 100.0f);
+        say("mono: %s = %d.%02d  [#%u, thread %d]", h->name, hundredths / 100,
+            (hundredths < 0 ? -hundredths : hundredths) % 100, f->seq, scePthreadGetthreadid());
+    }
+}
 
 static void monoHooks(void) {
+    g_forceApp = sysExists(EBGM_DIR);
     int mono = -1;
     for (int i = 0; i < 2 && mono < 0; i++) {
         char path[160];
@@ -860,7 +890,7 @@ static void monoHooks(void) {
         fmt(path, sizeof(path), "/%s/common/lib/libmonosgen-2.0.sprx", word ? word : "?");
         int res = 0;
         mono = sceKernelLoadStartModule(path, 0, NULL, 0, NULL, &res);
-        say("json: %s: 0x%08X", path, (unsigned)mono);
+        say("mono: %s: 0x%08X", path, (unsigned)mono);
     }
     if (mono < 0) return;
     void *rootDomain = NULL, *attach = NULL, *detach = NULL, *imageLoaded = NULL,
@@ -872,35 +902,41 @@ static void monoHooks(void) {
     sceKernelDlsym(mono, "mono_class_from_name", &classFromName);
     sceKernelDlsym(mono, "mono_class_get_method_from_name", &methodFromName);
     sceKernelDlsym(mono, "mono_compile_method", &compile);
-    say("json: mono's API: root domain %p, attach %p, detach %p, image %p, class %p, method %p, "
-        "compile %p", rootDomain, attach, detach, imageLoaded, classFromName, methodFromName,
-        compile);
     drain();
-    if (!rootDomain || !attach || !imageLoaded || !classFromName || !methodFromName || !compile)
+    if (!rootDomain || !attach || !imageLoaded || !classFromName || !methodFromName || !compile) {
+        say("mono: its API is not all there");
         return;
+    }
     void* domain = ((FnMonoVoid)rootDomain)();
     void* thread = domain ? ((FnMonoPtr)attach)(domain) : NULL;
-    say("json: domain %p, this thread attached: %p", domain, thread);
+    say("mono: domain %p, this thread attached: %p", domain, thread);
     drain();
     if (!thread) return;
-    void* image = ((FnMonoName)imageLoaded)("Sce.PlayStation.Json");
-    void* klass = image ? ((FnMonoClass)classFromName)(image, "Sce.PlayStation.Json", "JsonObject")
-                        : NULL;
-    say("json: Sce.PlayStation.Json %p, JsonObject %p", image, klass);
     static const struct {
-        const char* method;
-        int args;
+        const char *image, *ns, *klass, *method;
+        int args, kind;
         const char* name;
-    } want[4] = {{"get_Item", 1, "json.Item"},
-                 {"ValueOrDefault", 1, "json.ValueOrDefault"},
-                 {"ContainsKey", 1, "json.ContainsKey"},
-                 {"TryGetValue", 2, "json.TryGetValue"}};
-    for (int i = 0; klass && i < 4; i++) {
-        void* m = ((FnMonoMethod)methodFromName)(klass, want[i].method, want[i].args);
+    } want[MONO_HOOKS] = {
+        {"Sce.PlayStation.Json", "Sce.PlayStation.Json", "JsonObject", "get_Item", 1, 1, "json.Item"},
+        {"Sce.PlayStation.Json", "Sce.PlayStation.Json", "JsonObject", "ValueOrDefault", 1, 1,
+         "json.ValueOrDefault"},
+        {"Sce.PlayStation.Json", "Sce.PlayStation.Json", "JsonObject", "ContainsKey", 1, 1,
+         "json.ContainsKey"},
+        {"Sce.PlayStation.Json", "Sce.PlayStation.Json", "JsonObject", "TryGetValue", 2, 1,
+         "json.TryGetValue"},
+        {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicContext",
+         "IsValidAppVer", 1, 2, "IsValidAppVer"},
+        {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicContext",
+         "get_AppVer", 0, 3, "AppVer"},
+    };
+    for (int i = 0; i < MONO_HOOKS; i++) {
+        void* image = ((FnMonoName)imageLoaded)(want[i].image);
+        void* klass = image ? ((FnMonoClass)classFromName)(image, want[i].ns, want[i].klass) : NULL;
+        void* m = klass ? ((FnMonoMethod)methodFromName)(klass, want[i].method, want[i].args) : NULL;
         void* code = m ? ((FnMonoPtr)compile)(m) : NULL;
-        Hook* h = &g_jsonHooks[i];
+        Hook* h = &g_monoHooks[i];
         h->name = want[i].name;
-        h->json = 1;
+        h->json = want[i].kind;
         char bytes[64] = "";
         if (code && hookReadable(code, 16) == 16) hex16(bytes, sizeof(bytes), code);
         const char* why = "no code";
@@ -910,12 +946,13 @@ static void monoHooks(void) {
             rc = hookInstall(h, code, &why);
             unlock(&g_installLock);
         }
-        say("json: JsonObject.%s: method %p, code %p: %s; %s%s", want[i].method, m, code, bytes,
+        say("mono: %s.%s (%s): image %p, class %p, method %p, code %p: %s; %s%s", want[i].klass,
+            want[i].method, want[i].image, image, klass, m, code, bytes,
             rc == 0 ? "hooked" : "NOT hooked: ", rc == 0 ? "" : why);
         drain();
     }
     if (detach) ((FnMonoDetach)detach)(thread);
-    say("json: this thread detached");
+    say("mono: this thread detached; IsValidAppVer %s", g_forceApp ? "answered true (ebgm/ is there)" : "only logged");
 }
 
 void mcwPre(Frame* f) {
@@ -941,7 +978,7 @@ void mcwPre(Frame* f) {
 
 void mcwPost(Frame* f) {
     if (f->hook->json) {
-        if (!g_quiet) jsonLog(f);
+        if (!g_quiet || f->hook->json == 2) monoLog(f);
         return;
     }
     fakeApply(f);
