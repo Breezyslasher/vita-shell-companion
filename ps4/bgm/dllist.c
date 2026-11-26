@@ -42,6 +42,7 @@ static struct {
     uint32_t queryCalls[4];
     FnBgftUnregister unregister, stop, pause;
     uint32_t bitsGoing, bitsWaiting, bitsDone;
+    uint32_t paramGoing, paramDone;  // the task query's param answered for ours (1.01)
     int haveGoing, haveWaiting, haveDone;
     volatile int count;
     struct {
@@ -177,6 +178,24 @@ void dlListQueryHook(Frame* f) {
         const uint8_t* res = (const uint8_t*)(uintptr_t)f->gpr[4];
         uint32_t cnt = 0;
         if (hookReadable(num, 4) == 4) cnt = *num;
+        // Ours given a real package task's param (1.01: 1.00's log, the
+        // PS4's own installs 0x10008261 while going, 0x10008063 done; ours
+        // 0x200c1, 0x280c1, 0x40280c1 failed), in the results themselves:
+        // count pairs at the fifth argument, as every section logged shows.
+        if (cnt && cnt <= 960 && count && hookReadable(res, (size_t)cnt * 8) == (size_t)cnt * 8 &&
+            (hookProt(res) & 2)) {
+            for (uint32_t j = 0; j < cnt; j++) {
+                int32_t id;
+                memcpy(&id, res + j * 8, 4);
+                for (int k = 0; k < count && k < DLL_MAX; k++) {
+                    if (g_dll.e[k].task != id || id <= 0) continue;
+                    const int i = g_dll.e[k].item;
+                    const int done = i >= 0 && i < g_dls.count && g_dls.item[i].state == DLS_DONE;
+                    const uint32_t prm = done ? g_dll.paramDone : g_dll.paramGoing;
+                    memcpy((uint8_t*)res + j * 8 + 4, &prm, 4);
+                }
+            }
+        }
         if (cnt && cnt <= 960 && hookReadable(res, 8) == 8) {
             int ours = 0;
             for (uint32_t j = 0; j < cnt && j < 960 && hookReadable(res + j * 8, 8) == 8; j++) {
@@ -302,14 +321,18 @@ static void dlListBegin(void) {
     if (sysExists(SC_BGM_DIR "/dl-nolist") || !dllSetup()) return;
     char text[256];
     g_dll.haveGoing = g_dll.haveWaiting = g_dll.haveDone = 0;
-    g_dll.bitsGoing = 0x30a;  // the probe's task just started (0.94), before it failed
     g_dll.haveGoing = 1;
     g_dll.bitsDone = 0x188;  // the PS4's own finished downloads (0.96's log)
     g_dll.haveDone = 1;
+    g_dll.bitsGoing = 0x18a;  // a real install as it began (1.00's log: ...8a)
+    g_dll.paramGoing = 0x10008261;
+    g_dll.paramDone = 0x10008063;
     if (readText(SC_BGM_DIR "/dl-list-bits.txt", text, sizeof(text)) > 0) {
         if (dllHex(text, "going", &g_dll.bitsGoing)) g_dll.haveGoing = 1;
         g_dll.haveWaiting = dllHex(text, "waiting", &g_dll.bitsWaiting);
         g_dll.haveDone = dllHex(text, "done", &g_dll.bitsDone);
+        dllHex(text, "param-going", &g_dll.paramGoing);
+        dllHex(text, "param-done", &g_dll.paramDone);
     }
     if (g_bgft.user == -1) bgftUser();
     const uint64_t stamp = sysNowUs() / 1000u % 1000000000u;

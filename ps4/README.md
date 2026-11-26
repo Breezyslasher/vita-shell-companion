@@ -85,6 +85,16 @@ service's are, not the managed wrappers 0.85 hooked.
   placeholder's line was logged at every call (a counter only counted in
   the branch not taken); fixed. No package ran: the list was the default
   one.
+- **1.00 on the PS4:** two real installs of a 6.6 MB package (tasks 1077,
+  1078) were logged. Query param `0x10008261` while going, `0x10008063`
+  done (`0x200` comes and goes on finished ones too: not a failure flag).
+  Progress bits `…8a` → `…8e` → `…93` as it went, then `0x188`/`0x18a`;
+  the bytes above the low 12 bits vary (`0xfffffd8a`, `0x376018a`). Ours:
+  param `0x200c1`, `0x280c1`, or `0x40280c1` in section 5 for one the
+  service failed. 1.01 answers ours as a real package task: param
+  `0x10008261` (going, waiting) or `0x10008063` (done), written into the
+  query's results array only, for our task ids; bits `0x18a` going,
+  `0x188` done. `dl-list-bits.txt` takes `param-going=`, `param-done=`.
 
 ### One module, and the cleanup (0.95)
 
