@@ -679,6 +679,20 @@ static void libRead(int i) {
         libArt(name, img, (size_t)g_meta.artLen);
         g_albums[a].art = 1;
     }
+    // The track's own cover, for its row in a track list (the music watch
+    // draws it there, 0.62): trackart<n>.jpg, a JPEG only.
+    char artPath[96];
+    fmt(artPath, sizeof(artPath), LIB_DIR "/trackart%d.jpg", i);
+    if (img && g_meta.artLen > 4 && g_meta.artOff + g_meta.artLen <= got && img[0] == 0xFF &&
+        img[1] == 0xD8) {
+        const int afd = sysOpen(artPath, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+        if (afd >= 0) {
+            sysWrite(afd, img, (size_t)g_meta.artLen);
+            sysClose(afd);
+        }
+    } else {
+        sysUnlink(artPath);
+    }
     if (tag) sysUnmap(tag, (size + 0x3FFF) & ~(size_t)0x3FFF);
     memcpy(g_meta.title, keep[0], META_LEN);
     memcpy(g_meta.artist, keep[1], META_LEN);

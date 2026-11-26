@@ -1033,7 +1033,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 11
+#define MONO_HOOKS 12
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -1124,6 +1124,239 @@ static void spotifyEntryFix(void* ctx) {
     g_fixSaid++;
 }
 
+// ── Pictures on a track list's rows (0.62, an experiment) ────────────────────
+//
+// A track's row (TrackListPanelItem) is two labels, no picture. After its
+// UpdateData(menuData), on the shell's UI thread, the row is given an
+// ImageBox of its own (Sce.PlayStation.PUI.UI2, made and kept through Mono),
+// 64 square at its left, loaded with the track's cover (ebgm/trackart<n>.jpg,
+// n from the track's uri, spotify:track:sc<n>, as our player writes them),
+// and its two labels moved right to make room; hidden again, the labels put
+// back, for a row with no cover or that is not a track. Rows are reused as
+// the list scrolls: each is known by a weak GC handle, never a pointer.
+// mcw-norowart turns it off.
+
+#define ROWS 64
+#define ROW_SHIFT 74.0f
+typedef void* (*FnMonoNew)(void*, void*);
+typedef void* (*FnMonoStrNew)(void*, const char*);
+typedef void* (*FnMonoToString)(void*, void**);
+typedef void* (*FnMonoUnbox)(void*);
+typedef uint32_t (*FnMonoWeak)(void*, int);
+typedef void* (*FnMonoTarget)(uint32_t);
+typedef void* (*FnMonoVirtual)(void*, void*);
+static struct {
+    int ready;
+    void* domain;
+    FnMonoNew objectNew;
+    FnMonoStrNew stringNew;
+    FnMonoToString toString;
+    FnMonoUnbox unbox;
+    FnMonoWeak weak;
+    FnMonoTarget target;
+    FnMonoVirtual virt;
+    void *imageBox, *ctor, *loadAsync;          // ImageBox
+    void *setX, *setY, *setW, *setH, *getX, *setVisible;  // UINode
+    void* appendChild;                           // Widget
+    void* jsonItem;                              // JsonObject.get_Item
+    void *fType, *fData;                         // TrackListMenuData
+    void *fText, *fSub;                          // TrackListPanelItem's labels
+} g_row;
+static struct {
+    uint32_t row, img;  // weak handles
+    int idx, shifted;
+    float x[2];         // the labels' own X, before they were moved
+} g_rows[ROWS];
+static int g_rowSaid;
+
+static void* rowCall(void* method, void* obj, void** args) {
+    void* exc = NULL;
+    // An override's, if obj's class has one (UINode.Y is virtual).
+    if (obj && g_row.virt) {
+        void* v = g_row.virt(obj, method);
+        if (v) method = v;
+    }
+    void* r = g_mono.invoke(method, obj, args, &exc);
+    if (exc && g_rowSaid < 20) {
+        say("rowart: a call threw");
+        g_rowSaid++;
+    }
+    return exc ? NULL : r;
+}
+
+static void rowFloat(void* method, void* obj, float v) {
+    void* args[1] = {&v};
+    rowCall(method, obj, args);
+}
+
+static void rowShow(void* img, int on) {
+    int v = on;
+    void* args[1] = {&v};
+    rowCall(g_row.setVisible, img, args);
+}
+
+// The labels' X: read (keep), then set to their own plus dx, absolutely, so
+// a row the shell laid out again is not moved twice.
+static void rowShift(void* row, int e, int keep, float dx) {
+    void* labels[2] = {monoGet(row, g_row.fText), monoGet(row, g_row.fSub)};
+    for (int k = 0; k < 2; k++) {
+        if (!labels[k]) continue;
+        if (keep) {
+            void* boxed = rowCall(g_row.getX, labels[k], NULL);
+            if (!boxed) continue;
+            memcpy(&g_rows[e].x[k], g_row.unbox(boxed), 4);
+        }
+        rowFloat(g_row.setX, labels[k], g_rows[e].x[k] + dx);
+    }
+}
+
+// The track's place in the queue, from its uri (spotify:track:sc<n>): -1 if none.
+static int rowIndex(void* data) {
+    if (!data || !g_row.jsonItem) return -1;
+    void* key = g_row.stringNew(g_row.domain, "uri");
+    void* args[1] = {key};
+    void* v = rowCall(g_row.jsonItem, data, args);
+    if (!v) return -1;
+    void* exc = NULL;
+    void* str = g_row.toString(v, &exc);
+    if (!str || exc) return -1;
+    char text[80];
+    monoText((uint64_t)(uintptr_t)str, text, sizeof(text));
+    const char* p = text;
+    for (const char* q = text; *q; q++)
+        if (q[0] == 's' && q[1] == 'c' && q[2] >= '0' && q[2] <= '9') p = q + 2;
+    if (p == text) return -1;
+    int n = 0;
+    while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
+    return n;
+}
+
+static void rowArt(Frame* f) {
+    if (!g_row.ready) return;
+    void* row = (void*)(uintptr_t)f->gpr[0];
+    void* data = (void*)(uintptr_t)f->gpr[1];
+    if (!row || !data) return;
+    // This row's entry, or a free one.
+    int e = -1, free_ = -1;
+    for (int i = 0; i < ROWS; i++) {
+        void* t = g_rows[i].row ? g_row.target(g_rows[i].row) : NULL;
+        if (t == row) e = i;
+        else if (!t && free_ < 0) free_ = i;
+    }
+    int type = -1;
+    if (g_row.fType) g_mono.get(data, g_row.fType, &type);
+    void* json = monoGet(data, g_row.fData);
+    const int idx = type == 0 ? rowIndex(json) : -1;
+    char path[128];
+    fmt(path, sizeof(path), EBGM_DIR "/trackart%d.jpg", idx);
+    const int has = idx >= 0 && sysExists(path);
+    if (e < 0 && !has) return;  // nothing to show, nothing shown
+    if (e < 0) {
+        if (free_ < 0) return;
+        void* img = g_row.objectNew(g_row.domain, g_row.imageBox);
+        if (!img) return;
+        rowCall(g_row.ctor, img, NULL);
+        rowFloat(g_row.setX, img, 10.0f);
+        rowFloat(g_row.setY, img, 10.0f);
+        rowFloat(g_row.setW, img, 64.0f);
+        rowFloat(g_row.setH, img, 64.0f);
+        void* args[1] = {img};
+        rowCall(g_row.appendChild, row, args);
+        e = free_;
+        g_rows[e].row = g_row.weak(row, 0);
+        g_rows[e].img = g_row.weak(img, 0);
+        g_rows[e].idx = -1;
+        g_rows[e].shifted = 0;
+    }
+    void* img = g_row.target(g_rows[e].img);
+    if (!img) {
+        g_rows[e].row = 0;
+        return;
+    }
+    if (has) {
+        if (g_rows[e].idx != idx) {
+            char url[160];
+            fmt(url, sizeof(url), "file://%s", path);
+            void* args[1] = {g_row.stringNew(g_row.domain, url)};
+            rowCall(g_row.loadAsync, img, args);
+            g_rows[e].idx = idx;
+        }
+        rowShow(img, 1);
+        rowShift(row, e, !g_rows[e].shifted, ROW_SHIFT);
+        g_rows[e].shifted = 1;
+    } else {
+        rowShow(img, 0);
+        g_rows[e].idx = -1;
+        if (g_rows[e].shifted) rowShift(row, e, 0, 0.0f);
+        g_rows[e].shifted = 0;
+    }
+    if (g_rowSaid < 30) {
+        say("rowart: row %p, track %d: %s", row, idx, has ? "its cover" : "none");
+        g_rowSaid++;
+    }
+}
+
+// Mono's functions and the classes' methods, once (on the watch's thread,
+// attached).
+static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* classFromName) {
+    if (sysExists(SC_BGM_DIR "/mcw-norowart")) {
+        say("rowart: off (mcw-norowart)");
+        return;
+    }
+    void* p;
+    g_row.domain = domain;
+    if (!sceKernelDlsym((int)(intptr_t)mono, "mono_object_new", &p)) g_row.objectNew = (FnMonoNew)p;
+    if (!sceKernelDlsym((int)(intptr_t)mono, "mono_string_new", &p)) g_row.stringNew = (FnMonoStrNew)p;
+    if (!sceKernelDlsym((int)(intptr_t)mono, "mono_object_to_string", &p)) g_row.toString = (FnMonoToString)p;
+    if (!sceKernelDlsym((int)(intptr_t)mono, "mono_object_unbox", &p)) g_row.unbox = (FnMonoUnbox)p;
+    if (!sceKernelDlsym((int)(intptr_t)mono, "mono_gchandle_new_weakref", &p)) g_row.weak = (FnMonoWeak)p;
+    if (!sceKernelDlsym((int)(intptr_t)mono, "mono_gchandle_get_target", &p)) g_row.target = (FnMonoTarget)p;
+    if (!sceKernelDlsym((int)(intptr_t)mono, "mono_object_get_virtual_method", &p)) g_row.virt = (FnMonoVirtual)p;
+    void* pui = ((FnMonoName)imageLoaded)("Sce.PlayStation.PUI");
+    void* app = ((FnMonoName)imageLoaded)("app");
+    void* json = ((FnMonoName)imageLoaded)("Sce.PlayStation.Json");
+    FnMonoClass cls = (FnMonoClass)classFromName;
+    FnMonoMethod m = g_mono.methodByName;
+    void* box = pui ? cls(pui, "Sce.PlayStation.PUI.UI2", "ImageBox") : NULL;
+    void* node = pui ? cls(pui, "Sce.PlayStation.PUI", "UINode") : NULL;
+    void* widget = pui ? cls(pui, "Sce.PlayStation.PUI.UI2", "Widget") : NULL;
+    void* jobj = json ? cls(json, "Sce.PlayStation.Json", "JsonObject") : NULL;
+    void* data = app ? cls(app, "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuData") : NULL;
+    void* item = app ? cls(app, "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListPanelItem") : NULL;
+    g_row.imageBox = box;
+    if (box) {
+        g_row.ctor = m(box, ".ctor", 0);
+        g_row.loadAsync = m(box, "LoadAsync", 1);
+    }
+    if (node) {
+        g_row.setX = m(node, "set_X", 1);
+        g_row.setY = m(node, "set_Y", 1);
+        g_row.setW = m(node, "set_Width", 1);
+        g_row.setH = m(node, "set_Height", 1);
+        g_row.getX = m(node, "get_X", 0);
+        g_row.setVisible = m(node, "set_Visible", 1);
+    }
+    if (widget) g_row.appendChild = m(widget, "AppendChild", 1);
+    if (jobj) g_row.jsonItem = m(jobj, "get_Item", 1);
+    if (data) {
+        g_row.fType = g_mono.fieldByName(data, "Type");
+        g_row.fData = g_mono.fieldByName(data, "Data");
+    }
+    if (item) {
+        g_row.fText = g_mono.fieldByName(item, "m_textLabel");
+        g_row.fSub = g_mono.fieldByName(item, "m_subTextLabel");
+    }
+    g_row.ready = g_row.objectNew && g_row.stringNew && g_row.toString && g_row.unbox && g_row.weak &&
+                  g_row.target && g_mono.invoke && g_mono.get && g_row.ctor && g_row.loadAsync &&
+                  g_row.setX && g_row.setY && g_row.setW && g_row.setH && g_row.getX &&
+                  g_row.setVisible && g_row.appendChild && g_row.jsonItem && g_row.fType &&
+                  g_row.fData && g_row.fText && g_row.fSub;
+    say("rowart: ImageBox %p (.ctor %p, LoadAsync %p), UINode %p, Widget.AppendChild %p, "
+        "JsonObject.get_Item %p, TrackListMenuData %p, TrackListPanelItem %p: %s",
+        box, g_row.ctor, g_row.loadAsync, node, g_row.appendChild, g_row.jsonItem, data, item,
+        g_row.ready ? "ready" : "NOT ready");
+}
+
 static void monoLog(Frame* f) {
     const Hook* h = f->hook;
     if (h->json == 1) {
@@ -1169,6 +1402,8 @@ static void monoLog(Frame* f) {
         // An int returned: 0, or the error the shell shows.
         say("mono: %s(%lx) = 0x%X  [#%u, thread %d]", h->name, f->gpr[1], (uint32_t)f->retRax,
             f->seq, scePthreadGetthreadid());
+    } else if (h->json == 8) {
+        rowArt(f);
     } else if (h->json == 5) {
         if (f->seq <= 50)
             say("mono: %s: %d (0x%X), 0x%X  [#%u, thread %d]", h->name, (int32_t)f->gpr[1],
@@ -1481,6 +1716,8 @@ static void monoHooks(void) {
     say("mono: domain %p, this thread attached: %p", domain, thread);
     drain();
     if (!thread) return;
+    rowArtSetup((void*)(intptr_t)mono, domain, imageLoaded, classFromName);
+    drain();
     static const struct {
         const char *image, *ns, *klass, *method;
         int args, kind;
@@ -1515,6 +1752,9 @@ static void monoHooks(void) {
         // dialog if it is not 0 (0.55: an error, no PlaySpUri reached).
         {"app", "Sce.Vsh.ShellUI.MusicCoreServer", "MusicCoreServerController", "PlaySpotifyUri", 1,
          7, "MusicCoreServerController.PlaySpotifyUri"},
+        // A track's row filled in: given its cover (0.62, rowArt).
+        {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListPanelItem", "UpdateData", 1,
+         8, "TrackListPanelItem.UpdateData"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
@@ -1607,7 +1847,9 @@ void mcwPre(Frame* f) {
 
 void mcwPost(Frame* f) {
     if (f->hook->json) {
-        if (!g_quiet || f->hook->json == 2 || f->hook->json == 6 || f->hook->json == 7) monoLog(f);
+        if (!g_quiet || f->hook->json == 2 || f->hook->json == 6 || f->hook->json == 7 ||
+            f->hook->json == 8)
+            monoLog(f);
         return;
     }
     fakeApply(f);

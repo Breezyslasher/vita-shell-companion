@@ -648,6 +648,21 @@ The region being searched is kept in `mcw.carving`: if the shell goes down
 reading one, the next search adds it to `mcw-carve-skip.txt` and never reads it
 again.
 
+### Pictures on track rows (0.62, an experiment)
+
+A track row in the Music tab (`TrackListPanelItem`) is two labels and has no
+picture. The watch hooks its `UpdateData(menuData)`. After that runs on the
+shell's UI thread, the watch uses Mono to give the row its own `ImageBox`
+(Sce.PlayStation.PUI.UI2): 64 px square at (10, 10), loaded with
+`file:///data/ShellCompanion/ps4/ebgm/trackart<n>.jpg`. It moves both labels
+74 px right, to their own X plus 74, set absolutely. `n` comes from the
+track's `uri` (`spotify:track:sc<n>`). The player writes one JPEG per queue
+track that has an embedded JPEG cover. Rows with no cover, and placeholder or
+"play all" rows, have the picture hidden and the labels put back. The list
+reuses rows as it scrolls, so each row is tracked by a weak GC handle. Look
+for `rowart:` lines in mcw.log. `mcw-norowart` in the player's folder turns
+it off.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our
