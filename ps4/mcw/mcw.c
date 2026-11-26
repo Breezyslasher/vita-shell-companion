@@ -571,10 +571,19 @@ static void ebgmCreated(Frame* f) {
     int64_t* idp = (int64_t*)(uintptr_t)f->gpr[5];
     if (hookReadable(group, 8) < 6 || hookReadable(path, 16) < 16 || hookReadable(idp, 8) < 8)
         return;
-    if (!eq(group, "music")) return;
+    // "music" (/v1/ebgm/...), and "socialnetwork"'s Spotify session link,
+    // which a playlist's track list asks for once Spotify's app is there
+    // (0.52: /socialnetwork/api/v1/sp/sessionlink -> sp_sessionlink.json).
+    const int social = eq(group, "socialnetwork");
+    if (!eq(group, "music") && !social) return;
     const char* sub = path;
     static const char prefix[] = "/v1/ebgm/";
-    if (memcmp(path, prefix, sizeof(prefix) - 1) == 0) sub = path + sizeof(prefix) - 1;
+    static const char socialPrefix[] = "/socialnetwork/api/v1/";
+    if (!social && memcmp(path, prefix, sizeof(prefix) - 1) == 0) sub = path + sizeof(prefix) - 1;
+    if (social) {
+        if (memcmp(path, socialPrefix, sizeof(socialPrefix) - 1) != 0) return;
+        sub = path + sizeof(socialPrefix) - 1;
+    }
     char name[3][200];
     for (int i = 0; i < 3; i++) ebgmName(sub, i, name[i], sizeof(name[i]));
     int fd = -1, which = 0;

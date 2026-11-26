@@ -451,6 +451,17 @@ with 0x80BA0028 (`OnTotalChanged(0, 0x80BA0028)`). Its task,
 `ApplicationMonitor/Util/AppInfo`) and answers true for `CUSA01780` while
 `ebgm/` is there, logging each title it is asked about.
 
+### Past "Download Spotify" (0.52)
+
+`IsInstalled("CUSA01780")` answered true: the Music section then said
+"Cannot obtain playlist." (Refresh), the query's error 0x80550003. Its first
+request was not a `music` one: group `socialnetwork`, GET
+`/socialnetwork/api/v1/sp/sessionlink` (Spotify's session link: the
+shell's strings near it are `token`, `track`, `track_uri`, `context_uri`,
+`track_index`, `start_view`). From 0.53 that group is answered too, from
+`ebgm/sp_sessionlink.json` (the path after `/socialnetwork/api/v1/`), a first
+guess the test app writes.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

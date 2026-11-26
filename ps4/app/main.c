@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.52"
+#define APP_VERSION "0.53"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -886,6 +886,13 @@ static void writeEbgm(void) {
         "\"views\":[{\"name\":\"Shell Companion\","
         "\"section_title\":\"Shell Companion\",\"lists\":[" PLAYLIST_GUESS "]}]}\n";
     writeFile(SC_BGM_DIR "/ebgm/recommended_views.json", views, sizeof(views) - 1);
+    // The Spotify session link a playlist's track list asks for
+    // (socialnetwork's /sp/sessionlink; the shell's strings near it: token,
+    // track, track_uri, context_uri, track_index, start_view): a first guess.
+    static const char session[] =
+        "{\"token\":\"shellcompanion\",\"access_token\":\"shellcompanion\","
+        "\"expires_in\":3600}\n";
+    writeFile(SC_BGM_DIR "/ebgm/sp_sessionlink.json", session, sizeof(session) - 1);
     // The playlist's picture: this app's icon. The shell adds &w=..&h=.. to
     // image_url (its strings), hence the ? in it.
     copyFromPackage("sce_sys/icon0.png", SC_BGM_DIR "/ebgm/playlist.png");
