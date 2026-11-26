@@ -53,6 +53,20 @@ static const struct {
     {'F', 0x311, 0x101c1},   // Ready, Complete
 };
 
+// And "waiting" answers (1.10): 1.08's photo had a waiting song (Ready/
+// Standby, 0x301/0x1c1) reading "Cannot download", and B's done answer
+// reading "Queued for downloading". Item i, while it waits, gets i % 6.
+static const struct {
+    uint32_t bits, param;
+} g_dllTryWait[6] = {
+    {0x301, 0x1c1},     // A: Ready, Standby (1.03-1.09's)
+    {0x313, 0x1103c1},  // B: as 1.08's B, which read "Queued for downloading"
+    {0x300, 0x0c1},     // C: Stop, Standby
+    {0x305, 0x41c1},    // D: Ready, Prepare
+    {0x321, 0x201c1},   // E: Ready, Standby, paused
+    {0x309, 0x81c1},    // F: Ready, Download
+};
+
 static struct {
     int tried, hooked;
     Hook hooks[2];
@@ -116,6 +130,7 @@ static void dllFill(int k, BgftProgress* pr) {
     if (st == DLS_GOING && g_dll.haveGoing) pr->bits = keep | (g_dll.bitsGoing & 0x3FFu);
     else if (st == DLS_DONE && g_dll.trying) pr->bits = keep | g_dllTry[i % 6].bits;
     else if (st == DLS_DONE && g_dll.haveDone) pr->bits = keep | (g_dll.bitsDone & 0x3FFu);
+    else if (st != DLS_GOING && st != DLS_DONE && g_dll.trying) pr->bits = keep | g_dllTryWait[i % 6].bits;
     else if (st != DLS_GOING && st != DLS_DONE && g_dll.haveWaiting) pr->bits = keep | (g_dll.bitsWaiting & 0x3FFu);
     pr->length = pr->lengthTotal = size;
     pr->transferred = pr->transferredTotal = st == DLS_DONE ? size : bytes;
@@ -124,7 +139,11 @@ static void dllFill(int k, BgftProgress* pr) {
     // "Preparing to download... (n%)" reads preparingPercent (1.05: 1.04's
     // answers were right and the list still read 0%; and the answer ends at
     // 0x40, with no percentTotal after it). Ours: how much has come.
-    pr->preparingPercent = st == DLS_DONE ? 100 : it->size ? (int32_t)(bytes * 100u / it->size) : 0;
+    // 1.10: a real download going answers 100 here (1.05's log, package
+    // 1098: 0x38 "64 64"), and the list then shows it downloading, its bar
+    // from the bytes; 0 reads "Preparing to download... (0%)", which 1.05
+    // filled with the bytes' percent. 100 going and done, 0 waiting.
+    pr->preparingPercent = st == DLS_GOING || st == DLS_DONE ? 100 : 0;
     pr->restSec = pr->restSecTotal = st == DLS_DONE ? 0 : rest;
 }
 
@@ -278,6 +297,7 @@ void dlListQueryHook(Frame* f) {
                     const int i = g_dll.e[k].item;
                     const int st = i >= 0 && i < g_dls.count ? g_dls.item[i].state : DLS_WAITING;
                     const uint32_t prm = st == DLS_DONE && g_dll.trying ? g_dllTry[i % 6].param
+                                       : st != DLS_DONE && st != DLS_GOING && g_dll.trying ? g_dllTryWait[i % 6].param
                                        : st == DLS_DONE    ? g_dll.paramDone
                                        : st == DLS_GOING ? g_dll.paramGoing
                                                          : g_dll.paramWaiting;

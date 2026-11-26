@@ -157,6 +157,13 @@ service's are, not the managed wrappers 0.85 hooked.
   download"; E (Run/Install) nothing, "?". 1.09 answers C for finished
   ones. The param's type 3 (finished games' `0x...63`) is what brings the
   icon (1.07's `0x80c3` had it too).
+- **1.10, checked against the real download (package 1098):** it answered
+  `preparingPercent` 100 while going (0x38: `64 64`); ours answered 0, then
+  1.05 the percent, so the list read "Preparing to download... (n%)", not
+  downloading. 1.10 answers 100 going and done, 0 waiting. A waiting song
+  (Ready/Standby) read "Cannot download" in 1.08's photo; `dl-list-try`
+  now also tries six waiting answers (`g_dllTryWait`), B being what read
+  "Queued for downloading".
 
 ### One module, and the cleanup (0.95)
 
