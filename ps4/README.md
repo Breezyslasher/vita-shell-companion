@@ -199,7 +199,13 @@ our player's, which plays on in the shell when the app is closed.
 Volume: the entry's slider calls `SetAudioVolume(level)`, 0 to 0x8000
 (0 dB), ten times a second; the server refused it (0x80FD0005) as there is no
 real core. From 0.34 the watch sends it to our player (`volume=<level>` as
-`cmd`, applied to its audio port) and reports it in GetPlayStatus.
+`cmd`, applied to its audio port) and reports it in GetPlayStatus: on a PS4
+the slider took our player from 0 dB to silence and back.
+
+The Music section still showed Spotify's "Sign in to PlayStation Network"
+with `CUSA01780` in `mcw-fake.txt`, but 0.34 read the title only when our
+player became the core, so the shell was never told: from 0.35 a new title
+is announced at once (core ready, track, status).
 
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 

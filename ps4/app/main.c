@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.34"
+#define APP_VERSION "0.35"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions

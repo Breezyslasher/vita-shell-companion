@@ -364,11 +364,23 @@ static void fakeRefresh(void) {
         const int n = sysRead(fd, v, 64);
         sysClose(fd);
         v[n > 0 ? n : 0] = 0;
+        char title[16];
         size_t k = 0;
         for (const char* p = v; *p && *p != '\n' && *p != '\r' && *p != ' ' && k < 9; p++)
-            g_fake.title[k++] = *p;
-        if (!k) memcpy(g_fake.title, "SCMP00001", (k = 9));
-        g_fake.title[k] = 0;
+            title[k++] = *p;
+        if (!k) memcpy(title, "SCMP00001", (k = 9));
+        title[k] = 0;
+        if (!eq(title, g_fake.title)) {
+            // Another title while we are the core: announced again, as a
+            // core newly ready (0.34 kept the first).
+            memcpy(g_fake.title, title, k + 1);
+            if (g_fake.active) {
+                owe(EV_CORE_READY);
+                owe(EV_TRACK_INFO);
+                owe(EV_PLAY_STATUS);
+                say("fake: the title is now %s: core ready again", g_fake.title);
+            }
+        }
         fd = sysOpen(SC_BGM_STATUS, SC_O_RDONLY, 0);
     }
     if (fd >= 0) {
