@@ -266,8 +266,14 @@ static uint64_t g_began;
 void logOpen(const char* name) {
     char path[128];
     g_began = sysNowUs();
+#ifdef SC_PRX
+    // A module may run inside the shell, which has /user/data, not /data.
+    sysMkdir("/user/data/ShellCompanion", 0777);
+    fmt(path, sizeof(path), "/user/data/ShellCompanion/%s", name);
+#else
     sysMkdir("/data/ShellCompanion", 0777);
     fmt(path, sizeof(path), "/data/ShellCompanion/%s", name);
+#endif
     g_log = sysOpen(path, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
 }
 

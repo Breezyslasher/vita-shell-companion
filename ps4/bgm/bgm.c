@@ -563,7 +563,7 @@ int sceKernelUsleep(unsigned int us);
 __attribute__((visibility("default"))) int module_start(size_t args, const void* argp) {
     (void)args;
     (void)argp;
-    sysMkdir("/data/ShellCompanion", 0777);
+    sysMkdir("/user/data/ShellCompanion", 0777);
     sysMkdir(SC_BGM_DIR, 0777);
     sysMkdir(SC_BGM_MUSIC, 0777);
     logOpen("ps4/bgm.log");

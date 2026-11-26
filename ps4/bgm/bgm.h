@@ -9,7 +9,9 @@
 #define SC_BGM_VERSION "0.1"
 #define SC_BGM_PROTOCOL 1
 
-#define SC_BGM_DIR "/data/ShellCompanion/ps4"
+// /user/data, not /data: inside SceShellUI there is no /data (its sandbox
+// has /user), and the app, jailbroken, sees the same folder by both.
+#define SC_BGM_DIR "/user/data/ShellCompanion/ps4"
 #define SC_BGM_MUSIC SC_BGM_DIR "/music"
 #define SC_BGM_QUEUE SC_BGM_DIR "/queue.txt"
 #define SC_BGM_CMD SC_BGM_DIR "/cmd"
