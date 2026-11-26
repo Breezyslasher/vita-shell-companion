@@ -896,6 +896,25 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### Download progress (0.85)
+
+- **Notifications:** at each quarter of the whole list (25, 50, 75%), at
+  most one every 20 s, then at the end. The progress counts bytes when every
+  item's size is known, else items (the one being fetched by its own bytes).
+  The PS4's notifications are pop-ups, not the Vita's single one that
+  updates.
+- **Notifications > Downloads, with a progress bar (to come):** the list is
+  `Sce.Vsh.Orbis.BgftAccessor`'s `DownloadItemAccessor2`. Its tasks come
+  from `BgftWrapper.DownloadQueryTask` (`QueryTaskResult {int taskId; uint
+  param}`, `param` a bit field of type, subtype, state, …), its details from
+  `DownloadGetTaskInfo` (`contentTitle`, `iconPath`, a tick) and
+  `GetTaskInfoValue*`, and its progress from `DownloadGetProgress` (a
+  `TaskProgress`: state, runstate, paused, length, transferred, totals,
+  rest seconds, `percentTotal`). A task of ours there means adding it to
+  `DownloadQueryTask`'s answer and answering the others for its id. 0.85
+  only logs those calls (`bgft:` lines in mcw.log), to see a real task's
+  values first.
+
 ### Large queues (0.84)
 
 Up to 10,000 tracks in up to 1,000 albums (512 and 64 before).

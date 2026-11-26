@@ -1192,7 +1192,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 21
+#define MONO_HOOKS 30
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -2063,6 +2063,65 @@ static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* class
     qkSetup(pui, app, cls);
 }
 
+// The Downloads list's calls to the download service (BGFT), logged only
+// (0.85): what a task of ours in Notifications > Downloads would have to
+// answer. After the call: its arguments, its answer, and what it filled in.
+static void bgftLog(Frame* f) {
+    const Hook* h = f->hook;
+    if (f->seq > 150) return;
+    const uint64_t* g = f->gpr;
+    char extra[400];
+    extra[0] = 0;
+    if (contains(h->name, "DownloadQueryTaskSection") || contains(h->name, "DownloadQueryTask")) {
+        // (..., out uint actualNum, QueryTaskResult[] results): the last two.
+        const int sec = contains(h->name, "Section");
+        const uint32_t* num = (const uint32_t*)(uintptr_t)(sec ? g[2] : g[4]);
+        const uint8_t* arr = (const uint8_t*)(uintptr_t)(sec ? g[3] : g[5]);
+        uint32_t n = 0;
+        if (hookReadable(num, 4) == 4) n = *num;
+        int at = fmt(extra, sizeof(extra), " actualNum %u:", n);
+        for (uint32_t k = 0; k < n && k < 12 && arr && hookReadable(arr + 0x20 + k * 8, 8) == 8; k++) {
+            int32_t id;
+            uint32_t prm;
+            memcpy(&id, arr + 0x20 + k * 8, 4);
+            memcpy(&prm, arr + 0x24 + k * 8, 4);
+            at += fmt(extra + at, sizeof(extra) - at, " [task %d param 0x%x]", id, prm);
+        }
+    } else if (contains(h->name, "DownloadGetProgress")) {
+        // (taskId, TaskProgress progress): the object's fields, raw.
+        const uint8_t* o = (const uint8_t*)(uintptr_t)g[1];
+        if (o && hookReadable(o + 0x10, 0x48) == 0x48) {
+            int at = fmt(extra, sizeof(extra), " progress:");
+            for (int k = 0; k < 0x48; k += 4) {
+                uint32_t v;
+                memcpy(&v, o + 0x10 + k, 4);
+                at += fmt(extra + at, sizeof(extra) - at, " %x", v);
+            }
+        }
+    } else if (contains(h->name, "DownloadGetTaskInfo")) {
+        // (taskId, out DownloadTaskInfo {string contentTitle, iconPath; ulong tick}).
+        const uint64_t* info = (const uint64_t*)(uintptr_t)g[1];
+        if (hookReadable(info, 24) == 24) {
+            char t[120], icon[160];
+            monoText(info[0], t, sizeof(t));
+            monoText(info[1], icon, sizeof(icon));
+            fmt(extra, sizeof(extra), " title \"%s\", icon \"%s\", tick %lu", t, icon, (unsigned long)info[2]);
+        }
+    } else if (contains(h->name, "GetTaskInfoValueString")) {
+        const uint64_t* out = (const uint64_t*)(uintptr_t)g[2];
+        if (hookReadable(out, 8) == 8) {
+            char t[200];
+            monoText(*out, t, sizeof(t));
+            fmt(extra, sizeof(extra), " \"%s\"", t);
+        }
+    } else if (contains(h->name, "GetTaskInfoValue")) {
+        const uint64_t* out = (const uint64_t*)(uintptr_t)g[2];
+        if (hookReadable(out, 8) == 8) fmt(extra, sizeof(extra), " value %lu", (unsigned long)*out);
+    }
+    say("bgft: %s(%lx, %lx, %lx, %lx) = 0x%lx%s  [#%u, thread %d]", h->name, (unsigned long)g[0], (unsigned long)g[1],
+        (unsigned long)g[2], (unsigned long)g[3], (unsigned long)f->retRax, extra, f->seq, scePthreadGetthreadid());
+}
+
 static void monoLog(Frame* f) {
     const Hook* h = f->hook;
     if (h->json == 1) {
@@ -2114,6 +2173,8 @@ static void monoLog(Frame* f) {
         rowLoaded(f);
     } else if (h->json == 10) {
         rowShellLoad(f);
+    } else if (h->json == 17) {
+        bgftLog(f);
     } else if (h->json == 12) {
         qkMoved(f);
     } else if (h->json == 13) {
@@ -2491,6 +2552,25 @@ static void monoHooks(void) {
          "TrackListMenuPanel.OnItemSelected"},
         {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuPanel", "OnItemSelected", 2, 16,
          "TrackListMenuPanel.OnItemSelected(withLog)"},
+        // The Downloads list's calls to the download service, logged (0.85).
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "DownloadQueryTask", 6, 17,
+         "BgftWrapper.DownloadQueryTask"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "DownloadQueryTaskSection", 4, 17,
+         "BgftWrapper.DownloadQueryTaskSection"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "DownloadGetProgress", 2, 17,
+         "BgftWrapper.DownloadGetProgress"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "DownloadGetTaskInfo", 2, 17,
+         "BgftWrapper.DownloadGetTaskInfo"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "GetTaskInfoValueString", 3, 17,
+         "BgftWrapper.GetTaskInfoValueString"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "GetTaskInfoValueInt", 3, 17,
+         "BgftWrapper.GetTaskInfoValueInt"},
+        {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "DownloadItemAccessor2", "GetTotalCount", 0, 17,
+         "DownloadItemAccessor2.GetTotalCount"},
+        {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "DownloadItemAccessor2", "GetTaskParam", 1, 17,
+         "DownloadItemAccessor2.GetTaskParam"},
+        {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "DownloadItemAccessor", "GetTotalCount", 0, 17,
+         "DownloadItemAccessor.GetTotalCount"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
@@ -2597,7 +2677,7 @@ void mcwPost(Frame* f) {
     if (f->hook->json) {
         if (!g_quiet || f->hook->json == 2 || f->hook->json == 6 || f->hook->json == 7 ||
             f->hook->json == 8 || f->hook->json == 9 || f->hook->json == 10 ||
-            f->hook->json == 12 || f->hook->json == 13)
+            f->hook->json == 12 || f->hook->json == 13 || f->hook->json == 17)
             monoLog(f);
         return;
     }

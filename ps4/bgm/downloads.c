@@ -48,6 +48,9 @@ static struct {
         int pagesDone, pages;
     } item[DL_MAX];
     uint64_t lastStatus;
+    int quarter;          // the last progress notification's (1-3), 0 none yet
+    uint64_t lastNotice;  // when it was shown
+    int current;          // the item being fetched
 } g_dls;
 
 static uint8_t g_dlBuf[64 * 1024];
@@ -130,6 +133,45 @@ static int dlRead(void) {
         at = end + 1;
     }
     return g_dls.count > 0;
+}
+
+static void dlNotify(const char* f, ...);
+
+// The whole list's progress, 0-1000: by bytes where every size is known,
+// else by items (the item being fetched by its own bytes if its size is).
+static int dlPermille(void) {
+    uint64_t have = 0, total = 0;
+    int sized = 1;
+    for (int i = 0; i < g_dls.count; i++) {
+        if (!g_dls.item[i].size && g_dls.item[i].state != DLS_DONE) sized = 0;
+        have += g_dls.item[i].bytes;
+        total += g_dls.item[i].size ? g_dls.item[i].size : g_dls.item[i].bytes;
+    }
+    if (sized && total) return (int)(have * 1000u / total);
+    if (!g_dls.count) return 0;
+    int done = 0;
+    for (int i = 0; i < g_dls.count; i++) done += g_dls.item[i].state == DLS_DONE || g_dls.item[i].state == DLS_GONE;
+    int part = 0;
+    const int c = g_dls.current;
+    if (c >= 0 && c < g_dls.count && g_dls.item[c].size && g_dls.item[c].state == DLS_GOING)
+        part = (int)(g_dls.item[c].bytes * 1000u / g_dls.item[c].size);
+    return (done * 1000 + part) / g_dls.count;
+}
+
+// A notification at each quarter of the whole (25, 50, 75%), at most one
+// every 20 s (0.85: the PS4 shows notifications, not the Vita's one that
+// updates).
+static void dlProgress(void) {
+    const int pm = dlPermille();
+    const int q = pm / 250;
+    if (q <= g_dls.quarter || q >= 4 || sysNowUs() - g_dls.lastNotice < 20000000u) return;
+    g_dls.quarter = q;
+    g_dls.lastNotice = sysNowUs();
+    const int c = g_dls.current;
+    if (g_dls.count > 1 && c >= 0 && c < g_dls.count)
+        dlNotify("Downloading: %d%% (%d of %d)\n%s", pm / 10, c + 1, g_dls.count, g_dls.item[c].title);
+    else if (c >= 0 && c < g_dls.count)
+        dlNotify("Downloading: %d%%\n%s", pm / 10, g_dls.item[c].title);
 }
 
 static void dlStatus(void) {
@@ -275,7 +317,10 @@ static int dlGet(const char* url, const char* file, const char* extra, uint64_t*
         }
         *got += (uint64_t)n;
         *progress += (uint64_t)n;
-        if (sysNowUs() - g_dls.lastStatus > 2000000u) dlStatus();
+        if (sysNowUs() - g_dls.lastStatus > 2000000u) {
+            dlStatus();
+            dlProgress();
+        }
     }
     // Ended: whole if its length was known and all came, or not known.
     result = !*size || *progress >= *size ? GET_DONE : GET_RETRY;
@@ -407,6 +452,9 @@ static void* dlMain(void* arg) {
             continue;
         }
         g_dls.running = 1;
+        g_dls.quarter = 0;
+        g_dls.lastNotice = sysNowUs();
+        g_dls.current = 0;
         dlStatus();
         // The app goes as it hands them over: a moment for it to close its files.
         sysSleepMs(2000);
@@ -414,8 +462,10 @@ static void* dlMain(void* arg) {
         dlNotify("Downloading %d item%s in the background", g_dls.count, g_dls.count == 1 ? "" : "s");
         int done = 0, failed = 0;
         for (int i = 0; i < g_dls.count && !g_dls.takeBack && !g_dls.start; i++) {
+            g_dls.current = i;
             dlItem(i);
             dlStatus();
+            dlProgress();
             if (g_dls.item[i].state == DLS_DONE) {
                 done++;
                 if (g_dls.count > 1) dlNotify("Downloaded: %s (%d of %d)", g_dls.item[i].title, i + 1, g_dls.count);
