@@ -896,6 +896,40 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### Packages and self-update (0.89)
+
+`ps4/bgm/pkg.c`. A download list's `pkg` item, and an app's own update
+(`update.txt` and `update_start`, the client library's `scUpdateInstallPkg`),
+go to the PS4's own download service (BGFT), as GoldHEN's Package Installer,
+flatz's remote package installer and cy33hc's ps4-webdav-client do:
+
+1. `sceBgftServiceIntInit` with a 1 MB heap (the shell has the service up
+   already, so its answer is only logged).
+2. `sceBgftServiceIntDownloadRegisterTask` for a URL (option
+   `DISABLE_CDN_QUERY_PARAM`), or `…RegisterTaskByStorageEx` for a file
+   (option `FORCE_UPDATE`, slot 0), with `entitlementType` 5, the
+   package's content id, type and size, `playgoScenarioId` "0", and the
+   initial user.
+3. `sceBgftServiceDownloadStartTask`.
+
+0x80990086 (being downloaded already) takes that task
+(`sceBgftServiceDownloadFindTaskByContentId`). `sceBgftServiceDownloadGetProgress`
+is followed every 2 s until the bytes are all there or it reports an error.
+
+A package's header, the first 4 KB, read from the file or by HTTP `Range`,
+is big-endian: `\x7FCNT` at 0, the content id at 0x40, the content type at
+0x74 (0x1A GD, 0x1B AC, 0x1C AL, 0x1E DP), the size at 0x430.
+
+OpenOrbis's `Bgft.h` has the package size and the progress's lengths as 32
+bits, while the shell's own wrapper has them as `ulong`. They're 64 bits
+here, and the progress structure has room to spare.
+
+Self-update waits 3 s for the app to have gone, installs, waits 15 s more
+for the install, writes `update-result.txt` (`result=`, `why=`), and with
+`relaunch=1` starts the app with `sceSystemServiceLaunchApp`. In the test
+app, L3 installs `test-update.txt`'s package and closes the app, and the
+next start logs the result. None of this has been run on the console yet.
+
 ### Set up again when loaded early (0.88)
 
 When the shell started again (after a crash), the watch was loaded while

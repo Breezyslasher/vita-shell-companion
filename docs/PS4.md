@@ -38,6 +38,10 @@ editing the queue. It's the PS4 counterpart of the Vita plugin; the
 - **Background downloads:** a list of files fetched in the shell after the app
   closes, continued where they stopped, retried, with notifications at the
   start, at each quarter, as each item ends, and at the end.
+- **Packages and self-update:** a `.pkg` in a download list goes to the
+  PS4's own download service, which downloads and installs it with its
+  entry and progress bar in Notifications → Downloads. An app can install
+  its own update once it has closed, and be started again.
 - **Large libraries:** up to 10,000 tracks in 1,000 albums. A local file's
   tags are read once and cached.
 
@@ -99,6 +103,8 @@ scMusicPlay();
 | `scWriteDownloads(notify, headers, items, count)` | A download list. |
 | `scDownloadsStart()` / `scDownloadsTakeBack()` | Hand it over / take it back (waits up to 5 s for the shell to stop). |
 | `scReadDownloadsStatus(&running, items, cap, &n)` | Each item's state and bytes. |
+| `scUpdateInstallPkg(pkg, relaunch)` | The app's own update (a `/data/...` path or URL), installed once the app has gone; the app exits right after. |
+| `scReadUpdateResult(&result, why, size)` | What came of it, read as the app starts again. |
 
 ### Tracks
 
@@ -159,6 +165,30 @@ scDownloadsStart();
   60 s.
 - **Status:** `going`, `waiting`, `done`, `gone` or `failed`, with bytes and
   size (and pages done for `pages`).
+- **`pkg`:** `args[0]` a package's URL or a path on the console, `args[1]`
+  extra header lines; `file` may be NULL. Its header (the first 4 KB) gives
+  the content id, type (`PS4GD`, `PS4AC`, `PS4AL`, `PS4DP`) and size. The
+  package is registered with the PS4's download service
+  (`sceBgftServiceIntDownloadRegisterTask` for a URL,
+  `…RegisterTaskByStorageEx` for a file) and started: the PS4 downloads and
+  installs it, shown in Notifications → Downloads. The item's status follows
+  the service's progress, its task id in the fifth field.
+
+### Self-update
+
+```c
+// The new package downloaded (or its URL), as the app is about to close:
+if (scUpdateInstallPkg("/data/MyApp/update.pkg", 1) == 0) exit(0);
+...
+// As it starts again:
+int result; char why[200];
+if (scReadUpdateResult(&result, why, sizeof(why)) == 0) log("update: %d %s", result, why);
+```
+
+The shell waits 3 s for the app to close, registers the package with the
+PS4's download service (over what is installed), follows it, writes
+`update-result.txt`, and with `relaunch` starts the app again
+(`sceSystemServiceLaunchApp`).
 
 ## On the console
 
@@ -172,6 +202,7 @@ Everything is in `/data/ShellCompanion/ps4/`:
 | `liked.txt` | Liked: a path or URL a line |
 | `plus-events.txt` | "+" presses not yet read by the app |
 | `downloads.txt`, `downloads-status.txt` | the download list and its status |
+| `update.txt`, `update-result.txt` | a self-update asked for, and what came of it |
 | `tags.txt` | the tag cache |
 | `ebgm/` | what the Music tab is answered from (lists, covers in `ebgm/art/`) |
 
@@ -206,7 +237,10 @@ CI as a package:
   drive's root or the folder), every MP3/WAV in `music/`, a test tone, and
   the lines of `streams.txt`
   (`URL | title | artist | album | cover URL`).
-- **L2 / R2** hand over and take back a test download list.
+- **L2 / R2** hand over and take back a test download list (the URLs in
+  `test-downloads.txt`, a `.pkg` among them going to the PS4's service).
+- **L3** installs the package named in `test-update.txt` as a self-update,
+  then closes the app.
 
 Restart the PS4 after installing a new version: the modules load once a
 boot.

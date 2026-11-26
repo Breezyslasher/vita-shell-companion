@@ -404,11 +404,14 @@ int scWriteDownloads(int notify, const char* headers, const ScDownload* items, u
     out[at++] = '\n';
     for (uint32_t i = 0; i < count; i++) {
         const ScDownload* d = &items[i];
-        if (!d->file || !d->file[0] || !d->kind) continue;
+        if (!d->kind) continue;
+        // A package's file is where it is (its URL or path): the PS4 puts it.
+        const char* file = d->file && d->file[0] ? d->file : !strcmp(d->kind, "pkg") ? d->args[0] : NULL;
+        if (!file || !file[0]) continue;
         at += (size_t)snprintf(out + at, cap - at, "item=");
         at = putEncoded(out, at, cap, d->id);
         out[at++] = '\t';
-        at = putEncoded(out, at, cap, d->file);
+        at = putEncoded(out, at, cap, file);
         at += (size_t)snprintf(out + at, cap - at, "\t%llu\t", (unsigned long long)d->size);
         at = putEncoded(out, at, cap, d->title);
         out[at++] = '\t';
@@ -520,5 +523,28 @@ int scReadPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count) {
     }
     unlink(work);
     if (count) *count = n;
+    return 0;
+}
+
+// ── Self-update ──────────────────────────────────────────────────────────────
+
+#define UPDATE_FILE SC_BGM_DIR "/update.txt"
+#define UPDATE_RESULT SC_BGM_DIR "/update-result.txt"
+
+int scUpdateInstallPkg(const char* pkg, int relaunch) {
+    if (!g_titleId[0] || !pkg || !pkg[0] || !scPlayerRunning()) return -1;
+    unlink(UPDATE_RESULT);
+    char text[1200];
+    const int n = snprintf(text, sizeof(text), "title=%s\nsource=%s\nrelaunch=%d\n", g_titleId, pkg, relaunch ? 1 : 0);
+    if (n <= 0 || (size_t)n >= sizeof(text) || writeAll(UPDATE_FILE, text, (size_t)n) != 0) return -1;
+    return scCommand("update_start\n");
+}
+
+int scReadUpdateResult(int* result, char* why, size_t whySize) {
+    static char text[1024];
+    if (readAll(UPDATE_RESULT, text, sizeof(text)) <= 0) return -1;
+    char v[24];
+    if (result) *result = field(text, "result", v, sizeof(v)) ? atoi(v) : -1;
+    if (why && whySize) field(text, "why", why, whySize);
     return 0;
 }

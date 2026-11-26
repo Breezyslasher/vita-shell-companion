@@ -45,6 +45,7 @@ static struct {
         char arg[3][DL_TEXT];
         uint64_t size, bytes;
         int state;
+        int task;  // a package's task with the PS4's download service (0.89), 0 if none
         int pagesDone, pages;
     } item[DL_MAX];
     uint64_t lastStatus;
@@ -178,9 +179,11 @@ static void dlStatus(void) {
     static char text[DL_MAX * 128 + 64];
     size_t at = (size_t)fmt(text, sizeof(text), "running=%d\npaused=0\n", g_dls.running);
     for (int i = 0; i < g_dls.count && at + 128 < sizeof(text); i++) {
-        at += (size_t)fmt(text + at, sizeof(text) - at, "item=%s\t%s\t%lu\t%lu\t\t", g_dls.item[i].id,
+        at += (size_t)fmt(text + at, sizeof(text) - at, "item=%s\t%s\t%lu\t%lu\t", g_dls.item[i].id,
                           g_dlStateName[g_dls.item[i].state], (unsigned long)g_dls.item[i].bytes,
                           (unsigned long)g_dls.item[i].size);
+        if (g_dls.item[i].task > 0) at += (size_t)fmt(text + at, sizeof(text) - at, "%d", g_dls.item[i].task);
+        text[at++] = '\t';
         if (g_dls.item[i].pages)
             at += (size_t)fmt(text + at, sizeof(text) - at, "\t%d/%d", g_dls.item[i].pagesDone,
                               g_dls.item[i].pages);
@@ -395,6 +398,8 @@ static void dlNotify(const char* f, ...) {
     notify("%s", text);
 }
 
+static int pkgItem(int i);  // pkg.c (0.89)
+
 static void dlItem(int i) {
     __typeof__(g_dls.item[0])* it = &g_dls.item[i];
     if (it->state == DLS_DONE || it->state == DLS_GONE) return;
@@ -433,6 +438,8 @@ static void dlItem(int i) {
                 it->bytes += pageBytes;
             }
         }
+    } else if (!memcmp(it->kind, "pkg", 4)) {
+        r = pkgItem(i);
     } else {
         logLine("download %s: kind \"%s\" not known here", it->id, it->kind);
         r = GET_GONE;

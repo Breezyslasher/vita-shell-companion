@@ -1733,6 +1733,9 @@ static void queueInsert(int at, int lib) {
 // The Music section's "+" as each app wants it (0.86).
 #include "plus.c"
 
+// Packages through the PS4's own download service, and self-update (0.89).
+#include "pkg.c"
+
 static uint64_t g_lastStatus;
 
 static void writeStatus(void) {
@@ -1862,6 +1865,10 @@ static void runCommand(const char* text, int n) {
         int lib = 0;
         for (int i = save ? 10 : 12; i < n && text[i] >= '0' && text[i] <= '9'; i++) lib = lib * 10 + (text[i] - '0');
         plusPressed(save, lib);
+    } else if (IS("update_start")) {
+        // An app's own update, once it has gone (the client library's
+        // scUpdateInstallPkg, 0.89): pkg.c.
+        updateStart();
     } else if (IS("dl_start")) {
         // An app's downloads handed over (the client library's
         // scDownloadsStart, 0.82): downloads.c's thread takes them.

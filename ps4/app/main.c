@@ -24,7 +24,7 @@
 #include "../client/shell_companion.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.88"
+#define APP_VERSION "0.89"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -92,6 +92,7 @@ int scePadReadState(int handle, OrbisPadData* data);
 #define ORBIS_VIDEO_OUT_BUS_MAIN 0
 #define ORBIS_VIDEO_OUT_FLIP_VSYNC 1
 #define ORBIS_PAD_BUTTON_OPTIONS 0x0008
+#define ORBIS_PAD_BUTTON_L3 0x0002
 #define ORBIS_PAD_BUTTON_R3 0x0004
 #define ORBIS_PAD_BUTTON_UP 0x0010
 #define ORBIS_PAD_BUTTON_DOWN 0x0040
@@ -905,6 +906,8 @@ static void draw(void) {
     y += LINE;
     text(x, y, FG, "R2     take the downloads back (stops them), their status in app.log");
     y += LINE;
+    text(x, y, FG, "L3     self-update from test-update.txt (a .pkg path or URL), then close");
+    y += LINE;
     text(x, y, FG, "UP     music watch in the shell: logs the quick menu's music calls");
     y += LINE;
     text(x, y, FG, "DOWN   copy the shell's .NET code to ShellCompanion/ps4/shell (UP first)");
@@ -1179,7 +1182,12 @@ static void testDownloads(void) {
     }
     for (int i = 0; i < n; i++) {
         snprintf(ids[i], sizeof(ids[i]), "test%d", i + 1);
-        items[i] = (ScDownload){.id = ids[i], .file = files[i], .title = titles[i], .kind = "url", .args = {urls[i], NULL, NULL}};
+        // A .pkg goes to the PS4's own download service (0.89).
+        const char* q = strchr(urls[i], '?');
+        const size_t ul = q ? (size_t)(q - urls[i]) : strlen(urls[i]);
+        const int pkg = ul > 4 && !strncasecmp(urls[i] + ul - 4, ".pkg", 4);
+        items[i] = (ScDownload){.id = ids[i], .file = pkg ? NULL : files[i], .title = titles[i],
+                                .kind = pkg ? "pkg" : "url", .args = {urls[i], NULL, NULL}};
     }
     mkdir(SC_BGM_DIR "/downloads", 0777);
     const int w = scWriteDownloads(1, NULL, items, (uint32_t)n);
@@ -1200,6 +1208,12 @@ int main(void) {
     g_log = fopen(SC_BGM_DIR "/app.log", "w");
     say("App %s; jailbreak 0x%lX; GoldHEN SDK 0x%lX", APP_VERSION, (unsigned long)jbrc,
         (unsigned long)sysCall(500, 0 /* VERSION */, 0, 0));
+    {
+        // What came of a self-update (0.89), if one ran.
+        int result = 0;
+        char why[200] = "";
+        if (scReadUpdateResult(&result, why, sizeof(why)) == 0) say("Last self-update: %d, %s", result, why);
+    }
 
     char portText[16];
     if (readFile(SC_BGM_PORT, portText, sizeof(portText)) > 0) g_portType = atoi(portText);
@@ -1281,6 +1295,28 @@ int main(void) {
             for (uint32_t i = 0; i < n; i++)
                 say("  %s: %s, %llu of %llu bytes%s", st[i].id, st[i].state, (unsigned long long)st[i].bytes,
                     (unsigned long long)st[i].size, "");
+        }
+        if (down & ORBIS_PAD_BUTTON_L3) {
+            // Self-update (0.89): test-update.txt's first line, a package's
+            // path (/data/...) or URL, installed once this app has gone.
+            char line[600] = "";
+            FILE* uf = fopen(SC_BGM_DIR "/test-update.txt", "r");
+            if (uf) {
+                if (fgets(line, sizeof(line), uf)) line[strcspn(line, "\r\n")] = 0;
+                fclose(uf);
+            }
+            if (!line[0]) {
+                say("Self-update: put a package's path or URL in test-update.txt first");
+            } else {
+                char what[512];
+                scOpen(what, sizeof(what));
+                const int rc = scUpdateInstallPkg(line, 1);
+                say("Self-update from %s: %d; closing so it can install", line, rc);
+                if (rc == 0) {
+                    if (g_log) fflush(g_log);
+                    exit(0);
+                }
+            }
         }
         if (down & ORBIS_PAD_BUTTON_R3) {
             // The watch answers the quick menu for our player while this

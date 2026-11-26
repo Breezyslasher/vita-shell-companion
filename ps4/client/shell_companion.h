@@ -144,7 +144,7 @@ typedef struct ScDownload {
                            // for "pages" a template with {page} or {page:N}
     uint64_t size;         // its full size, 0 if unknown
     const char* title;     // for the notifications
-    const char* kind;      // "url" or "pages"
+    const char* kind;      // "url", "pages" or "pkg" (below)
     const char* args[3];   // url: the URL, extra header lines; pages: the URL with
                            // {page}, "count" or "count,first", extra header lines
 } ScDownload;
@@ -171,6 +171,22 @@ typedef struct ScDownloadStatus {
 // What the shell says now (downloads-status.txt): running 1 while it
 // fetches; up to cap items into items, how many in *count. 0, or -1.
 int scReadDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count);
+
+// ── Packages and self-update ─────────────────────────────────────────────────
+// A download list's item of kind "pkg" (args[0] its URL or a path on the
+// console, args[1] extra header lines; file may be NULL) goes to the PS4's
+// own download service: it downloads and installs it as the Store's are,
+// with its entry and progress bar in Notifications > Downloads. Its status
+// says how far, and its task id with the service in the fifth field.
+
+// The app's own update, a package (a /data/... path or a URL), installed by
+// the shell once the app has gone, which it does at once after this (the
+// shell waits 3 s). relaunch 1: the app started again once installed. 0, or
+// -1 when the player is not there to do it.
+int scUpdateInstallPkg(const char* pkg, int relaunch);
+// What came of it (update-result.txt): result 0 when installed, else the
+// code; why says what happened. 0, or -1 when there is none yet.
+int scReadUpdateResult(int* result, char* why, size_t whySize);
 
 // "+" pressed while the app was away, oldest first, each taken out of the
 // file as it is read: up to cap into events, how many in *count. 0, or -1.
