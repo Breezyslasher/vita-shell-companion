@@ -635,7 +635,7 @@ static void testDownloads(void) {
     const int rc = scOpen(what, sizeof(what));
     say("scOpen: %d: %s", rc, what);
     static ScDownload items[16];
-    static char urls[16][512], files[16][256], titles[16][64], ids[16][16];
+    static char urls[16][512], files[16][256], titles[16][64], ids[16][16], icons[16][512];
     int n = 0;
     FILE* f = fopen(SC_BGM_DIR "/test-downloads.txt", "r");
     char line[512];
@@ -644,6 +644,15 @@ static void testDownloads(void) {
         while (len && (line[len - 1] == '\n' || line[len - 1] == '\r' || line[len - 1] == ' ')) line[--len] = 0;
         // A URL, or a package on the console (0.99: /data/....pkg).
         if (strncmp(line, "http", 4) && line[0] != '/') continue;
+        // An icon after it, a space or tab between (1.29): a PNG on the
+        // console or a URL, for its row in Notifications > Downloads.
+        icons[n][0] = 0;
+        char* gap = strpbrk(line, " \t");
+        if (gap) {
+            *gap++ = 0;
+            while (*gap == ' ' || *gap == '\t') gap++;
+            snprintf(icons[n], sizeof(icons[n]), "%s", gap);
+        }
         snprintf(urls[n], sizeof(urls[n]), "%s", line);
         const char* name = strrchr(line, '/');
         snprintf(files[n], sizeof(files[n]), "/data/ShellCompanion/ps4/downloads/%s", name ? name + 1 : "file");
@@ -655,6 +664,7 @@ static void testDownloads(void) {
     if (f) fclose(f);
     if (!n) {
         for (int i = 0; i < 3; i++) {
+            icons[n][0] = 0;
             snprintf(urls[n], sizeof(urls[n]), "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-%d.mp3", i + 1);
             snprintf(files[n], sizeof(files[n]), "/data/ShellCompanion/ps4/downloads/SoundHelix-Song-%d.mp3", i + 1);
             snprintf(titles[n], sizeof(titles[n]), "SoundHelix Song %d", i + 1);
@@ -668,7 +678,8 @@ static void testDownloads(void) {
         const size_t ul = q ? (size_t)(q - urls[i]) : strlen(urls[i]);
         const int pkg = ul > 4 && !strncasecmp(urls[i] + ul - 4, ".pkg", 4);
         items[i] = (ScDownload){.id = ids[i], .file = pkg ? NULL : files[i], .title = titles[i],
-                                .kind = pkg ? "pkg" : "url", .args = {urls[i], NULL, NULL}};
+                                .kind = pkg ? "pkg" : "url", .args = {urls[i], NULL, NULL},
+                                .icon = icons[i][0] ? icons[i] : NULL};
     }
     mkdir(SC_BGM_DIR "/downloads", 0777);
     // Fetched again each test (0.97): a file there already is done at once.
