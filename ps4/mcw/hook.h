@@ -48,7 +48,7 @@ struct Hook {
     uint64_t lastHash;   // the last logged answer's
     uint64_t lastLogUs;
     int quiet;           // a getter: logged only when its answer changes
-    uint32_t outMask;    // the arguments a call has written to: its answer
+    uint32_t logged;     // calls logged
     int installed;
     uint8_t original[16];  // its first bytes before the hook
     uint32_t stolen;       // how many were moved

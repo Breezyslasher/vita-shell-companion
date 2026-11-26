@@ -284,30 +284,36 @@ void mcwPost(Frame* f) {
     const uint64_t us = sysNowUs() - f->t0;
     uint8_t post[6][POST_BYTES];  // on the caller's stack: 3 KB
     size_t postLen[6];
+    // The answer: what it returned, and the rows of 16 bytes the call
+    // changed. Not the rest of what an argument points to: a register left
+    // over from before can point to memory other threads change (on a PS4,
+    // every GetPlayStatus and GetEvent was logged for that).
     uint64_t hash = hashBytes(0xCBF29CE484222325ull, &f->retRax, 8);
-    uint32_t changed = 0;
     for (int i = 0; i < 6; i++) {
         postLen[i] = 0;
         if (!f->preLen[i]) continue;
         postLen[i] = hookReadable((const void*)(uintptr_t)f->gpr[i], POST_BYTES);
         if (postLen[i]) memcpy(post[i], (const void*)(uintptr_t)f->gpr[i], postLen[i]);
         const size_t cmp = postLen[i] < (size_t)f->preLen[i] ? postLen[i] : (size_t)f->preLen[i];
-        if (memcmp(post[i], f->pre[i], cmp) != 0) changed |= 1u << i;
+        for (size_t at = 0; at + 16 <= cmp; at += 16)
+            if (memcmp(post[i] + at, f->pre[i] + at, 16) != 0) {
+                hash = hashBytes(hash + (uint64_t)(i * 64 + at), post[i] + at, 16);
+            }
     }
-    // The answer: what it returned, and the arguments a call has ever
-    // written to (an argument register left over from before is not).
-    const uint32_t outs = __atomic_or_fetch(&h->outMask, changed, __ATOMIC_RELAXED);
-    for (int i = 0; i < 6; i++)
-        if ((outs >> i) & 1) hash = hashBytes(hash + (uint64_t)i, post[i], postLen[i]);
+    const uint64_t now = sysNowUs();
     if (h->quiet) {
-        if (hash == h->lastHash && f->seq > 1) {
+        // A getter: when its answer changes, and not more than 5 times a
+        // second.
+        if ((hash == h->lastHash || now - h->lastLogUs < 200000u) && f->seq > 1) {
             __atomic_add_fetch(&h->same, 1, __ATOMIC_RELAXED);
             return;
         }
         h->lastHash = hash;
     }
+    h->lastLogUs = now;
+    const int first = h->logged++ == 0;
     const uint32_t same = __atomic_exchange_n(&h->same, 0, __ATOMIC_RELAXED);
-    if (same) say("   (%s: %u calls since, the same answer)", h->name, same);
+    if (same) say("   (%s: %u calls since, not logged: the same answer)", h->name, same);
     say("%s #%u (%lx, %lx, %lx, %lx, %lx, %lx) = 0x%lX  [%u us, thread %d]", h->name, f->seq,
         f->gpr[0], f->gpr[1], f->gpr[2], f->gpr[3], f->gpr[4], f->gpr[5], f->retRax,
         (unsigned)us, scePthreadGetthreadid());
@@ -321,10 +327,14 @@ void mcwPost(Frame* f) {
         char label[24];
         fmt(label, sizeof(label), "a%d in ", i);
         const size_t inLen = f->preLen[i] < IN_SHOWN ? (size_t)f->preLen[i] : IN_SHOWN;
-        say("   a%d -> %lx", i, f->gpr[i]);
-        dump(label, f->pre[i], inLen, NULL, 0);
         const size_t cmp = postLen[i] < (size_t)f->preLen[i] ? postLen[i] : (size_t)f->preLen[i];
-        if (memcmp(post[i], f->pre[i], cmp) != 0 || postLen[i] > cmp) {
+        const int out = memcmp(post[i], f->pre[i], cmp) != 0 || postLen[i] > cmp;
+        // What it pointed to before: always for a call that is not a
+        // getter's; a getter's the first time only, else only the rows the
+        // call changed.
+        if (!h->quiet || first || out) say("   a%d -> %lx", i, f->gpr[i]);
+        if (!h->quiet || first) dump(label, f->pre[i], inLen, NULL, 0);
+        if (out) {
             fmt(label, sizeof(label), "a%d out", i);
             dump(label, post[i], postLen[i], f->pre[i], cmp);
         }

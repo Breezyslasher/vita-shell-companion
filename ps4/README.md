@@ -118,8 +118,8 @@ show up only once the module is in a core's process.
 
 ### Trying it
 
-1. Install the 0.27 test app (0.26 hooked nothing: its module list hid the
-   system libraries). Restart the PS4 if an older watch is loaded
+1. Install the 0.28 test app (0.26 hooked nothing: its module list hid the
+   system libraries; 0.27 logged every poll). Restart the PS4 if an older watch is loaded
    (a module loads into the shell only once each boot).
 2. Open the test app and press **UP**. A notification says how many
    functions it watches.
@@ -134,6 +134,20 @@ show up only once the module is in a core's process.
 | `mcw.off` | if it's there when the watch starts, nothing is hooked |
 | `mcw-names.txt` | the functions to hook instead, one a line (`PlayControl` or a full name) |
 | `mcw.quiet` | while it's there, nothing is logged (checked every 10 s) |
+
+### What a PS4 showed (0.27, 11.50, no music core running)
+
+With only our own player running, the Quick Menu's music widget polls:
+
+| Call | How often | What it saw |
+|---|---|---|
+| `GetPlayStatus(status*)` | about 15 a second | returns 0, and fills a 0x70-byte struct the same way every time: `+04` 3, `+08` 100, `+10` 281, `+2C` 1, `+30` 0x8000, `+44` 1, `+48` -2, `+54` 1, `+58` 1, `+60` `"NPXS20117"` (a system title: the music core it knows?) |
+| `GetEvent(...)` | 60 a second | always `0x80FD0014` (no event, it seems) |
+| `GetStatusOfTracks` | about once a second | logged once, unchanged |
+
+0.27 logged every poll anyway: arguments left over in registers pointed to
+memory other threads change. From 0.28 a getter's answer is only the rows
+the call itself wrote, and it's logged at most 5 times a second.
 
 ### How the hooks work
 
