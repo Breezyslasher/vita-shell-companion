@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.72"
+#define APP_VERSION "0.73"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -344,15 +344,25 @@ static void writeQueue(void) {
         at += (size_t)snprintf(queue + at, sizeof(queue) - at, SC_BGM_MUSIC "/%s\n", names[i]);
     if (access(SC_BGM_MUSIC "/test-tone.wav", R_OK) == 0)
         at += (size_t)snprintf(queue + at, sizeof(queue) - at, SC_BGM_MUSIC "/test-tone.wav\n");
-    int streams = 0;
+    int streams = 0, lineNo = 0;
     FILE* f = fopen(STREAMS, "r");
+    if (!f) say("streams.txt: not there (%s)", STREAMS);
     static char line[4096];
     while (f && fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = 0;
-        if (strncmp(line, "http://", 7) && strncmp(line, "https://", 8)) continue;
+        lineNo++;
+        char* p = line;
+        // A UTF-8 byte-order mark (Notepad's), and spaces, before it (0.73).
+        if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) p += 3;
+        while (*p == ' ' || *p == '\t') p++;
+        size_t len = strlen(p);
+        while (len && (p[len - 1] == '\n' || p[len - 1] == '\r' || p[len - 1] == ' ')) p[--len] = 0;
+        if (!len) continue;
+        if (strncasecmp(p, "http://", 7) && strncasecmp(p, "https://", 8)) {
+            say("streams.txt line %d: skipped, not a URL: \"%.40s\"", lineNo, p);
+            continue;
+        }
         if (at + len + 2 >= sizeof(queue)) break;
-        at += (size_t)snprintf(queue + at, sizeof(queue) - at, "%s\n", line);
+        at += (size_t)snprintf(queue + at, sizeof(queue) - at, "%s\n", p);
         streams++;
     }
     if (f) fclose(f);
