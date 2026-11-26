@@ -53,7 +53,36 @@ SFO=sce_sys/param.sfo
 "$BIN/PkgTool.Core" sfo_setentry $SFO TITLE --type Utf8 --maxsize 128 --value "$TITLE"
 "$BIN/PkgTool.Core" sfo_setentry $SFO TITLE_ID --type Utf8 --maxsize 12 --value "$TITLE_ID"
 "$BIN/PkgTool.Core" sfo_setentry $SFO VERSION --type Utf8 --maxsize 8 --value "$VERSION"
-"$BIN/create-gp4" -out pkg.gp4 --content-id="$CONTENT_ID" \
-    --files "eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx sce_module/libc.prx sce_module/libSceFios2.prx"
+# The package's project (.gp4), as create-gp4 makes it; written here, as
+# the CI's image has no create-gp4.
+FILES="eboot.bin sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx sce_module/libc.prx sce_module/libSceFios2.prx"
+{
+    echo '<?xml version="1.0"?>'
+    echo '<psproject xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" fmt="gp4" version="1000">'
+    echo '	<volume>'
+    echo '		<volume_type>pkg_ps4_app</volume_type>'
+    echo '		<volume_id>PS4VOLUME</volume_id>'
+    echo "		<volume_ts>$(date -u '+%Y-%m-%d %H:%M:%S')</volume_ts>"
+    echo "		<package content_id=\"$CONTENT_ID\" passcode=\"00000000000000000000000000000000\" storage_type=\"digital50\" app_type=\"full\" />"
+    echo '		<chunk_info chunk_count="1" scenario_count="1">'
+    echo '			<chunks>'
+    echo '				<chunk id="0" layer_no="0" label="Chunk #0" />'
+    echo '			</chunks>'
+    echo '			<scenarios default_id="0">'
+    echo '				<scenario id="0" type="sp" initial_chunk_count="1" label="Scenario #0">0</scenario>'
+    echo '			</scenarios>'
+    echo '		</chunk_info>'
+    echo '	</volume>'
+    echo '	<files img_no="0">'
+    for f in $FILES; do echo "		<file targ_path=\"$f\" orig_path=\"$f\" />"; done
+    echo '	</files>'
+    echo '	<rootdir>'
+    echo '		<dir targ_name="sce_sys">'
+    echo '			<dir targ_name="about" />'
+    echo '		</dir>'
+    echo '		<dir targ_name="sce_module" />'
+    echo '	</rootdir>'
+    echo '</psproject>'
+} > pkg.gp4
 "$BIN/PkgTool.Core" pkg_build pkg.gp4 "$OUT"
 ls -l "$OUT/$CONTENT_ID.pkg"
