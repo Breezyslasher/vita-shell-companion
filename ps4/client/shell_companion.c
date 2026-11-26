@@ -190,6 +190,32 @@ static void writeEbgm(void) {
     writeAll(EBGM "/sp_sessionlink.json", session, sizeof(session) - 1);
 }
 
+int sceKernelLoadStartModule(const char* path, size_t args, const void* argp, uint32_t flags, const void* opt,
+                             int* res);
+int sceKernelDlsym(int handle, const char* symbol, void** addr);
+
+// The app's user (its initial user), for the shell's calls that want one
+// (the PS4's download service: inside the shell no user could be had):
+// user.txt.
+static void writeUser(void) {
+    const int h = sceKernelLoadStartModule("libSceUserService.sprx", 0, NULL, 0, NULL, NULL);
+    if (h < 0) return;
+    int (*init)(const void*) = NULL;
+    int (*initial)(int*) = NULL;
+    sceKernelDlsym(h, "sceUserServiceInitialize", (void**)&init);
+    sceKernelDlsym(h, "sceUserServiceGetInitialUser", (void**)&initial);
+    if (!initial) return;
+    if (init) {
+        const int params[1] = {700};
+        init(params);  // an error if the app has: fine
+    }
+    int user = -1;
+    if (initial(&user) != 0 || user == -1) return;
+    char text[32];
+    const int n = snprintf(text, sizeof(text), "user=%d\n", user);
+    writeAll(SC_BGM_DIR "/user.txt", text, (size_t)n);
+}
+
 // A module into SceShellUI: from the app's package, else the copy in
 // GoldHEN's plugins folder, which is where the shell will take it from.
 static int loadModule(const char* name, char* what, size_t size) {
@@ -240,6 +266,7 @@ int scOpen(char* what, size_t size) {
         return -1;
     }
     writeEbgm();
+    writeUser();
     int rc = 0;
     if (scPlayerRunning()) {
         note(what, size, "The player was there.");

@@ -19,6 +19,8 @@
  * come from its header (the first 4 KB).
  */
 
+static void statusFieldBgm(const char* text, const char* key, char* out, size_t cap);
+
 typedef struct {
     void* heap;
     size_t heapSize;
@@ -74,6 +76,39 @@ static struct {
     int32_t user;
 } g_bgft;
 
+// The user the PS4's download service is asked for (0.91: the initial
+// user's was -1 inside the shell, and every registration 0x80990004): the
+// foreground user, the initial one, the first logged in, else the one the
+// app wrote (the client library's scOpen, user.txt). Again while unknown.
+static void bgftUser(void) {
+    typedef int (*FnUserInitial)(int32_t*);
+    FnUserInitial user = (FnUserInitial)anySym(0, "sceUserServiceGetInitialUser");
+    g_bgft.user = -1;
+    FnUserInitial fore = (FnUserInitial)anySym(0, "sceUserServiceGetForegroundUser");
+    int rcFore = -1, rcInit = -1, rcList = -1;
+    if (fore) rcFore = fore(&g_bgft.user);
+    if (g_bgft.user == -1 && user) rcInit = user(&g_bgft.user);
+    if (g_bgft.user == -1) {
+        typedef int (*FnLoginList)(int32_t*);
+        FnLoginList list = (FnLoginList)anySym(0, "sceUserServiceGetLoginUserIdList");
+        int32_t ids[4] = {-1, -1, -1, -1};
+        if (list) rcList = list(ids);
+        for (int k = 0; k < 4 && g_bgft.user == -1; k++)
+            if (ids[k] != -1) g_bgft.user = ids[k];
+    }
+    if (g_bgft.user == -1) {
+        char text[64], v[24];
+        if (readText(SC_BGM_DIR "/user.txt", text, sizeof(text)) > 0) {
+            statusFieldBgm(text, "user", v, sizeof(v));
+            int32_t u = 0;
+            for (const char* q = v; *q >= '0' && *q <= '9'; q++) u = u * 10 + (*q - '0');
+            if (v[0]) g_bgft.user = u;
+        }
+    }
+    logLine("pkg: user 0x%X (foreground 0x%08X, initial 0x%08X, login list 0x%08X)", (unsigned)g_bgft.user,
+            (unsigned)rcFore, (unsigned)rcInit, (unsigned)rcList);
+}
+
 // The service, once: 1 if it is there to use.
 static int bgftSetup(void) {
     if (g_bgft.tried) return g_bgft.ok;
@@ -86,7 +121,6 @@ static int bgftSetup(void) {
     g_bgft.progress = (FnBgftProgress)anySym(lib, "sceBgftServiceDownloadGetProgress");
     g_bgft.find = (FnBgftFind)anySym(lib, "sceBgftServiceDownloadFindTaskByContentId");
     FnAppInstInit instInit = (FnAppInstInit)anySym(inst, "sceAppInstUtilInitialize");
-    FnUserInitial user = (FnUserInitial)anySym(0, "sceUserServiceGetInitialUser");
     logLine("pkg: libSceBgft %d, libSceAppInstUtil %d; init %p, register %p, by storage %p, start %p, progress %p",
             lib, inst, (void*)init, (void*)g_bgft.reg, (void*)g_bgft.regEx, (void*)g_bgft.start,
             (void*)g_bgft.progress);
@@ -98,9 +132,7 @@ static int bgftSetup(void) {
     const int rc = params.heap ? init(&params) : -1;
     // The shell has the service up already: an error here may say only that.
     logLine("pkg: sceBgftServiceIntInit: 0x%08X", (unsigned)rc);
-    g_bgft.user = -1;
-    if (user) user(&g_bgft.user);
-    logLine("pkg: user 0x%X", (unsigned)g_bgft.user);
+    bgftUser();
     g_bgft.ok = 1;
     return 1;
 }
@@ -172,6 +204,7 @@ static int pkgHeadUrl(const char* url, const char* extra, PkgHead* out) {
 // service and started: its task id, or a negative code.
 static int32_t pkgRegister(const char* where, const char* extra, const char* name) {
     if (!bgftSetup()) return -1;
+    if (g_bgft.user == -1) bgftUser();
     const int local = where[0] == '/';
     char path[MAX_PATH];
     // The service's paths are the system's: /user/data is /data.
@@ -447,6 +480,7 @@ static void* probeMain(void* arg) {
         logLine("probe: the service is not there");
         return NULL;
     }
+    if (g_bgft.user == -1) bgftUser();
     // Package types to try: none, empty, and guesses at a media one.
     // NULL last: the service may take a missing one worst.
     static const char* const types[] = {"", "PS4MUSIC", "MUSIC", "PS4AUDIO", "AUDIO", "PS4VIDEO", "VIDEO", "audio/mpeg", NULL};

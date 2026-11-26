@@ -896,6 +896,22 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### The user the download service wants (0.91)
+
+The first run of the experiment had every registration refused with
+`0x80990004`. That shows only that the user was wrong: inside the shell
+`sceUserServiceGetInitialUser` gave -1 (`sceBgftServiceIntInit` itself
+answered `0x80990001`, the service being up already). The user is now the
+foreground user, else the initial one, else the first of
+`sceUserServiceGetLoginUserIdList`, else the app's: the client library's
+`scOpen` writes the app's initial user to `user.txt`. It is asked again
+while it is unknown. The same would have stopped `.pkg` items and
+self-update.
+
+The player also falls back to audio port type 0 when the type in
+`port.txt` won't open. The test app's LEFT/RIGHT change that file, and only
+type 0 works in the shell.
+
 ### An experiment: media through the download service (0.90)
 
 The service has task subtypes for photos, music and video besides packages.

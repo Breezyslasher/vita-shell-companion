@@ -1781,6 +1781,13 @@ static int portOpen(void) {
             g_portType = g_portType * 10 + (text[i] - '0');
     g_port = g_aoOpen(255 /* system */, g_portType, 0, GRAIN, RATE, 1 /* S16 stereo */);
     logLine("port type %d opened: 0x%08X", g_portType, (unsigned)g_port);
+    if (g_port < 0 && g_portType != 0) {
+        // Only type 0 has worked in the shell (types 1 and 2 failed:
+        // 0x80260005, 0x809B0001): back to it (0.91).
+        g_portType = 0;
+        g_port = g_aoOpen(255, 0, 0, GRAIN, RATE, 1);
+        logLine("port type 0 opened instead: 0x%08X", (unsigned)g_port);
+    }
     if (g_port < 0) {
         notify("Background music: no audio port (type %d, 0x%08X)", g_portType, (unsigned)g_port);
         g_port = -1;
