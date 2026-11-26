@@ -59,10 +59,29 @@ jobs:
         run: |
           command -v git >/dev/null || (apt-get update && apt-get install -y --no-install-recommends git ca-certificates)
           sh ps4/probe/get_create_fself.sh
+      # The toolchain GoldHEN builds its own plugins with (its
+      # GoldHEN_Plugins_Repository CI): illusion0001's fork of OpenOrbis,
+      # whose create-fself, link.x and stubs differ from the official ones.
+      # A PS4 loaded GoldHEN's no_share_watermark.prx and refused every
+      # module built with the official toolchain. The modules and the test
+      # app are built with it; its SHA-256 is logged.
+      - name: GoldHEN's OpenOrbis toolchain (illusion0001's fork)
+        run: |
+          command -v curl >/dev/null || (apt-get update && apt-get install -y --no-install-recommends curl ca-certificates)
+          mkdir -p "$RUNNER_TEMP/oo-goldhen"
+          curl -sSLf -o "$RUNNER_TEMP/oo-goldhen.tar.gz" \
+            https://github.com/illusion0001/OpenOrbis-PS4-Toolchain/releases/latest/download/toolchain.tar.gz
+          sha256sum "$RUNNER_TEMP/oo-goldhen.tar.gz"
+          tar -xzf "$RUNNER_TEMP/oo-goldhen.tar.gz" -C "$RUNNER_TEMP/oo-goldhen"
+          rm "$RUNNER_TEMP/oo-goldhen.tar.gz"
+          ls "$RUNNER_TEMP/oo-goldhen/OpenOrbis/PS4Toolchain/bin/linux"
       - name: Build
         run: sh ps4/probe/build.sh
-      - name: Build background music and the test app
-        run: sh ps4/app/build.sh
+      - name: Build background music and the test app (GoldHEN's toolchain)
+        run: |
+          export OO_PS4_TOOLCHAIN="$RUNNER_TEMP/oo-goldhen/OpenOrbis/PS4Toolchain"
+          export CREATE_FSELF="$OO_PS4_TOOLCHAIN/bin/linux/create-fself"
+          sh ps4/app/build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: ps4-probes-${{ github.run_number }}
