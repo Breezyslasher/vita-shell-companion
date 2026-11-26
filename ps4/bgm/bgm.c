@@ -625,6 +625,63 @@ static void libAdd(char* out, size_t cap, size_t* at, const char* f, ...) {
     if (*at >= cap) *at = cap - 1;
 }
 
+// The covers' names change with each library written (0.71): the shell
+// keeps a picture by its address, and showed trackart0.jpg's old picture
+// for the new library's first track. album<a>-<rev>.jpg, trackart<n>-<rev>.jpg;
+// the rev in status.txt (art_rev), for the music watch.
+static int g_artRev;
+
+static int hasText(const char* s, const char* part) {
+    const size_t n = strlen(part);
+    for (; *s; s++)
+        if (!memcmp(s, part, n)) return 1;
+    return 0;
+}
+
+// A cover's kind from its first bytes: 1 JPEG, 2 PNG, 0 other (0.71: a
+// PNG is written too, for the rows and tiles, which showed JPEGs only).
+static int artKind(const uint8_t* p, uint64_t n) {
+    if (!p || n < 8) return 0;
+    if (p[0] == 0xFF && p[1] == 0xD8) return 1;
+    if (p[0] == 0x89 && p[1] == 'P' && p[2] == 'N' && p[3] == 'G') return 2;
+    return 0;
+}
+static const char* artExt(int kind) {
+    return kind == 2 ? "png" : "jpg";
+}
+
+// The covers of other revs, deleted.
+static void artClean(void) {
+    const int fd = sysOpen(LIB_DIR, SC_O_RDONLY | SC_O_DIRECTORY, 0);
+    if (fd < 0) return;
+    static uint8_t buf[0x2000];
+    char keep[16];
+    fmt(keep, sizeof(keep), "-%d.", g_artRev);
+    int n;
+    while ((n = sysGetdents(fd, buf, sizeof(buf))) > 0) {
+        for (int at = 0; at < n;) {
+            const uint16_t reclen = le16(buf + at + 4);
+            const uint8_t namlen = buf[at + 7];
+            const char* name = (const char*)buf + at + 8;
+            if (!reclen) break;
+            char nm[128];
+            if (namlen < sizeof(nm)) {
+                memcpy(nm, name, namlen);
+                nm[namlen] = 0;
+                const int art = !memcmp(nm, "trackart", 8) ||
+                                (!memcmp(nm, "album", 5) && (hasText(nm, ".jpg") || hasText(nm, ".png")));
+                if (art && !hasText(nm, keep)) {
+                    char path[200];
+                    fmt(path, sizeof(path), LIB_DIR "/%s", nm);
+                    sysUnlink(path);
+                }
+            }
+            at += reclen;
+        }
+    }
+    sysClose(fd);
+}
+
 static void libArt(const char* name, const uint8_t* img, size_t n) {
     char path[160];
     fmt(path, sizeof(path), LIB_DIR "/%s&w=192&h=192", name);
@@ -687,29 +744,32 @@ static void libRead(int i) {
         g_nAlbums++;
     }
     g_lib[i].albumId = a < g_nAlbums ? a : -1;
-    // The cover, a JPEG only (the tile shows no other).
+    // The cover: a JPEG or a PNG; the album's a JPEG if one of its tracks
+    // has one (the tiles showed JPEGs in 0.58).
     const uint8_t* img = tag ? tag + g_meta.artOff : NULL;
-    if (a < g_nAlbums && !g_albums[a].art && img && g_meta.artLen > 4 &&
-        g_meta.artOff + g_meta.artLen <= got && img[0] == 0xFF && img[1] == 0xD8) {
+    const int kind = img && g_meta.artLen > 4 && g_meta.artOff + g_meta.artLen <= got
+                         ? artKind(img, g_meta.artLen) : 0;
+    if (a < g_nAlbums && kind && (!g_albums[a].art || (g_albums[a].art == 2 && kind == 1))) {
         char name[32];
-        fmt(name, sizeof(name), "album%d.jpg", a);
+        fmt(name, sizeof(name), "album%d-%d.%s", a, g_artRev, artExt(kind));
         libArt(name, img, (size_t)g_meta.artLen);
-        g_albums[a].art = 1;
+        g_albums[a].art = kind;
     }
     // The track's own cover, for its row in a track list (the music watch
-    // draws it there, 0.62): trackart<n>.jpg, a JPEG only.
-    char artPath[96];
-    fmt(artPath, sizeof(artPath), LIB_DIR "/trackart%d.jpg", i);
-    if (img && g_meta.artLen > 4 && g_meta.artOff + g_meta.artLen <= got && img[0] == 0xFF &&
-        img[1] == 0xD8) {
+    // draws it there, 0.62): trackart<n>-<rev>.jpg or .png.
+    if (kind) {
+        char artPath[96];
+        fmt(artPath, sizeof(artPath), LIB_DIR "/trackart%d-%d.%s", i, g_artRev, artExt(kind));
         const int afd = sysOpen(artPath, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
         if (afd >= 0) {
             sysWrite(afd, img, (size_t)g_meta.artLen);
             sysClose(afd);
         }
-    } else {
-        sysUnlink(artPath);
     }
+    logLine("library %d: \"%s\" by \"%s\", album \"%s\"; cover: %s (%lu bytes)", i, g_meta.title,
+            g_meta.artist, g_meta.album,
+            !g_meta.artLen ? "none" : kind == 1 ? "JPEG" : kind == 2 ? "PNG" : "another kind, not used",
+            g_meta.artLen);
     if (tag) sysUnmap(tag, (size + 0x3FFF) & ~(size_t)0x3FFF);
     memcpy(g_meta.title, keep[0], META_LEN);
     memcpy(g_meta.artist, keep[1], META_LEN);
@@ -792,7 +852,7 @@ static void viewList(size_t* at, const char* name, const char* id, int art, int 
     libAdd(out, LIB_CAP, at, "%s{\"name\":\"", first ? "" : ",");
     jsonPut(out, LIB_CAP, at, name);
     libAdd(out, LIB_CAP, at, "\",\"uri\":\"" LIB_URI "%s\",\"type\":\"playlist\",\"image_url\":\"", id);
-    if (art >= 0) libAdd(out, LIB_CAP, at, LIB_URL "album%d.jpg", art);
+    if (art >= 0) libAdd(out, LIB_CAP, at, LIB_URL "album%d-%d.%s", art, g_artRev, artExt(g_albums[art].art));
     libAdd(out, LIB_CAP, at, "\",\"total\":%d}", total);
 }
 
@@ -842,7 +902,9 @@ static void writeLiked(void) {
 static void writeLibrary(void) {
     sysMkdir(LIB_DIR, 0777);
     g_nAlbums = 0;
+    g_artRev = (int)((sysNowUs() / 1000u) % 1000000u);
     for (int i = 0; i < g_libCount; i++) libRead(i);
+    artClean();
     if (!g_libOut) g_libOut = (char*)sysMap(LIB_CAP);
     if (!g_libOut) return;
     for (int i = 0; i < g_libCount; i++) g_list[i] = i;
@@ -925,11 +987,11 @@ static void writeStatus(void) {
     fmt(text, sizeof(text),
         "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\ndur_ms=%lu\nfile=%s\nbeat_ms=%lu\n"
         "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\nvolume=%d\nrepeat=%d\nshuffle=%d\ncover=%s\n"
-        "queue_rev=%d\ntrack=%d\n",
+        "queue_rev=%d\ntrack=%d\nart_rev=%d\n",
         SC_BGM_PROTOCOL, stateName(g_state), g_index, g_count, (uint64_t)posMs, g_src.durMs,
         curPath(), (uint64_t)(sysNowUs() / 1000u), g_meta.title,
         g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen, (int)g_volume, g_repeat, g_shuffle, g_meta.cover,
-        g_queueRev, g_index < g_count ? g_q[g_index] : -1);
+        g_queueRev, g_index < g_count ? g_q[g_index] : -1, g_artRev);
     writeText(SC_BGM_STATUS, text);
     g_lastStatus = sysNowUs();
 }

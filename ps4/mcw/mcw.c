@@ -508,16 +508,20 @@ static void sendPlayer(const char* cmd) {
 
 // The player's queue_rev (status.txt), counted on once for each edit of
 // the queue: -1 if not known.
-static int queueRevNow(void) {
-    static char text[2048];
+static int statusInt(const char* key) {
+    char text[2048];
     const int fd = sysOpen(SC_BGM_STATUS, SC_O_RDONLY, 0);
     if (fd < 0) return -1;
     const int m = sysRead(fd, text, sizeof(text) - 1);
     sysClose(fd);
     text[m > 0 ? m : 0] = 0;
     char v[24];
-    statusField(text, "queue_rev", v, sizeof(v));
+    statusField(text, key, v, sizeof(v));
     return v[0] ? (int)toU64(v) : -1;
+}
+
+static int queueRevNow(void) {
+    return statusInt("queue_rev");
 }
 
 // Edits of the queue sent and not yet seen made (0.67): the Music section's
@@ -1234,7 +1238,7 @@ static struct {
 } g_row;
 static struct {
     uint32_t row, img;  // weak handles
-    int idx, shifted;
+    int idx, shifted, rev;
     float x[2];         // the labels' own X, before they were moved
 } g_rows[ROWS];
 static int g_rowSaid;
@@ -1338,6 +1342,7 @@ static struct {
     int moveOffset;             // its focus index less the track's place
     int startRow, lastRow;      // where the track was picked up, and is now (0.69)
     int cancelled;              // ○: put back
+    int moved;                  // moves sent in this move mode
     void *fKey, *fKeyEvent, *fHandled;           // KeyEventArgs
     void *fListPanel, *fPlayList, *fTrackIndex;  // TrackListPanelItem, TrackListPanel, TrackListMenuData
     void *listFocused, *menuData, *startQuery;   // TrackListPanel
@@ -1345,6 +1350,7 @@ static struct {
     void *focusIndex, *isMoving, *beginMove, *withTarget, *endOnBack, *decide;  // ListPanelBase
     void *moveTarget, *origTarget;               // its MoveTargetIndex, OrigMoveTargetIndex (0.68)
     void* endMove;                               // its EndItemMoveMode (0.69)
+    void* selected;                              // its isMoveTargetSelected (0.71)
 } g_qk;
 
 // The track's place in the queue, from its uri (spotify:track:sc<n>): -1 if none.
@@ -1394,8 +1400,15 @@ static void rowArt(Frame* f) {
     void* json = monoGet(data, g_row.fData);
     const int idx = type == 0 ? rowIndex(json) : -1;
     char path[128];
-    fmt(path, sizeof(path), EBGM_DIR "/trackart%d.jpg", idx);
-    const int has = idx >= 0 && sysExists(path);
+    // The cover's name changes with each library (0.71: the shell keeps
+    // pictures by their address).
+    const int rev = statusInt("art_rev");
+    fmt(path, sizeof(path), EBGM_DIR "/trackart%d-%d.jpg", idx, rev);
+    int has = idx >= 0 && sysExists(path);
+    if (idx >= 0 && !has) {  // a PNG (0.71)
+        fmt(path, sizeof(path), EBGM_DIR "/trackart%d-%d.png", idx, rev);
+        has = sysExists(path);
+    }
     if (e < 0 && !has) return;  // nothing to show, nothing shown
     if (e < 0) {
         if (free_ < 0) return;
@@ -1425,7 +1438,7 @@ static void rowArt(Frame* f) {
         return;
     }
     if (has) {
-        if (g_rows[e].idx != idx) {
+        if (g_rows[e].idx != idx || g_rows[e].rev != rev) {
             char url[160];
             fmt(url, sizeof(url), "file://%s", path);
             void* args[3] = {g_row.stringNew(g_row.domain, url), NULL, rowOptions()};
@@ -1433,6 +1446,7 @@ static void rowArt(Frame* f) {
             rowCall(g_row.loadAsync, img, args);
             g_row.ourLoad = 0;
             g_rows[e].idx = idx;
+            g_rows[e].rev = rev;
         }
         rowShow(img, 1);
         rowShift(row, e, !g_rows[e].shifted, ROW_SHIFT);
@@ -1598,7 +1612,11 @@ static void qkKey(Frame* f) {
     uint8_t yes = 1;
     if (qkBool(g_qk.isMoving, list)) {
         // □ puts the track down; △ does nothing meanwhile.
-        if (key == KEY_SQUARE) rowCall(g_qk.endMove, list, NULL);  // as X does
+        // □: puts the held track down (as X), else ends the mode (as ○).
+        if (key == KEY_SQUARE) {
+            const int held = g_qk.selected ? qkBool(g_qk.selected, list) : 0;
+            rowCall(held ? g_qk.decide : g_qk.endMove, list, NULL);
+        }
         g_mono.set(args, g_qk.fHandled, &yes);
         return;
     }
@@ -1623,6 +1641,7 @@ static void qkKey(Frame* f) {
             g_qk.moveOffset = at - place;
             g_qk.startRow = g_qk.lastRow = at;
             g_qk.cancelled = 0;
+            g_qk.moved = 0;
             say("queue: track %d (row %d) picked up", place, at);
         } else {
             fmt(cmd, sizeof(cmd), "remove=%d\n", place);
@@ -1649,8 +1668,17 @@ static int qkIndex(void* method, void* list) {
 static void qkMoved(Frame* f) {
     void* list = (void*)(uintptr_t)f->gpr[0];
     if (!g_qk.moving || g_row.target(g_qk.moving) != list) return;
-    if ((int)f->gpr[2] >= 0) g_qk.lastRow = (int)f->gpr[2];
-    say("queue: OnItemMoved(%d, %d): the track at row %d", (int)f->gpr[1], (int)f->gpr[2], g_qk.lastRow);
+    // A real move reads (row, row): the track dropped (X) at its new row,
+    // sent now (0.71). (-1, row) is not one: nothing was held.
+    const int fromRow = (int)f->gpr[1], toRow = (int)f->gpr[2];
+    const int from = fromRow - g_qk.moveOffset, to = toRow - g_qk.moveOffset;
+    say("queue: OnItemMoved(%d, %d): places %d to %d", fromRow, toRow, from, to);
+    if (fromRow >= 0 && toRow >= 0 && from >= 0 && from != to) {
+        char cmd[48];
+        fmt(cmd, sizeof(cmd), "move=%d:%d\n", from, to < 0 ? 0 : to);
+        sendEdit(cmd);
+        g_qk.moved++;
+    }
 }
 
 // ListPanelBase.DecideMoveItem(), before: called for each step of a move
@@ -1674,14 +1702,7 @@ static void qkMoveEnded(Frame* f) {
     if (!g_qk.moving || g_row.target(g_qk.moving) != list) return;
     if (g_row.freeHandle) g_row.freeHandle(g_qk.moving);
     g_qk.moving = 0;
-    const int from = g_qk.startRow - g_qk.moveOffset, to = g_qk.lastRow - g_qk.moveOffset;
-    say("queue: move mode ended: rows %d to %d, places %d to %d%s", g_qk.startRow, g_qk.lastRow, from,
-        to, g_qk.cancelled ? ", put back" : "");
-    if (!g_qk.cancelled && from >= 0 && to >= 0 && from != to) {
-        char cmd[48];
-        fmt(cmd, sizeof(cmd), "move=%d:%d\n", from, to);
-        sendEdit(cmd);
-    }
+    say("queue: move mode ended, %d move(s) sent", g_qk.moved);
     qkRequery(g_qk.panel ? g_row.target(g_qk.panel) : NULL);
 }
 
@@ -1712,6 +1733,7 @@ static void qkSetup(void* pui, void* app, FnMonoClass cls) {
         g_qk.moveTarget = m(lpb, "get_MoveTargetIndex", 0);
         g_qk.origTarget = m(lpb, "get_OrigMoveTargetIndex", 0);
         g_qk.endMove = m(lpb, "EndItemMoveMode", 0);
+        g_qk.selected = m(lpb, "get_isMoveTargetSelected", 0);
     }
     if (llp) g_qk.getList = m(llp, "get_ListPanel", 0);
     if (tlp) {

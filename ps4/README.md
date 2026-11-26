@@ -735,6 +735,24 @@ The player's new commands:
 the player's folder turns the buttons off (they need the row pictures'
 setup, so `mcw-norowart` turns them off too).
 
+### Covers by name, and PNGs (0.71)
+
+The shell keeps pictures by their address. When the library changed, 0.70
+showed `trackart0.jpg`'s old picture on the new first track. The player now
+names covers with a number that changes each time the library is written
+(`album<a>-<rev>.jpg`, `trackart<n>-<rev>.jpg`, `art_rev` in status.txt) and
+deletes the older ones. PNG covers are written too (`.png`), for rows and
+tiles. An album's tile uses a JPEG if any of its tracks has one. bgm.log
+lists each track's tags and cover kind (`library <n>: …; cover: JPEG|PNG|none`).
+
+A queue move is sent when the track is put down. `OnItemMoved(from, to)`
+with both rows real becomes `move=`; `(-1, row)` doesn't, because nothing
+was held. In the list's move mode, X picks a track up and X puts it down;
+more tracks can be moved, and ○ leaves the mode. Leaving calls
+`RollbackMoveTarget` even when nothing is held, so 0.69 wrongly took every
+move as put back. □ puts down the held track, or leaves the mode if none is
+held.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our
