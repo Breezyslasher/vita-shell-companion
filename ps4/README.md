@@ -753,6 +753,34 @@ more tracks can be moved, and ○ leaves the mode. Leaving calls
 move as put back. □ puts down the held track, or leaves the mode if none is
 held.
 
+### Streaming (0.72, an experiment)
+
+A track can be a URL. The player fetches it with the shell's own HTTP library
+(`libSceHttp`, through `libSceNet` and `libSceSsl`, loaded by name), into
+memory on a thread of its own (`ScBgmFetch`). It starts playing once the ID3
+tag and 192 KB of audio past it have come. If playback catches up with the
+download, it plays silence (`stream: buffering` in bgm.log) until 64 KB more
+has come. Nothing of the track is written to a file. The download's length
+comes from Content-Length; without one, the first 16 MB are taken. MP3 and
+16-bit WAV are played (WAV by its `RIFF` header).
+
+Covers stream too: a cover URL is handed to the shell, which fetches it
+itself. It goes in a tile's `image_url` (with a `?` added to a URL that has
+no query, since the shell appends `&w=192&h=192`), in a row's ImageBox (the
+URL in `ebgm/trackart<n>-<rev>.url`), and as the now-playing cover
+(`coverartUri`, without `file://`).
+
+A queue.txt line for a stream:
+
+```
+URL<tab>title<tab>artist<tab>album<tab>cover URL
+```
+
+Only the URL is needed. The test app adds `streams.txt`'s lines (in the
+player's folder) to the end of the queue it writes. Logs show URLs up to
+their `?`, so a token in the query isn't logged. HTTPS checks the server's
+certificate unless `https-noverify` is in the player's folder.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our

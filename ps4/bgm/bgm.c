@@ -47,7 +47,7 @@ static FnSetVolume g_aoVolume;
 #define RATE 48000
 #define GRAIN 1024  // frames a grain, ~21 ms
 #define MAX_TRACKS 512
-#define MAX_PATH 256
+#define MAX_PATH 768  // a path, or a URL (0.72), Plex's with its token
 #define MAX_FILE (96u << 20)
 
 enum { ST_STOPPED, ST_PLAYING, ST_PAUSED };
@@ -66,6 +66,14 @@ static int g_q[MAX_TRACKS];
 static int g_count;
 static int g_index;
 static int g_queueRev;  // counts the queue's changes, in status.txt (queue_rev)
+// A streamed track's tags as queue.txt gives them (0.72): URL, then title,
+// artist, album and a cover's URL, tab-separated; "" where not given.
+#define GIVEN_TEXT 160
+#define GIVEN_COVER 640
+static struct {
+    char title[GIVEN_TEXT], artist[GIVEN_TEXT], album[GIVEN_TEXT];
+    char cover[GIVEN_COVER];
+} g_given[MAX_TRACKS];
 static int g_state = ST_STOPPED;
 // The volume, 0 to 32768 (0 dB): the quick menu's, through the music watch
 // (volume=<n> as cmd).
@@ -95,15 +103,204 @@ static struct {
     mp3dec_t dec;
     int16_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
     int pcmFrames, pcmAt;
-    // WAV: where its samples end.
-    size_t wavEnd;
+    // WAV: where its samples end (wavFull: as its header says, of a stream
+    // still coming).
+    size_t wavEnd, wavFull;
     uint64_t framesRead;  // source frames, for the position
     uint64_t durMs;       // the track's length: an MP3's from its first frame's bit rate
     int kbps;             // that bit rate
+    int streamed;         // from a URL, still coming (g_dl): size grows (0.72)
+    int buffering;        // waiting for more of it
 } g_src;
 
+// ---- streaming (0.72): a track's URL fetched with the shell's own HTTP
+// library (libSceHttp, through libSceNet and libSceSsl), into memory, on a
+// thread of its own; it plays from what has come while the rest comes.
+// Nothing of it is written to a file. ----
+
+typedef int (*FnNetPool)(const char*, int, int);
+typedef int (*FnSslInit)(size_t);
+typedef int (*FnHttpInit)(int, int, size_t);
+typedef int (*FnHttpTmpl)(int, const char*, int, int);
+typedef int (*FnHttpConn)(int, const char*, int);
+typedef int (*FnHttpReq)(int, int32_t, const char*, uint64_t);
+typedef int (*FnHttpSend)(int, const void*, size_t);
+typedef int (*FnHttpStatus)(int, int*);
+typedef int (*FnHttpLength)(int, int*, uint64_t*);
+typedef int (*FnHttpRead)(int, void*, size_t);
+typedef int (*FnHttpId)(int);
+typedef int (*FnHttpTimeout)(int, uint32_t);
+typedef int (*FnHttpsOption)(int, uint32_t);
+static struct {
+    int tried, ok, ctx;
+    FnHttpTmpl tmpl;
+    FnHttpConn conn;
+    FnHttpReq req;
+    FnHttpSend send;
+    FnHttpStatus status;
+    FnHttpLength length;
+    FnHttpRead read;
+    FnHttpId delReq, delConn, delTmpl;
+    FnHttpTimeout connectTimeout, recvTimeout;
+    FnHttpsOption httpsOff;
+} g_http;
+
+// libSceHttp, once: 1 if it is there to use.
+static int httpSetup(void) {
+    if (g_http.tried) return g_http.ok;
+    g_http.tried = 1;
+    const int net = libLoad("libSceNet.sprx"), ssl = libLoad("libSceSsl.sprx"),
+              http = libLoad("libSceHttp.sprx");
+    FnNetPool pool = net ? (FnNetPool)libSym(net, "sceNetPoolCreate") : NULL;
+    FnSslInit sslInit = ssl ? (FnSslInit)libSym(ssl, "sceSslInit") : NULL;
+    FnHttpInit httpInit = http ? (FnHttpInit)libSym(http, "sceHttpInit") : NULL;
+#define HTTP_SYM(field, type, name) g_http.field = http ? (type)libSym(http, name) : NULL
+    HTTP_SYM(tmpl, FnHttpTmpl, "sceHttpCreateTemplate");
+    HTTP_SYM(conn, FnHttpConn, "sceHttpCreateConnectionWithURL");
+    HTTP_SYM(req, FnHttpReq, "sceHttpCreateRequestWithURL");
+    HTTP_SYM(send, FnHttpSend, "sceHttpSendRequest");
+    HTTP_SYM(status, FnHttpStatus, "sceHttpGetStatusCode");
+    HTTP_SYM(length, FnHttpLength, "sceHttpGetResponseContentLength");
+    HTTP_SYM(read, FnHttpRead, "sceHttpReadData");
+    HTTP_SYM(delReq, FnHttpId, "sceHttpDeleteRequest");
+    HTTP_SYM(delConn, FnHttpId, "sceHttpDeleteConnection");
+    HTTP_SYM(delTmpl, FnHttpId, "sceHttpDeleteTemplate");
+    HTTP_SYM(connectTimeout, FnHttpTimeout, "sceHttpSetConnectTimeOut");
+    HTTP_SYM(recvTimeout, FnHttpTimeout, "sceHttpSetRecvTimeOut");
+    HTTP_SYM(httpsOff, FnHttpsOption, "sceHttpsDisableOption");
+#undef HTTP_SYM
+    if (!pool || !sslInit || !httpInit || !g_http.tmpl || !g_http.conn || !g_http.req ||
+        !g_http.send || !g_http.status || !g_http.length || !g_http.read || !g_http.delReq ||
+        !g_http.delConn || !g_http.delTmpl) {
+        logLine("http: libSceNet %d, libSceSsl %d, libSceHttp %d: functions missing", net, ssl, http);
+        return 0;
+    }
+    const int memId = pool("ScBgmNet", 64 * 1024, 0);
+    const int sslId = sslInit(256 * 1024);
+    g_http.ctx = httpInit(memId, sslId, 256 * 1024);
+    logLine("http: net pool %d, ssl %d, http %d", memId, sslId, g_http.ctx);
+    g_http.ok = memId >= 0 && sslId >= 0 && g_http.ctx >= 0;
+    return g_http.ok;
+}
+
+static int isUrl(const char* s) {
+    return !memcmp(s, "http://", 7) || !memcmp(s, "https://", 8);
+}
+
+// The URL as the log shows it: up to its query, which may hold a token.
+static void urlShown(const char* url, char* out, size_t cap) {
+    size_t k = 0;
+    for (; url[k] && url[k] != '?' && k + 1 < cap; k++) out[k] = url[k];
+    out[k] = 0;
+    if (url[k] == '?' && k + 4 < cap) fmt(out + k, cap - k, "?...");
+}
+
+#define DL_FIRST (16u << 20)  // what is taken when the server gives no length
+static struct {
+    volatile int running, stop, ready, failed, done, orphan;
+    volatile size_t have;  // bytes in buf
+    uint64_t total;        // its length, 0 if not known
+    uint8_t* buf;
+    size_t cap;
+    int code;
+    char url[MAX_PATH];
+} g_dl;
+
+static void* dlThread(void* arg) {
+    (void)arg;
+    char shown[160];
+    urlShown(g_dl.url, shown, sizeof(shown));
+    const uint64_t t0 = sysNowUs();
+    int tmpl = -1, conn = -1, req = -1;
+    uint8_t* mine = NULL;
+    size_t mineCap = 0;
+    if (!httpSetup()) goto fail;
+    tmpl = g_http.tmpl(g_http.ctx, "ShellCompanion/" SC_BGM_VERSION, 2 /* HTTP/1.1 */, 1);
+    if (tmpl < 0) goto fail;
+    if (g_http.httpsOff && sysExists(SC_BGM_DIR "/https-noverify"))
+        g_http.httpsOff(tmpl, 0x01 | 0x04 | 0x08 | 0x10 | 0x20);  // a server's own certificate
+    conn = g_http.conn(tmpl, g_dl.url, 1);
+    if (conn < 0) goto fail;
+    req = g_http.req(conn, 0 /* GET */, g_dl.url, 0);
+    if (req < 0) goto fail;
+    if (g_http.connectTimeout) g_http.connectTimeout(req, 10u * 1000000u);
+    if (g_http.recvTimeout) g_http.recvTimeout(req, 15u * 1000000u);
+    int rc = g_http.send(req, NULL, 0);
+    if (rc < 0) {
+        logLine("stream %s: not sent: 0x%08X", shown, (unsigned)rc);
+        goto fail;
+    }
+    g_http.status(req, &g_dl.code);
+    int known = -1;
+    uint64_t len = 0;
+    g_http.length(req, &known, &len);
+    logLine("stream %s: HTTP %d, %s %lu, after %lu ms", shown, g_dl.code,
+            known == 0 ? "length" : "no length, up to", known == 0 ? len : (uint64_t)DL_FIRST,
+            (sysNowUs() - t0) / 1000u);
+    if (g_dl.code < 200 || g_dl.code > 299) goto fail;
+    g_dl.total = known == 0 ? len : 0;
+    g_dl.cap = known == 0 && len ? (size_t)len : DL_FIRST;
+    if (g_dl.cap > MAX_FILE) g_dl.cap = MAX_FILE;
+    g_dl.cap = (g_dl.cap + 0x3FFF) & ~(size_t)0x3FFF;
+    mine = (uint8_t*)sysMap(g_dl.cap);
+    mineCap = g_dl.cap;
+    g_dl.buf = mine;
+    if (!g_dl.buf) {
+        logLine("stream %s: no memory for %lu bytes", shown, (uint64_t)g_dl.cap);
+        goto fail;
+    }
+    g_dl.ready = 1;
+    while (!g_dl.stop && g_dl.have < mineCap) {
+        size_t want = mineCap - g_dl.have;
+        if (want > 64 * 1024) want = 64 * 1024;
+        const int n = g_http.read(req, mine + g_dl.have, want);
+        if (n < 0) {
+            logLine("stream %s: read failed at %lu: 0x%08X", shown, (uint64_t)g_dl.have, (unsigned)n);
+            break;
+        }
+        if (n == 0) break;
+        __atomic_store_n(&g_dl.have, g_dl.have + (size_t)n, __ATOMIC_RELEASE);
+    }
+    if (g_dl.have >= g_dl.cap && !g_dl.total) logLine("stream %s: cut at %lu bytes", shown, (uint64_t)g_dl.cap);
+    logLine("stream %s: %lu bytes in %lu ms%s", shown, (uint64_t)g_dl.have, (sysNowUs() - t0) / 1000u,
+            g_dl.stop ? ", stopped" : "");
+    g_dl.done = 1;
+    goto out;
+fail:
+    logLine("stream %s: failed (template %d, connection %d, request %d, HTTP %d)", shown, tmpl, conn,
+            req, g_dl.code);
+    g_dl.failed = 1;
+    g_dl.done = 1;
+out:
+    if (req >= 0) g_http.delReq(req);
+    if (conn >= 0) g_http.delConn(conn);
+    if (tmpl >= 0) g_http.delTmpl(tmpl);
+    // Given up on by the player meanwhile (srcClose): its memory is freed here.
+    if (g_dl.orphan && mine) sysUnmap(mine, mineCap);
+    __atomic_store_n(&g_dl.running, 0, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+// The download stopped: 1, or 0 if it is still running after ms (it frees
+// its memory itself then).
+static int dlStop(uint32_t ms) {
+    if (!g_dl.running) return 1;
+    g_dl.stop = 1;
+    for (uint32_t w = 0; w < ms && g_dl.running; w += 10) sysSleepMs(10);
+    if (!g_dl.running) return 1;
+    g_dl.orphan = 1;
+    logLine("stream: still reading after %u ms, left to end on its own", ms);
+    return 0;
+}
+
 static void srcClose(void) {
-    if (g_src.data) sysUnmap(g_src.data, g_src.mapped);
+    if (g_src.streamed) {
+        // Its memory is the download's.
+        if (dlStop(2000) && g_dl.buf) sysUnmap(g_dl.buf, g_dl.cap);
+        g_dl.buf = NULL;
+    } else if (g_src.data) {
+        sysUnmap(g_src.data, g_src.mapped);
+    }
     memset(&g_src, 0, sizeof(g_src));
 }
 
@@ -141,7 +338,8 @@ static int wavOpen(void) {
         } else if (!memcmp(d + at, "data", 4)) {
             if (!fmtOk) return 0;
             g_src.off = at + 8;
-            g_src.wavEnd = at + 8 + len > g_src.size ? g_src.size : at + 8 + len;
+            g_src.wavFull = at + 8 + (size_t)len;
+            g_src.wavEnd = g_src.wavFull > g_src.size ? g_src.size : g_src.wavFull;
             return 1;
         }
         at += 8 + len + (len & 1);
@@ -305,29 +503,93 @@ static void id3Read(const uint8_t* d, size_t n) {
     }
 }
 
+// A stream's start: its download begun, and its first bytes waited for
+// (an ID3 tag's whole, cover and all, and 192 KB of audio past it). 1, or 0.
+static int srcFetch(const char* url) {
+    char shown[160];
+    urlShown(url, shown, sizeof(shown));
+    for (uint32_t w = 0; g_dl.running && w < 15000; w += 50) sysSleepMs(50);  // one before it, ending
+    if (g_dl.running) {
+        logLine("stream %s: the one before still ends", shown);
+        return 0;
+    }
+    memset((void*)&g_dl, 0, sizeof(g_dl));
+    fmt(g_dl.url, sizeof(g_dl.url), "%s", url);
+    g_dl.running = 1;
+    if (threadStart(dlThread, NULL, "ScBgmFetch") < 0) {
+        g_dl.running = 0;
+        logLine("stream %s: no thread", shown);
+        return 0;
+    }
+    const uint64_t t0 = sysNowUs();
+    size_t want = 192 * 1024;
+    while (!g_dl.done) {
+        const size_t have = __atomic_load_n(&g_dl.have, __ATOMIC_ACQUIRE);
+        if (g_dl.ready && have >= 10 && !memcmp(g_dl.buf, "ID3", 3)) {
+            const uint8_t* h = g_dl.buf;
+            const size_t tag = 10 + ((size_t)(h[6] & 0x7F) << 21 | (size_t)(h[7] & 0x7F) << 14 |
+                                     (size_t)(h[8] & 0x7F) << 7 | (size_t)(h[9] & 0x7F));
+            if (tag + 192 * 1024 > want) want = tag + 192 * 1024;
+        }
+        if (g_dl.ready && have >= want) break;
+        if (sysNowUs() - t0 > 30000000u) {
+            logLine("stream %s: 30 s and only %lu bytes", shown, (uint64_t)have);
+            if (dlStop(2000) && g_dl.buf) sysUnmap(g_dl.buf, g_dl.cap);
+            g_dl.buf = NULL;
+            return 0;
+        }
+        sysSleepMs(20);
+    }
+    if (!g_dl.ready || (g_dl.failed && !g_dl.have)) {
+        if (dlStop(2000) && g_dl.buf) sysUnmap(g_dl.buf, g_dl.cap);
+        g_dl.buf = NULL;
+        return 0;
+    }
+    g_src.streamed = 1;
+    g_src.data = g_dl.buf;
+    g_src.mapped = g_dl.cap;
+    g_src.size = __atomic_load_n(&g_dl.have, __ATOMIC_ACQUIRE);
+    logLine("stream %s: playing from %lu bytes, after %lu ms", shown, (uint64_t)g_src.size,
+            (sysNowUs() - t0) / 1000u);
+    return 1;
+}
+
+// More of a stream: its size as far as it has come.
+static void srcGrow(void) {
+    if (!g_src.streamed) return;
+    g_src.size = __atomic_load_n(&g_dl.have, __ATOMIC_ACQUIRE);
+    if (g_src.type == SRC_WAV) g_src.wavEnd = g_src.wavFull > g_src.size ? g_src.size : g_src.wavFull;
+}
+
 static int srcOpen(const char* path) {
     srcClose();
+    char shownPath[160];
+    urlShown(path, shownPath, sizeof(shownPath));
+    size_t got = 0;
+    if (isUrl(path)) {
+        if (!srcFetch(path)) return 0;
+        got = g_src.size;
+    } else {
     const int fd = sysOpen(path, SC_O_RDONLY, 0);
     if (fd < 0) {
-        logLine("%s: not opened (%d)", path, fd);
+        logLine("%s: not opened (%d)", shownPath, fd);
         return 0;
     }
     const int64_t size = sysSeek(fd, 0, 2);
     sysSeek(fd, 0, 0);
     if (size <= 0 || (uint64_t)size > MAX_FILE) {
-        logLine("%s: its size, %ld, is not one we take", path, (long)size);
+        logLine("%s: its size, %ld, is not one we take", shownPath, (long)size);
         sysClose(fd);
         return 0;
     }
     g_src.mapped = ((size_t)size + 0x3FFF) & ~(size_t)0x3FFF;
     g_src.data = (uint8_t*)sysMap(g_src.mapped);
     if (!g_src.data) {
-        logLine("%s: no memory for %ld bytes", path, (long)size);
+        logLine("%s: no memory for %ld bytes", shownPath, (long)size);
         g_src.mapped = 0;
         sysClose(fd);
         return 0;
     }
-    size_t got = 0;
     while (got < (size_t)size) {
         const int n = sysRead(fd, g_src.data + got, (size_t)size - got);
         if (n <= 0) break;
@@ -335,17 +597,19 @@ static int srcOpen(const char* path) {
     }
     sysClose(fd);
     g_src.size = got;
-    if (endsWith(path, ".wav")) {
+    }
+    // WAV by its RIFF header (a URL may not end in .wav), else MP3.
+    if (endsWith(path, ".wav") || (g_src.size >= 12 && !memcmp(g_src.data, "RIFF", 4))) {
         if (g_meta.cover[0]) sysUnlink(g_meta.cover);
         memset(&g_meta, 0, sizeof(g_meta));
         g_src.type = SRC_WAV;
         if (!wavOpen()) {
-            logLine("%s: not a 16-bit PCM WAV", path);
+            logLine("%s: not a 16-bit PCM WAV", shownPath);
             srcClose();
             return 0;
         }
         g_src.durMs = g_src.hz && g_src.channels
-                          ? (uint64_t)(g_src.wavEnd - g_src.off) / (uint64_t)(g_src.channels * 2) *
+                          ? (uint64_t)(g_src.wavFull - g_src.off) / (uint64_t)(g_src.channels * 2) *
                                 1000u / (uint64_t)g_src.hz
                           : 0;
     } else {
@@ -366,19 +630,20 @@ static int srcOpen(const char* path) {
         g_src.kbps = 0;
         const size_t audioAt = g_src.off;
         if (!mp3Decode()) {
-            logLine("%s: no MP3 frames in it", path);
+            logLine("%s: no MP3 frames in it", shownPath);
             srcClose();
             return 0;
         }
         // kbit/s is bits a millisecond.
-        g_src.durMs = g_src.kbps ? (uint64_t)(g_src.size - audioAt) * 8u / (uint64_t)g_src.kbps : 0;
+        const uint64_t whole = g_src.streamed ? g_dl.total : g_src.size;
+        g_src.durMs = g_src.kbps && whole > audioAt ? (whole - audioAt) * 8u / (uint64_t)g_src.kbps : 0;
     }
     if (g_src.hz < 8000 || g_src.hz > 192000) {
-        logLine("%s: a rate of %d Hz", path, g_src.hz);
+        logLine("%s: a rate of %d Hz", shownPath, g_src.hz);
         srcClose();
         return 0;
     }
-    logLine("%s: %u bytes, %d Hz, %d channel(s)", path, (unsigned)got, g_src.hz, g_src.channels);
+    logLine("%s: %u bytes, %d Hz, %d channel(s)", shownPath, (unsigned)got, g_src.hz, g_src.channels);
     return 1;
 }
 
@@ -476,9 +741,28 @@ static int cmpName(const char* a, const char* b) {
 }
 
 static void addTrack(const char* path, size_t len) {
-    if (g_libCount >= MAX_TRACKS || !len || len >= MAX_PATH) return;
-    memcpy(g_tracks[g_libCount], path, len);
-    g_tracks[g_libCount][len] = 0;
+    if (g_libCount >= MAX_TRACKS || !len) return;
+    // URL<tab>title<tab>artist<tab>album<tab>cover URL (0.72)
+    size_t end = 0;
+    while (end < len && path[end] != '\t') end++;
+    if (end >= MAX_PATH) return;
+    memcpy(g_tracks[g_libCount], path, end);
+    g_tracks[g_libCount][end] = 0;
+    char* fields[4] = {g_given[g_libCount].title, g_given[g_libCount].artist,
+                       g_given[g_libCount].album, g_given[g_libCount].cover};
+    const size_t caps[4] = {GIVEN_TEXT, GIVEN_TEXT, GIVEN_TEXT, GIVEN_COVER};
+    size_t at = end;
+    for (int f = 0; f < 4; f++) {
+        fields[f][0] = 0;
+        if (at >= len) continue;
+        at++;  // the tab
+        size_t k = 0;
+        while (at < len && path[at] != '\t') {
+            if (k + 1 < caps[f]) fields[f][k++] = path[at];
+            at++;
+        }
+        fields[f][k] = 0;
+    }
     g_libCount++;
 }
 
@@ -539,7 +823,7 @@ static void loadQueue(void) {
             if (len > 7 && !memcmp(line, "#start ", 7)) {
                 for (int i = 7; i < len && line[i] >= '0' && line[i] <= '9'; i++)
                     start = start * 10 + (line[i] - '0');
-            } else if (len > 0 && line[0] == '/') {
+            } else if (len > 0 && (line[0] == '/' || isUrl(line))) {
                 addTrack(line, (size_t)len);
             }
             at = end + 1;
@@ -591,7 +875,8 @@ static struct {
 } g_lib[MAX_TRACKS];
 static struct {
     int tracks;
-    int art;  // its cover written
+    int art;  // its cover written: 1 JPEG, 2 PNG
+    int url;  // else a track whose cover URL is its (0.72), or -1
 } g_albums[MAX_ALBUMS];
 static int g_nAlbums;
 
@@ -668,7 +953,7 @@ static void artClean(void) {
             if (namlen < sizeof(nm)) {
                 memcpy(nm, name, namlen);
                 nm[namlen] = 0;
-                const int art = !memcmp(nm, "trackart", 8) ||
+                const int art = !memcmp(nm, "trackart", 8) ||  // .jpg, .png, .url
                                 (!memcmp(nm, "album", 5) && (hasText(nm, ".jpg") || hasText(nm, ".png")));
                 if (art && !hasText(nm, keep)) {
                     char path[200];
@@ -696,6 +981,38 @@ static void libRead(int i) {
     static uint8_t head[10];
     const char* path = g_tracks[i];
     g_lib[i].title[0] = g_lib[i].artist[0] = g_lib[i].album[0] = 0;
+    if (isUrl(path)) {
+        // Streamed (0.72): its tags as queue.txt gives them, its cover by
+        // its URL (trackart<n>-<rev>.url, for the music watch's rows).
+        const char* name = path;
+        for (const char* q = path; *q && *q != '?'; q++)
+            if (*q == '/') name = q + 1;
+        char base[GIVEN_TEXT];
+        size_t k = 0;
+        for (; name[k] && name[k] != '?' && k + 1 < sizeof(base); k++) base[k] = name[k];
+        base[k] = 0;
+        fmt(g_lib[i].title, LIB_TEXT, "%s", g_given[i].title[0] ? g_given[i].title : base);
+        fmt(g_lib[i].artist, LIB_TEXT, "%s", g_given[i].artist[0] ? g_given[i].artist : "Unknown artist");
+        fmt(g_lib[i].album, LIB_TEXT, "%s", g_given[i].album[0] ? g_given[i].album : "Streamed");
+        int a = 0;
+        while (a < g_nAlbums && !libSame(g_lib[g_albums[a].tracks].album, g_lib[i].album)) a++;
+        if (a == g_nAlbums && g_nAlbums < MAX_ALBUMS) {
+            g_albums[a].tracks = i;
+            g_albums[a].art = 0;
+            g_albums[a].url = -1;
+            g_nAlbums++;
+        }
+        g_lib[i].albumId = a < g_nAlbums ? a : -1;
+        if (g_given[i].cover[0]) {
+            if (a < g_nAlbums && !g_albums[a].art && g_albums[a].url < 0) g_albums[a].url = i;
+            char urlPath[96];
+            fmt(urlPath, sizeof(urlPath), LIB_DIR "/trackart%d-%d.url", i, g_artRev);
+            writeText(urlPath, g_given[i].cover);
+        }
+        logLine("library %d: streamed, \"%s\" by \"%s\", album \"%s\"; cover: %s", i, g_lib[i].title,
+                g_lib[i].artist, g_lib[i].album, g_given[i].cover[0] ? "a URL" : "none");
+        return;
+    }
     const int fd = sysOpen(path, SC_O_RDONLY, 0);
     size_t size = 0;
     if (fd >= 0) {
@@ -741,6 +1058,7 @@ static void libRead(int i) {
     if (a == g_nAlbums && g_nAlbums < MAX_ALBUMS) {
         g_albums[a].tracks = i;  // its first track, for its name
         g_albums[a].art = 0;
+        g_albums[a].url = -1;
         g_nAlbums++;
     }
     g_lib[i].albumId = a < g_nAlbums ? a : -1;
@@ -842,7 +1160,7 @@ static int g_list[MAX_TRACKS];  // a list's numbers, made here (the player's thr
 static int listArt(const int* list, int n) {
     for (int k = 0; k < n; k++) {
         const int a = g_lib[list[k]].albumId;
-        if (a >= 0 && a < g_nAlbums && g_albums[a].art) return a;
+        if (a >= 0 && a < g_nAlbums && (g_albums[a].art || g_albums[a].url >= 0)) return a;
     }
     return -1;
 }
@@ -852,7 +1170,14 @@ static void viewList(size_t* at, const char* name, const char* id, int art, int 
     libAdd(out, LIB_CAP, at, "%s{\"name\":\"", first ? "" : ",");
     jsonPut(out, LIB_CAP, at, name);
     libAdd(out, LIB_CAP, at, "\",\"uri\":\"" LIB_URI "%s\",\"type\":\"playlist\",\"image_url\":\"", id);
-    if (art >= 0) libAdd(out, LIB_CAP, at, LIB_URL "album%d-%d.%s", art, g_artRev, artExt(g_albums[art].art));
+    if (art >= 0 && g_albums[art].art)
+        libAdd(out, LIB_CAP, at, LIB_URL "album%d-%d.%s", art, g_artRev, artExt(g_albums[art].art));
+    else if (art >= 0 && g_albums[art].url >= 0) {  // a cover by its URL, the shell fetching it (0.72)
+        const char* url = g_given[g_albums[art].url].cover;
+        jsonPut(out, LIB_CAP, at, url);
+        // The shell adds "&w=192&h=192": a URL with no query is given one.
+        if (!hasText(url, "?")) libAdd(out, LIB_CAP, at, "?");
+    }
     libAdd(out, LIB_CAP, at, "\",\"total\":%d}", total);
 }
 
@@ -874,7 +1199,8 @@ static void writeViews(void) {
         for (int a = 0; a < g_nAlbums; a++) {
             char id[16];
             fmt(id, sizeof(id), "album%d", a);
-            viewList(&at, g_lib[g_albums[a].tracks].album, id, g_albums[a].art ? a : -1,
+            viewList(&at, g_lib[g_albums[a].tracks].album, id,
+                     g_albums[a].art || g_albums[a].url >= 0 ? a : -1,
                      albumList(a, g_list), a == 0);
         }
         libAdd(g_libOut, LIB_CAP, &at, "]}");
@@ -982,7 +1308,7 @@ static void queueInsert(int at, int lib) {
 static uint64_t g_lastStatus;
 
 static void writeStatus(void) {
-    static char text[2048];
+    static char text[4096];
     const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : 0;
     fmt(text, sizeof(text),
         "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\ndur_ms=%lu\nfile=%s\nbeat_ms=%lu\n"
@@ -990,7 +1316,8 @@ static void writeStatus(void) {
         "queue_rev=%d\ntrack=%d\nart_rev=%d\n",
         SC_BGM_PROTOCOL, stateName(g_state), g_index, g_count, (uint64_t)posMs, g_src.durMs,
         curPath(), (uint64_t)(sysNowUs() / 1000u), g_meta.title,
-        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen, (int)g_volume, g_repeat, g_shuffle, g_meta.cover,
+        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen, (int)g_volume, g_repeat, g_shuffle,
+        g_index < g_count && g_given[g_q[g_index]].cover[0] ? g_given[g_q[g_index]].cover : g_meta.cover,
         g_queueRev, g_index < g_count ? g_q[g_index] : -1, g_artRev);
     writeText(SC_BGM_STATUS, text);
     g_lastStatus = sysNowUs();
@@ -1038,7 +1365,14 @@ static int openTrack(void) {
     for (; g_index < g_count; g_index++) {
         if (srcOpen(curPath())) {
             rsStart();
-            notify("Now playing: %s", baseName(curPath()));
+            const int lib = g_q[g_index];
+            if (isUrl(curPath())) {
+                // Its tags from the queue where the stream has none (0.72).
+                if (!g_meta.title[0]) fmt(g_meta.title, META_LEN, "%s", g_lib[lib].title);
+                if (!g_meta.artist[0]) fmt(g_meta.artist, META_LEN, "%s", g_lib[lib].artist);
+                if (!g_meta.album[0]) fmt(g_meta.album, META_LEN, "%s", g_lib[lib].album);
+            }
+            notify("Now playing: %s", g_lib[lib].title[0] ? g_lib[lib].title : baseName(curPath()));
             return 1;
         }
     }
@@ -1231,6 +1565,22 @@ static void* player(void* arg) {
         if (!portOpen()) {
             stop("no port");
             continue;
+        }
+        // A stream: more of it, or silence while it comes (0.72).
+        if (g_src.streamed) {
+            srcGrow();
+            const int starving = !g_dl.done && g_src.size < g_src.off + 64 * 1024;
+            if (starving != g_src.buffering) {
+                g_src.buffering = starving;
+                logLine("stream: %s at %lu of %lu bytes", starving ? "buffering" : "playing again",
+                        (uint64_t)g_src.off, (uint64_t)g_src.size);
+                writeStatus();
+            }
+            if (starving) {
+                memset(g_out, 0, sizeof(g_out));
+                g_aoOutput(g_port, g_out);
+                continue;
+            }
         }
         const int frames = rsFill(g_out);
         if (frames > 0) g_aoOutput(g_port, g_out);

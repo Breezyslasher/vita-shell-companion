@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.71"
+#define APP_VERSION "0.72"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -314,9 +314,16 @@ static int useYourSong(void) {
         say("Could not copy %s into music/", from);
         return 0;
     }
-    // The queue: it first, then every other track in music/ by name, the
-    // test tone last (0.70: 0.69 and before queued only it and the tone).
-    static char queue[64 * 1024];
+    say("%s: %d KB copied into music/", from, kb);
+    return 1;
+}
+
+// The queue, queue.txt: yoursong.mp3 first, then every other track in
+// music/ by name, the test tone, then streams.txt's lines (0.72: URLs, each
+// URL<tab>title<tab>artist<tab>album<tab>cover URL, the last four optional).
+#define STREAMS SC_BGM_DIR "/streams.txt"
+static void writeQueue(void) {
+    static char queue[256 * 1024];
     static char names[256][128];
     int n = 0;
     DIR* d = opendir(SC_BGM_MUSIC);
@@ -330,15 +337,28 @@ static int useYourSong(void) {
     }
     if (d) closedir(d);
     qsort(names, (size_t)n, sizeof(names[0]), (int (*)(const void*, const void*))strcasecmp);
-    size_t at = (size_t)snprintf(queue, sizeof(queue), "%s\n", dest);
+    size_t at = 0;
+    if (access(SC_BGM_MUSIC "/" YOUR_SONG, R_OK) == 0)
+        at += (size_t)snprintf(queue + at, sizeof(queue) - at, SC_BGM_MUSIC "/" YOUR_SONG "\n");
     for (int i = 0; i < n && at + 200 < sizeof(queue); i++)
         at += (size_t)snprintf(queue + at, sizeof(queue) - at, SC_BGM_MUSIC "/%s\n", names[i]);
     if (access(SC_BGM_MUSIC "/test-tone.wav", R_OK) == 0)
         at += (size_t)snprintf(queue + at, sizeof(queue) - at, SC_BGM_MUSIC "/test-tone.wav\n");
+    int streams = 0;
+    FILE* f = fopen(STREAMS, "r");
+    static char line[4096];
+    while (f && fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = 0;
+        if (strncmp(line, "http://", 7) && strncmp(line, "https://", 8)) continue;
+        if (at + len + 2 >= sizeof(queue)) break;
+        at += (size_t)snprintf(queue + at, sizeof(queue) - at, "%s\n", line);
+        streams++;
+    }
+    if (f) fclose(f);
     writeFile(SC_BGM_QUEUE, queue, at);
     chmod(SC_BGM_QUEUE, 0666);
-    say("%s: %d KB copied into music/, queued first; %d other track(s) after it", from, kb, n);
-    return 1;
+    say("queue.txt: %d track(s) from music/, %d stream(s) from streams.txt", n, streams);
 }
 
 static int countMusic(void) {
@@ -1110,10 +1130,11 @@ int main(void) {
     if (readFile(SC_BGM_PORT, portText, sizeof(portText)) > 0) g_portType = atoi(portText);
 
     const int yourSong = useYourSong();
-    if (!yourSong && !countMusic() && access(SC_BGM_QUEUE, F_OK) != 0) {
+    if (!yourSong && !countMusic() && access(STREAMS, R_OK) != 0) {
         const int rc = writeTestTone();
         say("No tracks yet: test-tone.wav written (%d)", rc);
     }
+    writeQueue();
 
     if (!videoInit()) {
         notify("BGM test: the screen would not start");

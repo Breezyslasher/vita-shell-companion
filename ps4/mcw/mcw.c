@@ -334,7 +334,7 @@ static struct {
     char title[16];
     // The track, under a lock: the watch's thread writes, the shell's read.
     volatile int lock;
-    char file[256], name[300], artist[300], album[300], cover[160];
+    char file[800], name[300], artist[300], album[300], cover[1048];  // file, cover: URLs too (0.72)
     uint64_t artOff, artLen;
 } g_fake;
 
@@ -371,8 +371,8 @@ static void owe(int type) {
 }
 
 static void fakeRefresh(void) {
-    static char text[2048];
-    char v[320];
+    static char text[4096];
+    char v[800];
     int on = 0;
     // On unless mcw-fake.txt says off; its first word, else SCMP00001, the
     // title (0.35 and before: off unless the file was there).
@@ -431,7 +431,7 @@ static void fakeRefresh(void) {
             if (repeat != g_fake.repeat || shuffle != g_fake.shuffle) owe(EV_PLAY_STATUS);
             g_fake.repeat = repeat;
             g_fake.shuffle = shuffle;
-            char cover[160];
+            static char cover[1048];
             statusField(text, "cover", cover, sizeof(cover));
             statusField(text, "file", v, sizeof(v));
             // A new track, or the same one opened again (a new cover file).
@@ -509,7 +509,7 @@ static void sendPlayer(const char* cmd) {
 // The player's queue_rev (status.txt), counted on once for each edit of
 // the queue: -1 if not known.
 static int statusInt(const char* key) {
-    char text[2048];
+    char text[4096];
     const int fd = sysOpen(SC_BGM_STATUS, SC_O_RDONLY, 0);
     if (fd < 0) return -1;
     const int m = sysRead(fd, text, sizeof(text) - 1);
@@ -699,7 +699,7 @@ static int ebgmLibrary(const char* sub, int64_t id) {
     const int save = !memcmp(act, "save/", 5);
     const int del = !memcmp(act, "delete/", 7);
     if (!contains_ && !save && !del) return 0;
-    char file[256];
+    char file[800];
     lock(&g_fake.lock);
     fmt(file, sizeof(file), "%s", g_fake.file);
     unlock(&g_fake.lock);
@@ -918,9 +918,9 @@ static void fakeApply(Frame* f) {
         uint8_t* p = outBuf(f, 1, TI_SIZE);
         if (!p) return;
         memset(p, 0, TI_SIZE);
-        char uri[300];
+        char uri[1048];
         lock(&g_fake.lock);
-        fmt(uri, sizeof(uri), "file://%s", g_fake.file);
+        fmt(uri, sizeof(uri), g_fake.file[0] == '/' ? "file://%s" : "%s", g_fake.file);
         putStr(p, TI_SRC, 1048, uri);
         putStr(p, TI_TRACK, 341, g_fake.name);
         putStr(p, TI_ALBUM, 341, g_fake.album);
@@ -928,11 +928,13 @@ static void fakeApply(Frame* f) {
         if (g_fake.cover[0]) {
             // The cover as a file of its own (our player writes it): the
             // Music section's panel loads a picture by its address alone.
-            char cov[200];
-            fmt(cov, sizeof(cov), "file://%s", g_fake.cover);
+            char cov[1048];
+            const int web = !memcmp(g_fake.cover, "http://", 7) || !memcmp(g_fake.cover, "https://", 8);
+            // A streamed track's cover by its URL, the shell fetching it (0.72).
+            fmt(cov, sizeof(cov), web ? "%s" : "file://%s", g_fake.cover);
             putStr(p, TI_COVER, 1048, cov);
             put64At(p, TI_COVER_OFF, 0);
-            put64At(p, TI_COVER_OFF + 8, g_fake.artLen);
+            put64At(p, TI_COVER_OFF + 8, web ? 0 : g_fake.artLen);
         } else if (g_fake.artLen) {
             putStr(p, TI_COVER, 1048, uri);
             put64At(p, TI_COVER_OFF, g_fake.artOff);
@@ -1409,6 +1411,23 @@ static void rowArt(Frame* f) {
         fmt(path, sizeof(path), EBGM_DIR "/trackart%d-%d.png", idx, rev);
         has = sysExists(path);
     }
+    // A streamed track's cover: its URL, in trackart<n>-<rev>.url (0.72),
+    // the shell fetching it.
+    static char webCover[1048];
+    webCover[0] = 0;
+    if (idx >= 0 && !has) {
+        char urlPath[128];
+        fmt(urlPath, sizeof(urlPath), EBGM_DIR "/trackart%d-%d.url", idx, rev);
+        const int fd = sysOpen(urlPath, SC_O_RDONLY, 0);
+        if (fd >= 0) {
+            const int n = sysRead(fd, webCover, sizeof(webCover) - 1);
+            sysClose(fd);
+            webCover[n > 0 ? n : 0] = 0;
+            for (int k = 0; webCover[k]; k++)
+                if (webCover[k] == '\n' || webCover[k] == '\r') webCover[k] = 0;
+            has = webCover[0] != 0;
+        }
+    }
     if (e < 0 && !has) return;  // nothing to show, nothing shown
     if (e < 0) {
         if (free_ < 0) return;
@@ -1439,8 +1458,9 @@ static void rowArt(Frame* f) {
     }
     if (has) {
         if (g_rows[e].idx != idx || g_rows[e].rev != rev) {
-            char url[160];
-            fmt(url, sizeof(url), "file://%s", path);
+            static char url[1100];
+            if (webCover[0]) fmt(url, sizeof(url), "%s", webCover);
+            else fmt(url, sizeof(url), "file://%s", path);
             void* args[3] = {g_row.stringNew(g_row.domain, url), NULL, rowOptions()};
             g_row.ourLoad = 1;
             rowCall(g_row.loadAsync, img, args);
