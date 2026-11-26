@@ -188,7 +188,9 @@ void dlListHook(Frame* f) {
     // writes tell it, so it asks for its sections again now, not when it
     // next happens to (1.19: 1.15's re-read 48 s after). Here, on the list's
     // own thread, a thread Mono knows.
-    if (__atomic_exchange_n(&g_dll.wantPost, 0, __ATOMIC_ACQ_REL)) mcwDbNotifyPost();
+    // (1.23: none of DbNotify's four ways made the list ask again, 1.21's
+    // log; not called any more.)
+    __atomic_store_n(&g_dll.wantPost, 0, __ATOMIC_RELEASE);
     if (!pr || hookReadable(pr, 0x38) != 0x38 || !(hookProt(pr) & 2)) return;
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
         if (g_dll.e[k].task != task || task <= 0) continue;
@@ -641,6 +643,31 @@ static void dllSave(void) {
 }
 
 // One item's placeholder: registered, paused, its task (or <= 0).
+// A URL's size by HEAD (Content-Length), with the list's headers, 0 if not
+// known (1.23).
+static uint64_t dllHeadSize(const char* url, const char* extra) {
+    uint64_t size = 0;
+    if (!httpSetup()) return 0;
+    const int tmpl = g_http.tmpl(g_http.ctx, "ShellCompanion/" SC_BGM_VERSION, 2, 1);
+    const int conn = tmpl >= 0 ? g_http.conn(tmpl, url, 1) : -1;
+    const int req = conn >= 0 ? g_http.req(conn, 2 /* HEAD */, url, 0) : -1;
+    int code = 0, known = -1;
+    if (req >= 0) {
+        if (g_http.connectTimeout) g_http.connectTimeout(req, 10u * 1000000u);
+        if (g_http.recvTimeout) g_http.recvTimeout(req, 10u * 1000000u);
+        dlHeaders(req, g_dls.headers);
+        dlHeaders(req, extra);
+        if (g_http.send(req, NULL, 0) >= 0) {
+            g_http.status(req, &code);
+            g_http.length(req, &known, &size);
+        }
+        g_http.delReq(req);
+    }
+    if (conn >= 0) g_http.delConn(conn);
+    if (tmpl >= 0) g_http.delTmpl(tmpl);
+    return code >= 200 && code < 300 && known == 0 ? size : 0;
+}
+
 static int32_t dllRegister(int i) {
     static uint32_t serial;
     __typeof__(g_dls.item[0])* it = &g_dls.item[i];
@@ -668,6 +695,14 @@ static int32_t dllRegister(int i) {
     p.option = 0x10000;
     p.packageType = "";
     p.packageSubType = "";
+    // Its size, as a package's is registered (1.23): the list showed ours as
+    // "Calculating..." throughout, though answered bytes and time left, and
+    // its states include Downloading_DataSizeUnknown. A url item's size by
+    // HEAD when the list didn't give it.
+    if (!it->size && !memcmp(it->kind, "url", 4)) {
+        it->size = dllHeadSize(it->arg[0], it->arg[1]);
+        logLine("dllist: item %d: size by HEAD: %lu", i, (unsigned long)it->size);
+    }
     p.packageSize = it->size;
     int32_t task = -1;
     const int rc = g_bgft.reg(&p, &task);

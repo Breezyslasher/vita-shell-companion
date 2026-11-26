@@ -258,6 +258,13 @@ service's are, not the managed wrappers 0.85 hooked.
   At 85.3 s ours were put in section 9 but with the going param (1.20's
   "going till moved" applied there too): 1.22 answers finished in section
   9. The list re-read on its own (18.4, 71.1, 85.3 s), as with Post.
+- **1.22's logs:** Post, GlobalPost, Send and GlobalSend each went through
+  (21.9-65.4 s); the list re-read at 44.4 and 82.4 s only, after none of
+  them. DbNotify from here doesn't reach it: no longer called (1.23). The
+  list read "Calculating..." though answered bytes and time left (5 s,
+  1 s); one of its states is Downloading_DataSizeUnknown, and ours were
+  registered with size 0 (packages with their header's size). 1.23 gets a
+  url item's size by HEAD before registering it (logged).
 
 ### One module, and the cleanup (0.95)
 
