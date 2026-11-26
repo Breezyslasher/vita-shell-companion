@@ -96,7 +96,8 @@ static const char* const g_defaultNames[] = {
     "sceNpIsPlusMember", "sceNpWebApiCreateContext", "sceNpWebApiCreateContextA",
     "sceNpWebApiCreateRequest", "sceNpWebApiAddHttpRequestHeader", "sceNpWebApiSendRequest",
     "sceNpWebApiSendRequest2", "sceNpWebApiGetHttpStatusCode", "sceNpWebApiReadData",
-    "sceNpWebApiDeleteRequest",
+    "sceNpWebApiDeleteRequest", "sceNpWebApiGetHttpResponseHeaderValueLength",
+    "sceNpWebApiGetHttpResponseHeaderValue",
 };
 #define N_DEFAULT (int)(sizeof(g_defaultNames) / sizeof(g_defaultNames[0]))
 
@@ -504,6 +505,156 @@ static uint8_t* outBuf(const Frame* f, int arg, size_t size) {
     return p;
 }
 
+// ── The Music section's web requests (ebgm/, an experiment) ──────────────────
+//
+// Each time the Music section opens, the shell asks PSN's web API, group
+// "music", for /v1/ebgm/me/partner/profile?partner=spotify; signed out, the
+// send fails at once (0x80550003) and the section shows "Sign in to
+// PlayStation Network" (0.38's log). Here, a request of group "music" whose
+// answer is a file in ebgm/ is answered with it: the send succeeds, the status
+// is 200, ReadData gives the file. Any other request, of any other group or
+// with no file, is left as it was, its path logged. Nothing is sent anywhere.
+//
+// The file: the path after /v1/ebgm/, each character not a letter or digit
+// made '_', ".json" after it; with its query first, then without
+// (me_partner_profile_partner_spotify.json, then me_partner_profile.json).
+
+static int contains(const char* s, const char* part);
+
+#define EBGM_DIR SC_BGM_DIR "/ebgm"
+#define EBGM_SLOTS 16
+#define EBGM_MAX (64u * 1024u)
+
+typedef struct {
+    int64_t id;     // the request's, 0 for a free slot
+    uint32_t len, off;
+    char* body;     // EBGM_MAX bytes of g_ebgmPool
+} EbgmReq;
+static EbgmReq g_ebgm[EBGM_SLOTS];
+static char* g_ebgmPool;
+static volatile int g_ebgmLock;
+
+static void ebgmName(const char* path, int withQuery, char* out, size_t cap) {
+    size_t o = (size_t)fmt(out, cap, EBGM_DIR "/");
+    for (const char* p = path; *p && o + 6 < cap; p++) {
+        if (*p == '?' && !withQuery) break;
+        const char c = *p;
+        out[o++] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) ? c : '_';
+    }
+    fmt(out + o, cap - o, ".json");
+}
+
+static EbgmReq* ebgmFind(int64_t id) {
+    for (int i = 0; i < EBGM_SLOTS; i++)
+        if (g_ebgm[i].id == id && id) return &g_ebgm[i];
+    return NULL;
+}
+
+// After CreateRequest(ctx, apiGroup, path, method, content, int64* requestId).
+static void ebgmCreated(Frame* f) {
+    if ((int32_t)f->retRax < 0) return;
+    const char* group = (const char*)(uintptr_t)f->gpr[1];
+    const char* path = (const char*)(uintptr_t)f->gpr[2];
+    int64_t* idp = (int64_t*)(uintptr_t)f->gpr[5];
+    if (hookReadable(group, 8) < 6 || hookReadable(path, 16) < 16 || hookReadable(idp, 8) < 8)
+        return;
+    if (!eq(group, "music")) return;
+    const char* sub = path;
+    static const char prefix[] = "/v1/ebgm/";
+    if (memcmp(path, prefix, sizeof(prefix) - 1) == 0) sub = path + sizeof(prefix) - 1;
+    char name[2][200];
+    ebgmName(sub, 1, name[0], sizeof(name[0]));
+    ebgmName(sub, 0, name[1], sizeof(name[1]));
+    int fd = -1, which = 0;
+    for (; which < 2 && fd < 0; which++) fd = sysOpen(name[which], SC_O_RDONLY, 0);
+    if (fd < 0) {
+        say("ebgm: %s (method %lu): no file (%s), left as it was", path, f->gpr[3], name[0]);
+        return;
+    }
+    if (!g_ebgmPool) g_ebgmPool = sysMap(EBGM_SLOTS * EBGM_MAX);
+    lock(&g_ebgmLock);
+    EbgmReq* r = NULL;
+    for (int i = 0; i < EBGM_SLOTS && !r; i++)
+        if (!g_ebgm[i].id) r = &g_ebgm[i];
+    if (r && g_ebgmPool) {
+        r->body = g_ebgmPool + (size_t)(r - g_ebgm) * EBGM_MAX;
+        const int n = sysRead(fd, r->body, EBGM_MAX);
+        r->len = n > 0 ? (uint32_t)n : 0;
+        r->off = 0;
+        r->id = *idp;
+    }
+    unlock(&g_ebgmLock);
+    sysClose(fd);
+    say("ebgm: %s: answered with %s (%u bytes), request %lx", path, name[which - 1],
+        r ? r->len : 0, r ? (uint64_t)r->id : 0);
+}
+
+static void ebgmApply(Frame* f) {
+    const Hook* h = f->hook;
+    if (eq(h->name, "sceNpWebApiCreateRequest")) {
+        ebgmCreated(f);
+        return;
+    }
+    if (h->name[0] != 's' || !contains(h->name, "sceNpWebApi")) return;
+    EbgmReq* r = ebgmFind((int64_t)f->gpr[0]);
+    if (!r) return;
+    if (eq(h->name, "sceNpWebApiSendRequest")) {
+        f->retRax = 0;
+    } else if (eq(h->name, "sceNpWebApiSendRequest2")) {
+        // (requestId, data, size, SceNpWebApiResponseInformationOption*):
+        // httpStatus, then the error object's pointer and size, then the
+        // response's size.
+        uint8_t* info = (uint8_t*)(uintptr_t)f->gpr[3];
+        if (info && hookReadable(info, 32) == 32 && (hookProt(info) & 2)) {
+            put32At(info, 0, 200);
+            put64At(info, 24, r->len);
+        }
+        f->retRax = 0;
+    } else if (eq(h->name, "sceNpWebApiGetHttpStatusCode")) {
+        uint8_t* code = (uint8_t*)(uintptr_t)f->gpr[1];
+        if (code && hookReadable(code, 4) == 4 && (hookProt(code) & 2)) put32At(code, 0, 200);
+        f->retRax = 0;
+    } else if (eq(h->name, "sceNpWebApiReadData")) {
+        // (requestId, data, size): bytes read, 0 at the end.
+        uint8_t* out = (uint8_t*)(uintptr_t)f->gpr[1];
+        size_t want = (size_t)f->gpr[2];
+        const uint32_t left = r->len - r->off;
+        if (want > left) want = left;
+        if (want && (hookReadable(out, want) < want || !(hookProt(out) & 2))) return;
+        memcpy(out, r->body + r->off, want);
+        r->off += (uint32_t)want;
+        f->retRax = (uint64_t)want;
+    } else if (eq(h->name, "sceNpWebApiGetHttpResponseHeaderValueLength")) {
+        // (requestId, name, size_t* length)
+        const char* name = (const char*)(uintptr_t)f->gpr[1];
+        uint8_t* len = (uint8_t*)(uintptr_t)f->gpr[2];
+        if (!len || hookReadable(len, 8) < 8 || !(hookProt(len) & 2) || hookReadable(name, 4) < 4)
+            return;
+        const int cl = contains(name, "ength");
+        put64At(len, 0, cl ? 12 : 16);  // "Content-Length"'s digits, or "application/json"
+        f->retRax = 0;
+    } else if (eq(h->name, "sceNpWebApiGetHttpResponseHeaderValue")) {
+        // (requestId, name, char* value, size, size_t* length)
+        const char* name = (const char*)(uintptr_t)f->gpr[1];
+        char* value = (char*)(uintptr_t)f->gpr[2];
+        const size_t cap = (size_t)f->gpr[3];
+        if (!value || cap < 2 || hookReadable(value, cap) < cap || !(hookProt(value) & 2) ||
+            hookReadable(name, 4) < 4)
+            return;
+        if (contains(name, "ength")) fmt(value, cap, "%u", r->len);
+        else fmt(value, cap, "application/json");
+        uint8_t* len = (uint8_t*)(uintptr_t)f->gpr[4];
+        if (len && hookReadable(len, 8) == 8 && (hookProt(len) & 2)) put64At(len, 0, strlen(value));
+        f->retRax = 0;
+    } else if (eq(h->name, "sceNpWebApiDeleteRequest")) {
+        lock(&g_ebgmLock);
+        say("ebgm: request %lx done, %u of %u bytes read", (uint64_t)r->id, r->off, r->len);
+        r->id = 0;
+        unlock(&g_ebgmLock);
+    }
+}
+
+
 // After the real call, before it is logged: the answer, ours.
 static void fakeApply(Frame* f) {
     const Hook* h = f->hook;
@@ -653,6 +804,7 @@ void mcwPre(Frame* f) {
 
 void mcwPost(Frame* f) {
     fakeApply(f);
+    ebgmApply(f);
     if (g_quiet) return;
     Hook* h = f->hook;
     const uint64_t us = sysNowUs() - f->t0;

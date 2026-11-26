@@ -268,6 +268,28 @@ there would mean answering those requests, and first getting past the
 sign-in check; 0.38 watches `sceNpGetState` and the rest, and the web API's
 calls, to see what that check asks.
 
+### The Music section's sign-in is one failed request (0.38)
+
+Each time the Music section opened, the shell made one PSN web API request:
+`sceNpWebApiCreateContext`, then `CreateRequest` with API group `music` and
+path `/v1/ebgm/me/partner/profile?partner=spotify` (GET), a
+`current_timestamp` header, then `SendRequest`, which failed at once with
+0x80550003 (signed out), and it showed "Sign in to PlayStation Network". It
+called no `sceNpGetState` or other sign-in check.
+
+### Answering it (0.39, an experiment)
+
+A request of group `music` whose answer is a file in
+`/data/ShellCompanion/ps4/ebgm/` is answered with it: `SendRequest` and
+`SendRequest2` succeed, the status is 200, `ReadData` gives the file,
+`Content-Length` and `Content-Type` are answered. The file is named after the
+path after `/v1/ebgm/`, each character not a letter or digit made `_`, with its
+query, then without (`me_partner_profile_partner_spotify.json`, then
+`me_partner_profile.json`). Any other request, of another group or with no
+file, is left as it was and logged with the file looked for, so each next
+request shows in `mcw.log`. The test app writes a first guess for the profile
+(`{"partner":"spotify","subscriptionType":"PREMIUM","legalCountry":"US"}`).
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

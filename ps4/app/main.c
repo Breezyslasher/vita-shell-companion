@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.38"
+#define APP_VERSION "0.39"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -1078,6 +1078,15 @@ int main(void) {
     scePadInit();
     const int pad = scePadOpen(user, 0, 0, NULL);
     if (pad < 0) say("No controller (0x%08X)", (unsigned)pad);
+
+    // The Music section's first answer for the music watch (ps4/mcw, ebgm/):
+    // written once, then left for you to change.
+    mkdir(SC_BGM_DIR "/ebgm", 0777);
+    if (access(SC_BGM_DIR "/ebgm/me_partner_profile.json", F_OK) != 0) {
+        static const char profile[] =
+            "{\"partner\":\"spotify\",\"subscriptionType\":\"PREMIUM\",\"legalCountry\":\"US\"}\n";
+        writeFile(SC_BGM_DIR "/ebgm/me_partner_profile.json", profile, sizeof(profile) - 1);
+    }
 
     // Load it at once: the main thing the app is for.
     loadPlayer();
