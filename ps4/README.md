@@ -462,6 +462,16 @@ shell's strings near it are `token`, `track`, `track_uri`, `context_uri`,
 `ebgm/sp_sessionlink.json` (the path after `/socialnetwork/api/v1/`), a first
 guess the test app writes.
 
+### The tracks request (0.53)
+
+With `sp_sessionlink.json` answering (the shell read nothing from it but the
+answer itself), the shell read the playlist's `uri` and asked for its
+tracks: `/v1/ebgm/playlist/tracks?uri=spotify%3Auser%3Ashellcompanion%3Aplaylist%3Aqueue&nav_id=…&title_id=SCMP00001_00&section_title=Shell%20Companion&offset=0&limit=15`,
+which `ebgm/playlist_tracks.json` answers for any playlist. 0.54 writes a
+first guess: `total`, `offset`, `limit`, and `track_list`, each track with
+`name`, `uri`, `artists[].name`, `album.name`, `explicit`, `is_playable`,
+`duration_ms` and `image_url`.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

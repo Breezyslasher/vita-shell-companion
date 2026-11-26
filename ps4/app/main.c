@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.53"
+#define APP_VERSION "0.54"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -893,6 +893,20 @@ static void writeEbgm(void) {
         "{\"token\":\"shellcompanion\",\"access_token\":\"shellcompanion\","
         "\"expires_in\":3600}\n";
     writeFile(SC_BGM_DIR "/ebgm/sp_sessionlink.json", session, sizeof(session) - 1);
+    // A playlist's tracks (/v1/ebgm/playlist/tracks?uri=...&offset=0&limit=15,
+    // 0.53: any playlist's, the file without the query): a first guess, the
+    // shell's strings near it track_list, artists, explicit, is_playable.
+#define TRACK_GUESS(n, title, artist, uri, ms)                                                \
+    "{\"name\":\"" title "\",\"title\":\"" title "\",\"uri\":\"" uri "\",\"id\":\"" n "\","          \
+    "\"artists\":[{\"name\":\"" artist "\"}],\"artist\":\"" artist "\","                           \
+    "\"album\":{\"name\":\"Shell Companion\"},\"explicit\":false,\"is_playable\":true,"           \
+    "\"duration_ms\":" ms ",\"image_url\":\"file:///user/data/ShellCompanion/ps4/ebgm/playlist.png?v=1\"}"
+    static const char tracks[] =
+        "{\"total\":2,\"offset\":0,\"limit\":15,\"track_list\":["
+        TRACK_GUESS("0", "Your song", "Shell Companion", "spotify:track:shellcompanion0", "281000") ","
+        TRACK_GUESS("1", "Test tone", "Shell Companion", "spotify:track:shellcompanion1", "60000")
+        "]}\n";
+    writeFile(SC_BGM_DIR "/ebgm/playlist_tracks.json", tracks, sizeof(tracks) - 1);
     // The playlist's picture: this app's icon. The shell adds &w=..&h=.. to
     // image_url (its strings), hence the ? in it.
     copyFromPackage("sce_sys/icon0.png", SC_BGM_DIR "/ebgm/playlist.png");
