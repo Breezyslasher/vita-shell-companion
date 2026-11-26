@@ -19,3 +19,8 @@ puff, by Mark Adler (zlib's contrib/puff, zlib licence).
 The PS4 background music module (ps4/bgm) decodes MP3 with minimp3, by
 lieff (https://github.com/lieff/minimp3, ps4/bgm/minimp3.h), dedicated to
 the public domain under CC0 1.0.
+
+The PS4 test app (ps4/app) carries OpenOrbis's libc.prx, libSceFios2.prx
+and right.sprx, from the OpenOrbis PS4 Toolchain v0.5.2
+(https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain, GPL-3.0), and draws
+its text with font8x8 by Daniel Hepper (public domain).

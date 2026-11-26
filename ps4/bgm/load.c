@@ -68,9 +68,8 @@ int probeMain(void) {
     const uint64_t beat = heartbeat(), now = sysNowUs() / 1000u;
     logLine("heartbeat %lu ms, now %lu ms", beat, now);
     if (beat && now >= beat && now - beat < 4000) {
-        writeFile(SC_BGM_CMD, "reload\n");
-        sysSleepMs(400);
-        writeFile(SC_BGM_CMD, "play\n");
+        writeFile(SC_BGM_CMD ".new", "reload\nplay\n");
+        sysRename(SC_BGM_CMD ".new", SC_BGM_CMD);
         logLine("a player is running: told to play its queue again");
         notify("Background music: already running, playing the queue again");
         return 0;

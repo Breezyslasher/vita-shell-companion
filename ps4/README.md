@@ -8,7 +8,28 @@ It is built on what the probes below found: a payload is not heard, so the
 player runs inside the shell, loaded by GoldHEN, as the shell probe is.
 It does not show in the quick menu yet; that comes later.
 
-### Trying it
+### Trying it with the test app (easiest)
+
+The test app needs no BinLoader. Install
+`IV0000-SCMP00001_00-SHELLCOMPBGM0001.pkg` once (copy it to a USB stick or
+`/data/pkg` and use GoldHEN's Package Installer), then open **Shell
+Companion BGM Test** from the home screen.
+
+- It loads the player into the shell at once. With no music copied over it
+  writes `music/test-tone.wav` (a C-E-G-C tune) so there is something to hear.
+- **X** load / play, **Square** pause, **Triangle** stop, **R1** / **L1**
+  next / previous, **Left** / **Right** another audio port type,
+  **Options** write the test tone again.
+- The screen shows whether the player is running, the track, and the end
+  of `bgm.log`.
+- Press the PS button and start a game: does the music keep playing?
+- Its own log is `/data/ShellCompanion/ps4/app.log`.
+
+### Trying it with the BinLoader
+
+On GoldHEN the BinLoader is off until you turn it on in GoldHEN's settings,
+and is usually on port **9090**; "Connection refused" means it is not
+listening.
 
 1. By FTP (GoldHEN's, port 2121), put some MP3s (or 16-bit WAVs) in
    `/data/ShellCompanion/ps4/music/`. They play in name order.

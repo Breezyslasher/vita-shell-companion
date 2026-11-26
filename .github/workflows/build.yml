@@ -61,12 +61,13 @@ jobs:
           sh ps4/probe/get_create_fself.sh
       - name: Build
         run: sh ps4/probe/build.sh
-      - name: Build background music
-        run: sh ps4/bgm/build.sh
+      - name: Build background music and the test app
+        run: sh ps4/app/build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: ps4-probes-${{ github.run_number }}
           path: |
+            build-ps4/*.pkg
             build-ps4/*.bin
             build-ps4/*.prx
             ps4/README.md

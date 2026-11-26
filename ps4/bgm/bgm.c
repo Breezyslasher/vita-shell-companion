@@ -9,7 +9,7 @@
  *
  *   queue.txt   the tracks, one absolute path a line; without it, every
  *               .mp3 and .wav in music/, by name
- *   cmd         one command, read and removed: play, pause, toggle, next,
+ *   cmd         commands, one a line, read and removed: play, pause, toggle, next,
  *               prev, stop, reload, quit
  *   port.txt    the audio port type, if not MAIN (0): 1 BGM, 14, ...
  *   status.txt  written each second: state, track, position, and a
@@ -434,15 +434,9 @@ static void stop(const char* why) {
 
 static int g_quit;
 
-// One command from cmd, if there is one.
-static void command(void) {
-    char text[32];
-    if (readText(SC_BGM_CMD, text, sizeof(text)) < 0) return;
-    sysUnlink(SC_BGM_CMD);
-    int n = 0;
-    while (text[n] && text[n] != '\n' && text[n] != '\r' && text[n] != ' ') n++;
-    text[n] = 0;
-    logLine("command: %s", text);
+// One command, a word.
+static void runCommand(const char* text, int n) {
+    logLine("command: %s", text);  // nul-terminated by command()
 #define IS(word) (n == (int)sizeof(word) - 1 && !memcmp(text, word, n))
     if (IS("play")) {
         if (g_state == ST_STOPPED) {
@@ -469,7 +463,8 @@ static void command(void) {
     } else if (IS("stop")) {
         stop("asked");
     } else if (IS("reload")) {
-        // The queue again, from its start; playing if it was.
+        // The queue again, from its start; playing if it was. The port
+        // too, as port.txt may have changed.
         const int was = g_state;
         stop("reloading");
         loadQueue();
@@ -479,6 +474,23 @@ static void command(void) {
         g_quit = 1;
     }
 #undef IS
+}
+
+// The commands in cmd, one a line, if it is there. It is renamed first, so
+// that a command written meanwhile is not lost, nor one read half written.
+static void command(void) {
+    char text[256];
+    if (sysRename(SC_BGM_CMD, SC_BGM_CMD ".work") < 0) return;
+    const int len = readText(SC_BGM_CMD ".work", text, sizeof(text));
+    sysUnlink(SC_BGM_CMD ".work");
+    for (int at = 0; at < len;) {
+        int end = at;
+        while (end < len && text[end] != '\n' && text[end] != '\r' && text[end] != ' ') end++;
+        const int next = end + 1;
+        text[end] = 0;  // text has room: readText leaves one byte
+        if (end > at) runCommand(text + at, end - at);
+        at = next;
+    }
     writeStatus();
 }
 
