@@ -80,6 +80,7 @@ static struct {
     int dlThread;   // the downloads' thread, whose calls are ours
     uint64_t endedUs;  // when the last list ended, 0 if one is going
     int restored;      // its entries are from before a reboot (1.29)
+    uint32_t titleLogged;
     int noPausedParam; // dl-list-param-nopause: paused only in the progress answers (1.35, a test)
     volatile int wantPost;  // an item changed state: tell the list (1.19)
     uint32_t infoLogged;
@@ -549,6 +550,22 @@ void dlListInfoHook(Frame* f) {
             // info said 0x80990019 at 27.2 s, and no progress call came
             // before it was done and put back in section 9.
             if ((int)(int32_t)f->retRax == (int)0x80990019) dllGone(k, "task info");
+            // Finished: the app's own title id in its content id (1.36).
+            // 1.32 gave each its own (SCDLnnnnn, no app's) so Cancel and
+            // Delete takes only that one, and since then a finished one's
+            // row reads nothing at all (1.34): a finished game's row has
+            // Start (the app, by title id) and Clear from list, and there is
+            // no app. The list asks again for a finished one's (1.34's log:
+            // song 3 at 50.3 s, done at 39.5 s). Not with dl-list-own-title.
+            char* cid = (char*)(uintptr_t)f->gpr[2];
+            const int i = g_dll.e[k].item;
+            if (f->gpr[1] == 0xf && (int)(int32_t)f->retRax >= 0 && i >= 0 && i < g_dls.count &&
+                g_dls.item[i].state == DLS_DONE && strlen(g_dls.app) == 9 && (uintptr_t)cid > 0x10000 &&
+                hookReadable(cid, 20) == 20 && (hookProt(cid) & 2) && !memcmp(cid, "IV0000-SCDL", 11) &&
+                cid[16] == '_' && !sysExists(SC_BGM_DIR "/dl-list-own-title")) {
+                memcpy(cid + 7, g_dls.app, 9);
+                if (g_dll.titleLogged++ < 12) logLine("dllist: task %d finished: title %s given", task, g_dls.app);
+            }
         }
     const uint32_t n = __atomic_add_fetch(&g_dll.infoLogged, 1, __ATOMIC_RELAXED);
     if (!(ours ? n <= 400 : n <= 30)) return;

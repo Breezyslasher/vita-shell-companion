@@ -369,6 +369,14 @@ service's are, not the managed wrappers 0.85 hooked.
   above it left section 3. 1.35, a test: with `dl-list-param-nopause`
   the param's paused bit is never set (paused shows from the progress
   answers alone), to tell which of the two it was.
+- **1.36, finished rows blank:** since 1.32 a finished song's row read
+  nothing (no "Installed.", no time). 1.32's own title ids (`SCDLnnnnn`)
+  were the only change on that path; a finished game's row has Start (the
+  app, by title id) and Clear from list, and there is no such app. The
+  list asks for a finished one's content id again (1.34's log), and it is
+  now answered with the app's title id (from `app=`); songs still coming
+  keep their own, so Cancel and Delete still takes only one.
+  `dl-list-own-title` keeps their own throughout.
 
 ### One module, and the cleanup (0.95)
 
