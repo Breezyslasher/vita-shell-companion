@@ -896,6 +896,17 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### A web server on the PS4 for the experiment (0.94)
+
+With no URL in `bgft-probe.txt`, the probe serves one of the console's MP3s
+(`music/yoursong.mp3`, else the queue's first local file) from a small HTTP
+server in the player module, `http://127.0.0.1:38521/probe.mp3` (libSceNet
+sockets: GET, HEAD, Range, then closed), and gives that URL to the download
+service. Every request the service makes is logged in full
+(`probe server <` and `probe server >` in bgm.log), so what it asks for is
+seen without a PC. turbodl feeds the service from a loopback server the same
+way. Each run's content id is new (`IV0000-SCMP00001_00-PROBE<11 digits>`).
+
 ### Media through the download service: listed, not fetched (0.93)
 
 0.92's run: the MP3 was taken (task 1059) and shown in Notifications >

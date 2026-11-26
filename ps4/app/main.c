@@ -24,7 +24,7 @@
 #include "../client/shell_companion.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.93"
+#define APP_VERSION "0.94"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions

@@ -459,17 +459,191 @@ static void probeList(const char* dir, int depth) {
     sysClose(fd);
 }
 
+// A web server on the PS4 itself, for the experiment (0.94): one file,
+// served at http://127.0.0.1:<port>/probe.mp3 to whoever asks (the download
+// service, from another process), each request logged in full, so what the
+// service asks for is seen without a PC. GET and HEAD, Range, then closed.
+typedef int (*FnNetSocket)(const char*, int, int, int);
+typedef int (*FnNetBind)(int, const void*, uint32_t);
+typedef int (*FnNetListen)(int, int);
+typedef int (*FnNetAccept)(int, void*, uint32_t*);
+typedef int (*FnNetIo)(int, void*, size_t, int);
+typedef int (*FnNetClose)(int);
+static struct {
+    FnNetSocket socket;
+    FnNetBind bind;
+    FnNetListen listen;
+    FnNetAccept accept;
+    FnNetIo recv, send;
+    FnNetClose close;
+    char file[MAX_PATH];
+    int port, fd;
+} g_srv;
+
+static void srvSend(int c, const void* p, size_t n) {
+    const uint8_t* b = (const uint8_t*)p;
+    while (n) {
+        const int k = g_srv.send(c, (void*)b, n > 65536 ? 65536 : n, 0);
+        if (k <= 0) return;
+        b += k;
+        n -= (size_t)k;
+    }
+}
+
+static void* srvMain(void* arg) {
+    (void)arg;
+    static char req[4096];
+    static uint8_t buf[65536];
+    for (;;) {
+        uint8_t from[16];
+        uint32_t fromLen = sizeof(from);
+        const int c = g_srv.accept(g_srv.fd, from, &fromLen);
+        if (c < 0) {
+            logLine("probe server: accept 0x%08X, stopped", (unsigned)c);
+            return NULL;
+        }
+        int got = 0;
+        while (got < (int)sizeof(req) - 1) {
+            const int k = g_srv.recv(c, req + got, sizeof(req) - 1 - (size_t)got, 0);
+            if (k <= 0) break;
+            got += k;
+            req[got] = 0;
+            if (hasText(req, "\r\n\r\n")) break;
+        }
+        req[got > 0 ? got : 0] = 0;
+        // The request, its lines logged.
+        for (char* p = req; *p;) {
+            char* e = p;
+            while (*e && *e != '\n') e++;
+            const char keep = *e;
+            *e = 0;
+            if (e > p && e[-1] == '\r') e[-1] = 0;
+            if (*p) logLine("probe server < %s", p);
+            *e = keep;
+            p = *e ? e + 1 : e;
+        }
+        const int head = !memcmp(req, "HEAD", 4);
+        const int fd = sysOpen(g_srv.file, SC_O_RDONLY, 0);
+        const int64_t size = fd >= 0 ? sysSeek(fd, 0, 2) : -1;
+        char hdr[512];
+        if (size < 0) {
+            const int n = fmt(hdr, sizeof(hdr), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            srvSend(c, hdr, (size_t)n);
+            logLine("probe server > 404");
+        } else {
+            // Range: bytes=a-b, bytes=a-
+            uint64_t from0 = 0, to = (uint64_t)size - 1;
+            int ranged = 0;
+            for (const char* p = req; *p; p++)
+                if (!memcmp(p, "\nRange: bytes=", 14) || !memcmp(p, "\nrange: bytes=", 14)) {
+                    const char* q = p + 14;
+                    from0 = 0;
+                    while (*q >= '0' && *q <= '9') from0 = from0 * 10 + (uint64_t)(*q++ - '0');
+                    if (*q == '-' && q[1] >= '0' && q[1] <= '9') {
+                        to = 0;
+                        for (q++; *q >= '0' && *q <= '9'; q++) to = to * 10 + (uint64_t)(*q - '0');
+                    }
+                    if (to >= (uint64_t)size) to = (uint64_t)size - 1;
+                    ranged = 1;
+                    break;
+                }
+            const uint64_t len = from0 <= to ? to - from0 + 1 : 0;
+            const int n = ranged ? fmt(hdr, sizeof(hdr),
+                                       "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mpeg\r\nContent-Length: %lu\r\n"
+                                       "Content-Range: bytes %lu-%lu/%ld\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                                       (unsigned long)len, (unsigned long)from0, (unsigned long)to, (long)size)
+                                 : fmt(hdr, sizeof(hdr),
+                                       "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: %ld\r\n"
+                                       "Accept-Ranges: bytes\r\nConnection: close\r\n\r\n", (long)size);
+            srvSend(c, hdr, (size_t)n);
+            uint64_t sent = 0;
+            if (!head && len) {
+                sysSeek(fd, (int64_t)from0, 0);
+                while (sent < len) {
+                    const size_t want = len - sent > sizeof(buf) ? sizeof(buf) : (size_t)(len - sent);
+                    const int k = sysRead(fd, buf, want);
+                    if (k <= 0) break;
+                    srvSend(c, buf, (size_t)k);
+                    sent += (uint64_t)k;
+                }
+            }
+            logLine("probe server > %s, %lu bytes sent", ranged ? "206" : "200", (unsigned long)sent);
+        }
+        if (fd >= 0) sysClose(fd);
+        g_srv.close(c);
+    }
+}
+
+// The server started on a port of 127.0.0.1, serving file: the port, or 0.
+static int srvStart(const char* file) {
+    if (g_srv.port) {
+        fmt(g_srv.file, sizeof(g_srv.file), "%s", file);
+        return g_srv.port;
+    }
+    const int net = libLoad("libSceNet.sprx");
+    g_srv.socket = (FnNetSocket)anySym(net, "sceNetSocket");
+    g_srv.bind = (FnNetBind)anySym(net, "sceNetBind");
+    g_srv.listen = (FnNetListen)anySym(net, "sceNetListen");
+    g_srv.accept = (FnNetAccept)anySym(net, "sceNetAccept");
+    g_srv.recv = (FnNetIo)anySym(net, "sceNetRecv");
+    g_srv.send = (FnNetIo)anySym(net, "sceNetSend");
+    g_srv.close = (FnNetClose)anySym(net, "sceNetSocketClose");
+    if (!g_srv.socket || !g_srv.bind || !g_srv.listen || !g_srv.accept || !g_srv.recv || !g_srv.send || !g_srv.close) {
+        logLine("probe server: libSceNet's socket functions missing");
+        return 0;
+    }
+    g_srv.fd = g_srv.socket("ScProbe", 2 /* AF_INET */, 1 /* STREAM */, 0);
+    if (g_srv.fd < 0) {
+        logLine("probe server: socket 0x%08X", (unsigned)g_srv.fd);
+        return 0;
+    }
+    for (int port = 38521; port < 38531; port++) {
+        uint8_t addr[16];
+        memset(addr, 0, sizeof(addr));
+        addr[0] = 16;  // sin_len
+        addr[1] = 2;   // AF_INET
+        addr[2] = (uint8_t)(port >> 8);
+        addr[3] = (uint8_t)port;
+        addr[4] = 127;
+        addr[7] = 1;  // 127.0.0.1
+        const int b = g_srv.bind(g_srv.fd, addr, sizeof(addr));
+        if (b >= 0) {
+            const int l = g_srv.listen(g_srv.fd, 8);
+            logLine("probe server: 127.0.0.1:%d, listen 0x%08X", port, (unsigned)l);
+            if (l < 0) return 0;
+            g_srv.port = port;
+            fmt(g_srv.file, sizeof(g_srv.file), "%s", file);
+            if (threadStart(srvMain, NULL, "ScBgmProbeSrv") < 0) return 0;
+            return port;
+        }
+    }
+    logLine("probe server: no port could be bound");
+    return 0;
+}
+
 static void* probeMain(void* arg) {
     (void)arg;
     static char url[MAX_PATH];
     char text[MAX_PATH];
-    fmt(url, sizeof(url), "%s", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3");
+    url[0] = 0;
     const int n = readText(SC_BGM_DIR "/bgft-probe.txt", text, sizeof(text));
     if (n > 0) {
         int k = 0;
         while (k < n && text[k] != '\n' && text[k] != '\r') k++;
         text[k] = 0;
         if (isUrl(text)) fmt(url, sizeof(url), "%s", text);
+    }
+    if (!url[0]) {
+        // No URL given (0.94): a file of the console's, served from here,
+        // every request the service makes logged ("probe server <").
+        const char* file = SC_BGM_MUSIC "/yoursong.mp3";
+        if (!sysExists(file))
+            for (int i = 0; i < g_libCount && !sysExists(file); i++)
+                if (!isUrl(g_tracks[i])) file = g_tracks[i];
+        const int port = srvStart(file);
+        if (port) fmt(url, sizeof(url), "http://127.0.0.1:%d/probe.mp3", port);
+        else fmt(url, sizeof(url), "%s", "http://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3");
+        logLine("probe: serving %s", file);
     }
     char shown[160];
     urlShown(url, shown, sizeof(shown));
@@ -498,6 +672,11 @@ static void* probeMain(void* arg) {
         if (conn >= 0) g_http.delConn(conn);
         if (tmpl >= 0) g_http.delTmpl(tmpl);
     }
+    // A content id of its own each run (0.94): an earlier run's task is
+    // otherwise taken again (0x80990086) and followed instead.
+    static char probeId[40];
+    fmt(probeId, sizeof(probeId), "IV0000-SCMP00001_00-PROBE%011lu", (unsigned long)(sysNowUs() / 1000u % 100000000000u));
+    logLine("probe: content id %s", probeId);
     // Package types to try: none, empty, and guesses at a media one.
     // NULL last: the service may take a missing one worst.
     static const char* const types[] = {"", "PS4MUSIC", "MUSIC", "PS4AUDIO", "AUDIO", "PS4VIDEO", "VIDEO", "audio/mpeg", NULL};
@@ -509,7 +688,7 @@ static void* probeMain(void* arg) {
             memset(&p, 0, sizeof(p));
             p.userId = g_bgft.user;
             p.entitlementType = ent ? 0 : 5;
-            p.id = "IV0000-SCMP00001_00-SHELLCOMPMUSIC01";
+            p.id = probeId;
             p.contentUrl = url;
             p.contentName = "Shell Companion test";
             p.iconPath = "";
