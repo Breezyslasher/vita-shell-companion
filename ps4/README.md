@@ -47,6 +47,15 @@ service's are, not the managed wrappers 0.85 hooked.
   logged as `dllist:` lines in bgm.log, to learn a real download's bits.
   `dl-list-bits.txt` (`going=`, `waiting=`, `done=`) sets them without a
   rebuild; `dl-nolist` turns the placeholders off.
+- **0.96 on the PS4:** no crash. The list calls
+  `sceBgftServiceIntDownloadGetProgress` (two threads, about once a second)
+  for our placeholders and its own tasks. A placeholder never started still
+  answers bits `0x308`, error `0x80990033`, as the probe's did once started.
+  The PS4's finished downloads answer `0x188` or `0x213` (the bits' top 16
+  are not always 0: `0x5ca1e308`, `0x3136398a`). The test's files were there
+  already (416), so none was seen going. 0.97 answers `0x188` for a finished
+  one, logs other tasks each time their bits or bytes change (a real
+  download's states), and the test app deletes its files first.
 
 ### One module, and the cleanup (0.95)
 

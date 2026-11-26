@@ -31,7 +31,7 @@ int scePthreadGetthreadid(void);
 
 #define DLL_MAX 64
 #define DLL_TASKS SC_BGM_DIR "/dl-list-tasks.txt"
-#define DLL_LOGGED 24  // other tasks whose answers are logged
+#define DLL_LOGGED 48  // other tasks whose answers are logged
 
 typedef int (*FnBgftUnregister)(int32_t);
 
@@ -50,7 +50,8 @@ static struct {
     } e[DLL_MAX];
     struct {
         int32_t task;
-        uint32_t logged;
+        uint32_t logged, bits;
+        uint64_t transferred, lastUs;
     } other[DLL_LOGGED];
     volatile int others;
     uint32_t calls;
@@ -122,7 +123,17 @@ void dlListHook(Frame* f) {
         g_dll.other[o].logged = 0;
         g_dll.others = o + 1;
     }
-    if (g_dll.other[o].logged++ >= 4) return;
+    // When its state or bytes change (0.97: a real download's answers as it
+    // goes), at most one every 3 s, 30 in all.
+    const uint64_t now = sysNowUs();
+    __typeof__(g_dll.other[0])* ot = &g_dll.other[o];
+    if (ot->logged && ((pr->bits == ot->bits && pr->transferred == ot->transferred) || now - ot->lastUs < 3000000u))
+        return;
+    if (ot->logged >= 30) return;
+    ot->logged++;
+    ot->bits = pr->bits;
+    ot->transferred = pr->transferred;
+    ot->lastUs = now;
     logLine("dllist: %s(%d) = 0x%08X: bits 0x%x, error 0x%08X, %lu of %lu (total %lu of %lu), %u of %u, %u s left "
             "(total %u)  [call %u, thread %d]",
             f->hook->name, task, (unsigned)f->retRax, pr->bits, (unsigned)pr->errorResult,
@@ -205,6 +216,8 @@ static void dlListBegin(void) {
     g_dll.haveGoing = g_dll.haveWaiting = g_dll.haveDone = 0;
     g_dll.bitsGoing = 0x30a;  // the probe's task just started (0.94), before it failed
     g_dll.haveGoing = 1;
+    g_dll.bitsDone = 0x188;  // the PS4's own finished downloads (0.96's log)
+    g_dll.haveDone = 1;
     if (readText(SC_BGM_DIR "/dl-list-bits.txt", text, sizeof(text)) > 0) {
         if (dllHex(text, "going", &g_dll.bitsGoing)) g_dll.haveGoing = 1;
         g_dll.haveWaiting = dllHex(text, "waiting", &g_dll.bitsWaiting);

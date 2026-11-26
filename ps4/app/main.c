@@ -24,7 +24,7 @@
 #include "../client/shell_companion.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.96"
+#define APP_VERSION "0.97"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -670,6 +670,9 @@ static void testDownloads(void) {
                                 .kind = pkg ? "pkg" : "url", .args = {urls[i], NULL, NULL}};
     }
     mkdir(SC_BGM_DIR "/downloads", 0777);
+    // Fetched again each test (0.97): a file there already is done at once.
+    for (int i = 0; i < n; i++)
+        if (items[i].file) unlink(items[i].file);
     const int w = scWriteDownloads(1, NULL, items, (uint32_t)n);
     const int s = scDownloadsStart();
     say("Downloads handed over: %d item(s), written %d, started %d: see bgm.log and downloads/", n, w, s);
