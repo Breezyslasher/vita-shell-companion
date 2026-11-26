@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.24"
+#define APP_VERSION "0.25"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -132,6 +132,8 @@ __attribute__((noinline)) static long sysCall(long num, long a, long b, long c) 
 
 int sceKernelDlsym(int handle, const char* symbol, void** addr);
 int sceSysmoduleLoadModule(uint16_t id);
+int sceSystemServiceReenableMusicPlayer(void);
+int sceSystemServiceIsBgmPlaying(void* playing);
 int scePthreadCreate(void* thread, const void* attr, void* (*fn)(void*), void* arg,
                      const char* name);
 int sceKernelLoadStartModule(const char* path, size_t args, const void* argp, uint32_t flags,
@@ -777,6 +779,21 @@ static void* mpsProbe(void* arg) {
     static uint64_t watcher;
     scePthreadCreate(&watcher, NULL, mpsWatch, NULL, "ScMpsWatch");
     int res = 0;
+    // 0.24: as installed (UNJAILBREAK) Initialize answered 0x812F0003,
+    // ERROR_FATAL, where jailbroken it was 0x812F0107, PROHIBITED; but the
+    // module had been loaded jailbroken. Everything now runs as installed,
+    // the module's load too.
+    mpsStep("GoldHEN UNJAILBREAK (the app as it was installed)");
+    const long un = sysCall(500, 3 /* UNJAILBREAK */, (long)&g_jb, 0);
+    mpsLog("UNJAILBREAK: 0x%lX", (unsigned long)un);
+    // The system's own music player switch, and whether BGM plays
+    // (SystemService.h, OpenOrbis: their arguments are not known, the
+    // second is given a zeroed buffer).
+    static uint8_t bgm[16];
+    mpsStep("sceSystemServiceIsBgmPlaying");
+    mpsLog("IsBgmPlaying: 0x%08X, %u", (unsigned)sceSystemServiceIsBgmPlaying(bgm), bgm[0]);
+    mpsStep("sceSystemServiceReenableMusicPlayer");
+    mpsLog("ReenableMusicPlayer: 0x%08X", (unsigned)sceSystemServiceReenableMusicPlayer());
     // As a game loads it: through the system's module loader, which links
     // what it needs (0.22, loaded as a file by sceKernelLoadStartModule,
     // died in Initialize() at once, as if a call it makes went nowhere).
@@ -809,9 +826,6 @@ static void* mpsProbe(void* arg) {
     // program authority and capabilities; GoldHEN puts them back with its
     // UNJAILBREAK (command 3) and the backup its JAILBREAK filled in. The
     // log stays open, its file already open.
-    mpsStep("GoldHEN UNJAILBREAK (the app as it was installed)");
-    const long un = sysCall(500, 3 /* UNJAILBREAK */, (long)&g_jb, 0);
-    mpsLog("UNJAILBREAK: 0x%lX", (unsigned long)un);
 
     // Initialize takes no arguments (read from the library, 0.21).
     int32_t rc = -1;
