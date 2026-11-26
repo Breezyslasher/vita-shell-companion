@@ -123,6 +123,13 @@ service's are, not the managed wrappers 0.85 hooked.
   shorter answer), and logs 0x38-0x47 of the others'. Finished
   placeholders now stay, as the PS4's own do: removed when the app takes
   the list back, at the next list, or at the module's start after a boot.
+- **1.04 on the PS4:** still 0%. The answers' 0x38-0x47: preparing 0,
+  local copy 100, then a pointer and 2: the answer ends at 0x40 (no
+  percentTotal; nothing was written past it). 1.05 answers
+  `preparingPercent` with how much has come. The package (uninstalled
+  first) was taken (task 1093, param `0x10000161`), then failed 2 s later,
+  `0x80990004`, param `0x14008061` (the error bit, 26, as decoded); given
+  as `/data/...`. 1.05 removes it and tries `/user/data/...` once.
 
 ### One module, and the cleanup (0.95)
 

@@ -101,6 +101,10 @@ static void dllFill(int k, BgftProgress* pr) {
     pr->transferred = pr->transferredTotal = st == DLS_DONE ? size : bytes;
     pr->numIndex = 1;
     pr->numTotal = 1;
+    // "Preparing to download... (n%)" reads preparingPercent (1.05: 1.04's
+    // answers were right and the list still read 0%; and the answer ends at
+    // 0x40, with no percentTotal after it). Ours: how much has come.
+    pr->preparingPercent = st == DLS_DONE ? 100 : it->size ? (int32_t)(bytes * 100u / it->size) : 0;
     pr->restSec = pr->restSecTotal = st == DLS_DONE ? 0 : rest;
 }
 

@@ -202,13 +202,20 @@ static int pkgHeadUrl(const char* url, const char* extra, PkgHead* out) {
 
 // The package (a URL, or a path on the console) registered with the
 // service and started: its task id, or a negative code.
+// The form of a path on the console the service is given: 0 the system's
+// (/data/...), 1 the shell's own (/user/data/...). 1.04's package, given as
+// /data/..., was taken, then failed 2 s later with 0x80990004; pkgItem then
+// tries the other form, and keeps it for the rest of the boot.
+static int g_pkgUserPaths;
+
 static int32_t pkgRegister(const char* where, const char* extra, const char* name) {
     if (!bgftSetup()) return -1;
     if (g_bgft.user == -1) bgftUser();
     const int local = where[0] == '/';
     char path[MAX_PATH];
-    // The service's paths are the system's: /user/data is /data.
-    fmt(path, sizeof(path), "%s", local && !memcmp(where, "/user/data/", 11) ? where + 5 : where);
+    fmt(path, sizeof(path), "%s",
+        local && !g_pkgUserPaths && !memcmp(where, "/user/data/", 11) ? where + 5 : where);
+    if (local) logLine("pkg: given to the service as %s", path);
     PkgHead head;
     if (!(local ? pkgHeadLocal(where, &head) : pkgHeadUrl(where, extra, &head))) {
         logLine("pkg: %s: not a package (no CNT header)", local ? where : "a URL");
@@ -420,7 +427,22 @@ static int pkgItem(int i) {
     if (task < 0) return task == -2 || task == -3 ? GET_GONE : GET_RETRY;
     it->task = task;
     dlStatus();
-    const int rc = pkgFollow(task, &it->bytes, &it->size, &g_dls.takeBack);
+    int rc = pkgFollow(task, &it->bytes, &it->size, &g_dls.takeBack);
+    if (rc == (int)0x80990004 && where[0] == '/' && !g_pkgUserPaths) {
+        // Failed as it began (1.04): the path's other form, once. The failed
+        // task goes first, or the content id is taken (0x80990086).
+        typedef int (*FnTaskId)(int32_t);
+        FnTaskId unregister = (FnTaskId)anySym(libLoad("libSceBgft.sprx"), "sceBgftServiceIntDownloadUnregisterTask");
+        logLine("pkg: task %d failed 0x80990004: removed 0x%08X; trying the path as /user/data/...", task,
+                (unsigned)(unregister ? unregister(task) : -1));
+        g_pkgUserPaths = 1;
+        const int32_t again = pkgRegister(where, it->arg[1], it->title);
+        if (again < 0) return again == (int32_t)0x80990088 ? GET_DONE : GET_RETRY;
+        it->task = again;
+        dlStatus();
+        rc = pkgFollow(again, &it->bytes, &it->size, &g_dls.takeBack);
+        if (rc) g_pkgUserPaths = 0;  // no better: back to the system's form
+    }
     return rc == 0 ? GET_DONE : rc == 1 ? GET_STOPPED : GET_RETRY;
 }
 
