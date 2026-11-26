@@ -516,8 +516,10 @@ static uint8_t* outBuf(const Frame* f, int arg, size_t size) {
 // with no file, is left as it was, its path logged. Nothing is sent anywhere.
 //
 // The file: the path after /v1/ebgm/, each character not a letter or digit
-// made '_', ".json" after it; with its query first, then without
-// (me_partner_profile_partner_spotify.json, then me_partner_profile.json).
+// made '_', ".json" after it; with its query first, then without, then
+// without its last part (me_partner_profile_partner_spotify.json, then
+// me_partner_profile.json; recommended_views_SCMP00001_00.json, then
+// recommended_views.json).
 
 static int contains(const char* s, const char* part);
 
@@ -534,10 +536,19 @@ static EbgmReq g_ebgm[EBGM_SLOTS];
 static char* g_ebgmPool;
 static volatile int g_ebgmLock;
 
-static void ebgmName(const char* path, int withQuery, char* out, size_t cap) {
+// how: 0 with the query, 1 without, 2 without the last part of the path too
+// (recommended/views/SCMP00001_00 -> recommended_views: the views asked for
+// the app in front, one file for any).
+static void ebgmName(const char* path, int how, char* out, size_t cap) {
     size_t o = (size_t)fmt(out, cap, EBGM_DIR "/");
+    const char* end = path;
+    while (*end && *end != '?') end++;
+    if (how == 2) {
+        while (end > path && end[-1] != '/') end--;
+        if (end > path) end--;
+    }
     for (const char* p = path; *p && o + 6 < cap; p++) {
-        if (*p == '?' && !withQuery) break;
+        if (how && p >= end) break;
         const char c = *p;
         out[o++] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) ? c : '_';
     }
@@ -562,13 +573,13 @@ static void ebgmCreated(Frame* f) {
     const char* sub = path;
     static const char prefix[] = "/v1/ebgm/";
     if (memcmp(path, prefix, sizeof(prefix) - 1) == 0) sub = path + sizeof(prefix) - 1;
-    char name[2][200];
-    ebgmName(sub, 1, name[0], sizeof(name[0]));
-    ebgmName(sub, 0, name[1], sizeof(name[1]));
+    char name[3][200];
+    for (int i = 0; i < 3; i++) ebgmName(sub, i, name[i], sizeof(name[i]));
     int fd = -1, which = 0;
-    for (; which < 2 && fd < 0; which++) fd = sysOpen(name[which], SC_O_RDONLY, 0);
+    for (; which < 3 && fd < 0; which++) fd = sysOpen(name[which], SC_O_RDONLY, 0);
     if (fd < 0) {
-        say("ebgm: %s (method %lu): no file (%s), left as it was", path, f->gpr[3], name[0]);
+        say("ebgm: %s (method %lu): no file (%s, %s or %s), left as it was", path, f->gpr[3],
+            name[0], name[1], name[2]);
         return;
     }
     if (!g_ebgmPool) g_ebgmPool = sysMap(EBGM_SLOTS * EBGM_MAX);

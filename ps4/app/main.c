@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.39"
+#define APP_VERSION "0.40"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -850,6 +850,34 @@ static void draw(void) {
     for (int i = 0; i < 12 && y < H - LINE; i++, y += LINE - 6) text(x, y, DIM, g_logTail[i]);
 }
 
+// ---- the Music section's answers (the music watch's ebgm/, an experiment) ----
+//
+// Guesses at PSN's /v1/ebgm/ answers, written each time the app starts
+// unless ebgm/keep is there (then they are yours to change). The profile was
+// taken (0.39); the views (the Music section's sections and playlists) are a
+// first guess, each playlist under several names, as the shell's own strings
+// give only views, section_title and image_url.
+
+#define PLAYLIST_GUESS                                                                         \
+    "{\"name\":\"Shell Companion queue\",\"title\":\"Shell Companion queue\","                 \
+    "\"uri\":\"spotify:user:shellcompanion:playlist:queue\",\"id\":\"queue\","                 \
+    "\"type\":\"playlist\",\"description\":\"Music on this PS4\",\"image_url\":\"\","          \
+    "\"images\":[],\"total\":2,\"track_count\":2,\"tracks\":{\"total\":2}}"
+
+static void writeEbgm(void) {
+    mkdir(SC_BGM_DIR "/ebgm", 0777);
+    if (access(SC_BGM_DIR "/ebgm/keep", F_OK) == 0) return;
+    static const char profile[] =
+        "{\"partner\":\"spotify\",\"subscriptionType\":\"PREMIUM\",\"legalCountry\":\"US\"}\n";
+    writeFile(SC_BGM_DIR "/ebgm/me_partner_profile.json", profile, sizeof(profile) - 1);
+    static const char views[] =
+        "{\"upgrade_scopes_required\":false,\"views\":[{\"section_title\":\"Shell Companion\","
+        "\"title\":\"Shell Companion\",\"id\":\"shellcompanion\","
+        "\"items\":[" PLAYLIST_GUESS "],\"playlists\":[" PLAYLIST_GUESS "],"
+        "\"content\":{\"items\":[" PLAYLIST_GUESS "]}}]}\n";
+    writeFile(SC_BGM_DIR "/ebgm/recommended_views.json", views, sizeof(views) - 1);
+}
+
 // ---- the app ----
 
 // What GoldHEN's jailbreak replaced (the SDK's jailbreak_backup), to put
@@ -1081,12 +1109,7 @@ int main(void) {
 
     // The Music section's first answer for the music watch (ps4/mcw, ebgm/):
     // written once, then left for you to change.
-    mkdir(SC_BGM_DIR "/ebgm", 0777);
-    if (access(SC_BGM_DIR "/ebgm/me_partner_profile.json", F_OK) != 0) {
-        static const char profile[] =
-            "{\"partner\":\"spotify\",\"subscriptionType\":\"PREMIUM\",\"legalCountry\":\"US\"}\n";
-        writeFile(SC_BGM_DIR "/ebgm/me_partner_profile.json", profile, sizeof(profile) - 1);
-    }
+    writeEbgm();
 
     // Load it at once: the main thing the app is for.
     loadPlayer();

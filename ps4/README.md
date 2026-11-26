@@ -290,6 +290,17 @@ file, is left as it was and logged with the file looked for, so each next
 request shows in `mcw.log`. The test app writes a first guess for the profile
 (`{"partner":"spotify","subscriptionType":"PREMIUM","legalCountry":"US"}`).
 
+### The profile was taken (0.39)
+
+With `me_partner_profile.json` answering, the Music section asked next for
+`/v1/ebgm/recommended/views/SCMP00001_00`: the sections and their playlists
+for the app in front (its title, `_00`), as Spotify's showed "Featured on
+PlayStation: MLB The Show" while that game ran. From 0.40 a file may also be
+named without the path's last part (`recommended_views.json`, for any app),
+and the test app writes a first guess at the views each time it starts
+(unless `ebgm/keep` is there): one section, "Shell Companion", with one
+playlist under several key names (`items`, `playlists`, `content.items`).
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
