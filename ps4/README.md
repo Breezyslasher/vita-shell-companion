@@ -676,6 +676,12 @@ logged twice and the result of a load was never seen. 0.64 hooks
 each of ours (`rowart: OUR box … loaded: ok|FAILED`, with the shell's own
 error text) and the shell's own first 12, for comparison.
 
+0.64 showed that the shell's own loads succeed, but every one of ours failed,
+with an error text 1164 characters long. 0.65 logs that text in full
+(`rowart:   error …`) and gives our loads the shell's global image cache
+(`ImageObject.GlobalCache`, through `ImageOptions.set_Cache`). Our loads had
+no cache; the shell's always have one.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our

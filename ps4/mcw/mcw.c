@@ -1000,7 +1000,7 @@ static void monoText(uint64_t p, char* out, size_t cap) {
     }
     int32_t len;
     memcpy(&len, s + 16, 4);
-    if (len < 0 || len > 200) {
+    if (len < 0 || len > 8192) {  // what fits in out is kept (0.65: was 200)
         fmt(out, cap, "(length %d)", len);
         return;
     }
@@ -1160,6 +1160,7 @@ static struct {
     void *scaleType, *getImage;                  // ImageBox
     void *options, *optCtor, *optConvert;        // ImageOptions
     void *fFormat, *fResize, *fUpdated;          // its fields (0.63)
+    void *setCache, *globalCache;                // its Cache, ImageObject.GlobalCache (0.65)
     void *setX, *setY, *setW, *setH, *getX, *setVisible;  // UINode
     void* appendChild;                           // Widget
     void* jsonItem;                              // JsonObject.get_Item
@@ -1218,6 +1219,16 @@ static void* rowOptions(void) {
     if (g_row.fUpdated) {
         uint8_t yes = 1;
         g_mono.set(o, g_row.fUpdated, &yes);
+    }
+    // The shell gives every load a cache; 0.63's had none, and failed.
+    if (g_row.setCache && g_row.globalCache) {
+        void* cache = rowCall(g_row.globalCache, NULL, NULL);
+        if (cache) {
+            void* args[1] = {cache};
+            rowCall(g_row.setCache, o, args);
+        }
+        static int said;
+        if (!said++) say("rowart: the loads' cache: %p", cache);
     }
     return o;
 }
@@ -1351,7 +1362,7 @@ static void rowLoaded(Frame* f) {
     static int others;
     if (ours < 0 && others >= 12) return;
     if (ours < 0) others++;
-    char err[400];
+    char err[1400];
     err[0] = 0;
     void* exc = NULL;
     if (args && g_mono.objectClass && g_mono.fieldByName) {
@@ -1365,8 +1376,24 @@ static void rowLoaded(Frame* f) {
         }
     }
     void* asset = g_row.getImage ? rowCall(g_row.getImage, box, NULL) : NULL;
-    say("rowart: %s box %p (row entry %d) loaded: %s; its Image %s%s%s", ours >= 0 ? "OUR" : "shell's",
-        box, ours, exc ? "FAILED" : "ok", asset ? "set" : "empty", err[0] ? "; error: " : "", err);
+    say("rowart: %s box %p (row entry %d) loaded: %s; its Image %s", ours >= 0 ? "OUR" : "shell's",
+        box, ours, exc ? "FAILED" : "ok", asset ? "set" : "empty");
+    // The error, in pieces a log line holds; once per text seen.
+    static int errSaid;
+    if (err[0] && errSaid < 3) {
+        errSaid++;
+        const size_t n = strlen(err);
+        for (size_t at = 0; at < n; at += 200) {
+            char part[204];
+            size_t k = 0;
+            while (k < 200 && at + k < n) {
+                part[k] = err[at + k];
+                k++;
+            }
+            part[k] = 0;
+            say("rowart:   error %s", part);
+        }
+    }
 }
 
 // Mono's functions and the classes' methods, once (on the watch's thread,
@@ -1421,6 +1448,11 @@ static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* class
         if (or_ == 0x68) g_row.fResize = fr;
         if (ou == 0x74) g_row.fUpdated = fu;
         if (g_row.optCtor) g_row.options = opts;
+        g_row.setCache = m(opts, "set_Cache", 1);
+        void* io = cls(pui, "Sce.PlayStation.PUI", "ImageObject");
+        g_row.globalCache = io ? m(io, "get_GlobalCache", 0) : NULL;
+        say("rowart: ImageOptions.set_Cache %p, ImageObject.get_GlobalCache %p", g_row.setCache,
+            g_row.globalCache);
     }
     if (node) {
         g_row.setX = m(node, "set_X", 1);
