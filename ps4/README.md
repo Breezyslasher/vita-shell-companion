@@ -896,6 +896,42 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### Large queues (0.84)
+
+Up to 10,000 tracks in up to 1,000 albums (512 and 64 before).
+
+- **Memory:** paths, URLs and tags are kept in a pool of 1 MB chunks, mapped
+  as needed and freed when the queue is loaded again. The tables hold
+  pointers. The fixed arrays of before would have taken ~15 MB in the shell
+  at 4,000 tracks.
+- **Files read whole into memory mapped for their size:** `queue.txt`,
+  `streams.txt`, `liked.txt` (fixed buffers before: 48 KB, 64 KB, 64 KB).
+- **Lookups by hash:** a path to its track (streams.txt's duplicates, Liked)
+  and an album's name to its album, instead of one at a time.
+- **Tag cache, `tags.txt`:**
+  `path<tab>size<tab>title<tab>artist<tab>album<tab>cover file`, a line per
+  local file. It holds the file's own tags (not an app's), and is rewritten
+  with the library's files each time. A file is read again only when its
+  size changed or its cover file is gone.
+- **Covers by content, `ebgm/art/<hash>-<length>.jpg|png`:** written once
+  however many tracks carry it, with a `&w=192&h=192` copy for tiles. A
+  different picture always has a different name, so the shell's picture
+  cache can't show an old one. The per-track and per-album files of
+  0.71–0.83 are deleted.
+- **Row covers, `ebgm/rowart-<rev>.txt`:** a line per track (a `file://`
+  URL in `ebgm/art/`, a cover URL, or empty). The watch reads it whole once
+  for each library (`art_rev` in status.txt), instead of a file per track.
+- **Sizes:** the player's list files are sized for the library
+  (1 MB + 900 bytes a track). In the watch, an answer can be 256 KB (64 KB
+  before) and a track list read whole 4 MB (1 MB). The first 40 library
+  lines are logged.
+
+On Linux, 4,000 generated MP3s in 300 albums, carrying 5 distinct covers:
+the first load read every tag in 0.2 s, the second took them from the cache
+in 12 ms. The covers made 10 files in `art/`. `tracks_all.json` was 670 KB
+and the front page 58 KB. The client library takes up to 10,000 tracks, its
+buffer sized to them.
+
 ### Rows' covers after several lists (0.83)
 
 The watch keeps an entry for each row it gave a cover. An entry was freed

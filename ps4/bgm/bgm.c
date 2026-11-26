@@ -46,7 +46,7 @@ static FnSetVolume g_aoVolume;
 
 #define RATE 48000
 #define GRAIN 1024  // frames a grain, ~21 ms
-#define MAX_TRACKS 512
+#define MAX_TRACKS 10000  // 0.84: 512 before; the tables hold pointers into g_pool
 #define MAX_PATH 768  // a path, or a URL (0.72), Plex's with its token
 #define MAX_FILE (96u << 20)
 
@@ -60,7 +60,45 @@ static const char* stateName(int s) {
 // play: g_count of them, g_index the one playing). The Music section edits
 // the queue (0.67): an album played becomes it, a track moved, taken out, or
 // put next or last in it.
-static char g_tracks[MAX_TRACKS][MAX_PATH];
+// Text kept for the library (paths, URLs, tags), in chunks of 1 MB mapped as
+// needed and freed when the library is loaded again (0.84: fixed arrays
+// before, 2 MB for 512 tracks, which 4000 would have made 15).
+#define POOL_CHUNK (1u << 20)
+static struct {
+    char* chunk[512];
+    int n;
+    size_t used;
+} g_pool;
+
+static void poolReset(void) {
+    for (int i = 0; i < g_pool.n; i++) sysUnmap(g_pool.chunk[i], POOL_CHUNK);
+    g_pool.n = 0;
+    g_pool.used = 0;
+}
+
+// len bytes of s kept, nul-terminated; "" for none (or no memory).
+static const char* poolStr(const char* s, size_t len) {
+    if (!s || !len) return "";
+    if (len >= POOL_CHUNK) len = POOL_CHUNK - 1;
+    if (!g_pool.n || g_pool.used + len + 1 > POOL_CHUNK) {
+        if (g_pool.n >= 512) return "";
+        char* c = (char*)sysMap(POOL_CHUNK);
+        if (!c) return "";
+        g_pool.chunk[g_pool.n++] = c;
+        g_pool.used = 0;
+    }
+    char* p = g_pool.chunk[g_pool.n - 1] + g_pool.used;
+    memcpy(p, s, len);
+    p[len] = 0;
+    g_pool.used += len + 1;
+    return p;
+}
+
+static const char* poolCopy(const char* s) {
+    return s ? poolStr(s, strlen(s)) : "";
+}
+
+static const char* g_tracks[MAX_TRACKS];
 static int g_libCount;
 static int g_q[MAX_TRACKS];
 static int g_count;
@@ -73,11 +111,71 @@ static uint64_t g_seekMs, g_heldPosMs;
 // A streamed track's tags as queue.txt gives them (0.72): URL, then title,
 // artist, album and a cover's URL, tab-separated; "" where not given.
 #define GIVEN_TEXT 160
-#define GIVEN_COVER 640
 static struct {
-    char title[GIVEN_TEXT], artist[GIVEN_TEXT], album[GIVEN_TEXT];
-    char cover[GIVEN_COVER];
+    const char *title, *artist, *album, *cover;  // in g_pool, "" where not given
 } g_given[MAX_TRACKS];
+
+// A path's track by its hash (FNV-1a), for streams.txt's and liked.txt's
+// (0.84: they were looked for one track at a time).
+#define PATH_SLOTS 32768
+static int g_pathSlot[PATH_SLOTS];  // a track + 1, 0 for none
+
+static uint32_t hashBytes(const char* s, size_t n) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)s[i]) * 16777619u;
+    return h;
+}
+
+static int pathFind(const char* s, size_t n) {
+    for (uint32_t k = hashBytes(s, n) & (PATH_SLOTS - 1);; k = (k + 1) & (PATH_SLOTS - 1)) {
+        const int t = g_pathSlot[k] - 1;
+        if (t < 0) return -1;
+        if (strlen(g_tracks[t]) == n && !memcmp(g_tracks[t], s, n)) return t;
+    }
+}
+
+static void pathAdd(int i) {
+    const size_t n = strlen(g_tracks[i]);
+    uint32_t k = hashBytes(g_tracks[i], n) & (PATH_SLOTS - 1);
+    while (g_pathSlot[k]) k = (k + 1) & (PATH_SLOTS - 1);
+    g_pathSlot[k] = i + 1;
+}
+
+static void pathIndex(void) {
+    memset(g_pathSlot, 0, sizeof(g_pathSlot));
+    for (int i = 0; i < g_libCount; i++) pathAdd(i);
+}
+
+// A whole file into memory mapped for it, nul-terminated: its length, or -1
+// (0.84: fixed buffers before, 48 KB for queue.txt). *mapped to unmap.
+static int64_t readMapped(const char* path, char** out, size_t* mapped) {
+    *out = NULL;
+    *mapped = 0;
+    const int fd = sysOpen(path, SC_O_RDONLY, 0);
+    if (fd < 0) return -1;
+    const int64_t size = sysSeek(fd, 0, 2);
+    sysSeek(fd, 0, 0);
+    if (size < 0 || size > (int64_t)(64u << 20)) {
+        sysClose(fd);
+        return -1;
+    }
+    *mapped = ((size_t)size + 1 + 0x3FFF) & ~(size_t)0x3FFF;
+    *out = (char*)sysMap(*mapped);
+    if (!*out) {
+        sysClose(fd);
+        *mapped = 0;
+        return -1;
+    }
+    int64_t got = 0;
+    while (got < size) {
+        const int k = sysRead(fd, *out + got, (size_t)(size - got));
+        if (k <= 0) break;
+        got += k;
+    }
+    sysClose(fd);
+    (*out)[got] = 0;
+    return got;
+}
 static int g_state = ST_STOPPED;
 // The volume, 0 to 32768 (0 dB): the quick menu's, through the music watch
 // (volume=<n> as cmd).
@@ -789,32 +887,26 @@ static void addTrack(const char* path, size_t len) {
     size_t end = 0;
     while (end < len && !SEP(path[end])) end++;
     if (end >= MAX_PATH) return;
-    memcpy(g_tracks[g_libCount], path, end);
-    g_tracks[g_libCount][end] = 0;
-    char* fields[4] = {g_given[g_libCount].title, g_given[g_libCount].artist,
-                       g_given[g_libCount].album, g_given[g_libCount].cover};
-    const size_t caps[4] = {GIVEN_TEXT, GIVEN_TEXT, GIVEN_TEXT, GIVEN_COVER};
-    size_t at = end;
-    for (int f = 0; f < 4; f++) {
-        fields[f][0] = 0;
-        if (at >= len) continue;
-        at++;  // the tab
-        size_t k = 0;
-        while (at < len && !SEP(path[at])) {
-            if (k + 1 < caps[f]) fields[f][k++] = path[at];
-            at++;
-        }
-        // Spaces around a field, as one may write " | ".
-        while (k && fields[f][k - 1] == ' ') k--;
-        fields[f][k] = 0;
-        size_t lead = 0;
-        while (fields[f][lead] == ' ') lead++;
-        if (lead) memmove(fields[f], fields[f] + lead, k - lead + 1);
-    }
-#undef SEP
     // The URL without spaces after it.
     size_t u = end;
-    while (u && g_tracks[g_libCount][u - 1] == ' ') g_tracks[g_libCount][--u] = 0;
+    while (u && path[u - 1] == ' ') u--;
+    g_tracks[g_libCount] = poolStr(path, u);
+    const char** fields[4] = {&g_given[g_libCount].title, &g_given[g_libCount].artist,
+                              &g_given[g_libCount].album, &g_given[g_libCount].cover};
+    size_t at = end;
+    for (int f = 0; f < 4; f++) {
+        *fields[f] = "";
+        if (at >= len) continue;
+        at++;  // the tab
+        size_t from = at;
+        while (at < len && !SEP(path[at])) at++;
+        // Spaces around a field, as one may write " | ".
+        size_t to = at;
+        while (from < to && path[from] == ' ') from++;
+        while (to > from && path[to - 1] == ' ') to--;
+        *fields[f] = poolStr(path + from, to - from);
+    }
+#undef SEP
     g_libCount++;
 }
 
@@ -845,13 +937,11 @@ static void scanMusic(void) {
     }
     sysClose(fd);
     // By name: insertion sort, as there are few.
-    static char tmp[MAX_PATH];
     for (int i = 1; i < g_libCount; i++) {
-        memcpy(tmp, g_tracks[i], MAX_PATH);
+        const char* tmp = g_tracks[i];
         int j = i - 1;
-        for (; j >= 0 && cmpName(g_tracks[j], tmp) > 0; j--)
-            memcpy(g_tracks[j + 1], g_tracks[j], MAX_PATH);
-        memcpy(g_tracks[j + 1], tmp, MAX_PATH);
+        for (; j >= 0 && cmpName(g_tracks[j], tmp) > 0; j--) g_tracks[j + 1] = g_tracks[j];
+        g_tracks[j + 1] = tmp;
     }
 }
 
@@ -860,12 +950,14 @@ static void scanMusic(void) {
 static void writeLibrary(void);
 
 static void loadQueue(void) {
-    static char text[MAX_TRACKS * 96];
+    char* text;
+    size_t textMapped;
     g_seekMs = 0;
     g_libCount = 0;
     g_count = 0;
     g_index = 0;
-    const int n = readText(SC_BGM_QUEUE, text, sizeof(text));
+    poolReset();
+    const int n = (int)readMapped(SC_BGM_QUEUE, &text, &textMapped);
     int start = 0;
     if (n > 0) {
         for (int at = 0; at < n;) {
@@ -885,15 +977,18 @@ static void loadQueue(void) {
             }
             at = end + 1;
         }
-        logLine("queue.txt: %d track(s)", g_libCount);
+        logLine("queue.txt: %d track(s)%s", g_libCount, g_libCount >= MAX_TRACKS ? " (the most taken)" : "");
     } else {
         scanMusic();
         logLine("no queue.txt; music/: %d track(s)", g_libCount);
     }
+    if (text) sysUnmap(text, textMapped);
+    pathIndex();
     // streams.txt's URLs too, read here as well as by the app (0.74): those
     // not already in, after the rest.
-    static char streams[64 * 1024];
-    const int sn = readText(SC_BGM_DIR "/streams.txt", streams, sizeof(streams));
+    char* streams;
+    size_t streamsMapped;
+    const int sn = (int)readMapped(SC_BGM_DIR "/streams.txt", &streams, &streamsMapped);
     int added = 0;
     for (int at = 0; at < sn;) {
         int end = at;
@@ -908,17 +1003,16 @@ static void loadQueue(void) {
         if (len > 8 && isUrl(line)) {
             int urlLen = 0;
             while (urlLen < len && line[urlLen] != '\t' && line[urlLen] != '|' && line[urlLen] != ' ') urlLen++;
-            int seen = 0;
-            for (int i = 0; i < g_libCount && !seen; i++)
-                seen = (int)strlen(g_tracks[i]) == urlLen && !memcmp(g_tracks[i], line, (size_t)urlLen);
-            if (!seen) {
+            if (pathFind(line, (size_t)urlLen) < 0 && g_libCount < MAX_TRACKS) {
                 addTrack(line, (size_t)len);
+                pathAdd(g_libCount - 1);
                 added++;
             }
         }
         at = end + 1;
     }
-    logLine("streams.txt: %d byte(s), %d stream(s) added", sn, added);
+    if (streams) sysUnmap(streams, streamsMapped);
+    logLine("streams.txt: %d byte(s), %d stream(s) added", sn < 0 ? 0 : sn, added);
     // The queue: the whole library, in order.
     for (int i = 0; i < g_libCount; i++) g_q[i] = i;
     g_count = g_libCount;
@@ -952,19 +1046,131 @@ static const char* baseName(const char* path) {
 #define LIB_DIR SC_BGM_DIR "/ebgm"
 #define LIB_URL "file:///user/data/ShellCompanion/ps4/ebgm/"
 #define LIB_URI "spotify:user:shellcompanion:playlist:"
-#define MAX_ALBUMS 64
+#define MAX_ALBUMS 1000  // 0.84: 64 before
 #define LIB_TEXT 160
 
 static struct {
-    char title[LIB_TEXT], artist[LIB_TEXT], album[LIB_TEXT];
+    const char *title, *artist, *album;  // in g_pool
+    const char* art;  // its cover's file in ebgm/art/ (0.84), or ""
     int albumId;
 } g_lib[MAX_TRACKS];
 static struct {
     int tracks;
-    int art;  // its cover written: 1 JPEG, 2 PNG
-    int url;  // else a track whose cover URL is its (0.72), or -1
+    const char* art;  // its cover's file in ebgm/art/, a JPEG if one of its tracks has one, or ""
+    int url;          // else a track whose cover URL is its (0.72), or -1
 } g_albums[MAX_ALBUMS];
 static int g_nAlbums;
+
+// Albums by name's hash (0.84: looked for one at a time before).
+#define ALBUM_SLOTS 4096
+static int g_albumSlot[ALBUM_SLOTS];  // an album + 1
+
+static int albumOf(int i) {
+    const char* name = g_lib[i].album;
+    const size_t n = strlen(name);
+    uint32_t k = hashBytes(name, n) & (ALBUM_SLOTS - 1);
+    for (;; k = (k + 1) & (ALBUM_SLOTS - 1)) {
+        const int a = g_albumSlot[k] - 1;
+        if (a < 0) break;
+        const char* other = g_lib[g_albums[a].tracks].album;
+        if (strlen(other) == n && !memcmp(other, name, n)) return a;
+    }
+    if (g_nAlbums >= MAX_ALBUMS) return -1;
+    const int a = g_nAlbums++;
+    g_albums[a].tracks = i;  // its first track, for its name
+    g_albums[a].art = "";
+    g_albums[a].url = -1;
+    g_albumSlot[k] = a + 1;
+    return a;
+}
+
+// ── The tag cache (0.84) ──────────────────────────────────────────────────────
+// A local file's tags read once: tags.txt, a line a file,
+// path<tab>size<tab>title<tab>artist<tab>album<tab>cover file (ebgm/art/),
+// rewritten with the library's files each time it is written. A file whose
+// size changed is read again. 4000 files read each time took minutes.
+#define TAG_CACHE SC_BGM_DIR "/tags.txt"
+#define CACHE_SLOTS 32768
+static struct {
+    char* text;
+    size_t mapped;
+    int n;
+    struct {
+        const char *path, *title, *artist, *album, *art;
+        uint64_t size;
+    } e[MAX_TRACKS];
+    int slot[CACHE_SLOTS];  // an entry + 1
+} g_cache;
+
+static void cacheLoad(void) {
+    if (g_cache.text) sysUnmap(g_cache.text, g_cache.mapped);
+    g_cache.n = 0;
+    memset(g_cache.slot, 0, sizeof(g_cache.slot));
+    const int64_t len = readMapped(TAG_CACHE, &g_cache.text, &g_cache.mapped);
+    for (int64_t at = 0; at < len && g_cache.n < MAX_TRACKS;) {
+        char* line = g_cache.text + at;
+        int64_t end = at;
+        while (end < len && g_cache.text[end] != '\n') end++;
+        g_cache.text[end] = 0;
+        char* f[6] = {line, 0, 0, 0, 0, 0};
+        int k = 1;
+        for (char* p = line; *p && k < 6; p++)
+            if (*p == '\t') {
+                *p = 0;
+                f[k++] = p + 1;
+            }
+        if (k == 6 && f[0][0] == '/') {
+            const int i = g_cache.n++;
+            g_cache.e[i].path = f[0];
+            g_cache.e[i].size = 0;
+            for (const char* q = f[1]; *q >= '0' && *q <= '9'; q++) g_cache.e[i].size = g_cache.e[i].size * 10 + (uint64_t)(*q - '0');
+            g_cache.e[i].title = f[2];
+            g_cache.e[i].artist = f[3];
+            g_cache.e[i].album = f[4];
+            g_cache.e[i].art = f[5];
+            uint32_t s = hashBytes(f[0], strlen(f[0])) & (CACHE_SLOTS - 1);
+            while (g_cache.slot[s]) s = (s + 1) & (CACHE_SLOTS - 1);
+            g_cache.slot[s] = i + 1;
+        }
+        at = end + 1;
+    }
+}
+
+static int cacheFind(const char* path) {
+    const size_t n = strlen(path);
+    for (uint32_t s = hashBytes(path, n) & (CACHE_SLOTS - 1);; s = (s + 1) & (CACHE_SLOTS - 1)) {
+        const int i = g_cache.slot[s] - 1;
+        if (i < 0) return -1;
+        if (!memcmp(g_cache.e[i].path, path, n + 1)) return i;
+    }
+}
+
+// The library's local files' tags, as tags.txt (a tab or a line break in a
+// tag made a space).
+static struct {
+    const char *title, *artist, *album;  // the file's own tags, "" where none
+    uint64_t size;
+} g_file[MAX_TRACKS];
+
+static void cacheSave(void) {
+    const size_t cap = 4096 + (size_t)g_libCount * 1200;
+    char* out = (char*)sysMap(cap);
+    if (!out) return;
+    size_t at = 0;
+    for (int i = 0; i < g_libCount && at + 1200 < cap; i++) {
+        if (isUrl(g_tracks[i])) continue;
+        const char* f[5] = {g_file[i].title, g_file[i].artist, g_file[i].album, g_lib[i].art, 0};
+        at += (size_t)fmt(out + at, cap - at, "%s\t%lu", g_tracks[i], (unsigned long)g_file[i].size);
+        for (int k = 0; k < 4; k++) {
+            out[at++] = '\t';
+            for (const char* q = f[k]; *q && at + 2 < cap; q++) out[at++] = (*q == '\t' || *q == '\n') ? ' ' : *q;
+        }
+        out[at++] = '\n';
+    }
+    out[at] = 0;
+    writeText(TAG_CACHE, out);
+    sysUnmap(out, cap);
+}
 
 static int libSame(const char* a, const char* b) {
     while (*a && *a == *b) a++, b++;
@@ -1027,7 +1233,7 @@ static void artClean(void) {
     if (fd < 0) return;
     static uint8_t buf[0x2000];
     char keep[16];
-    fmt(keep, sizeof(keep), "-%d.", g_artRev);
+    fmt(keep, sizeof(keep), "-%d.txt", g_artRev);
     int n;
     while ((n = sysGetdents(fd, buf, sizeof(buf))) > 0) {
         for (int at = 0; at < n;) {
@@ -1039,9 +1245,12 @@ static void artClean(void) {
             if (namlen < sizeof(nm)) {
                 memcpy(nm, name, namlen);
                 nm[namlen] = 0;
-                const int art = !memcmp(nm, "trackart", 8) ||  // .jpg, .png, .url
+                // 0.71-0.83's covers a track and an album, all gone (art/
+                // since 0.84); rowart-<rev>.txt of other libraries.
+                const int old = !memcmp(nm, "trackart", 8) ||
                                 (!memcmp(nm, "album", 5) && (hasText(nm, ".jpg") || hasText(nm, ".png")));
-                if (art && !hasText(nm, keep)) {
+                const int row = !memcmp(nm, "rowart-", 7) && !hasText(nm, keep);
+                if (old || row) {
                     char path[200];
                     fmt(path, sizeof(path), LIB_DIR "/%s", nm);
                     sysUnlink(path);
@@ -1053,14 +1262,6 @@ static void artClean(void) {
     sysClose(fd);
 }
 
-static void libArt(const char* name, const uint8_t* img, size_t n) {
-    char path[160];
-    fmt(path, sizeof(path), LIB_DIR "/%s&w=192&h=192", name);
-    const int fd = sysOpen(path, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
-    if (fd < 0) return;
-    sysWrite(fd, img, n);
-    sysClose(fd);
-}
 
 // A title from a file's name without a YouTube video's id, as download
 // tools add it (0.76): "Celebration-QZWRu3kqkG8", "Celebration [QZWRu3kqkG8]".
@@ -1090,49 +1291,79 @@ static void titleTidy(char* t) {
     }
 }
 
-// A track's tags, and its cover written for its album if it has none yet.
-static void libRead(int i) {
+// A cover's file in ebgm/art/, named by its bytes' hash (0.84): written
+// once however many tracks carry it (0.83 and before wrote one a track, 14
+// copies of one 482 KB PNG), and never the same name for another picture, so
+// the shell's picture cache cannot show an old one. Its copy named
+// "<name>&w=192&h=192" is for a tile (the shell adds that to image_url).
+#define ART_DIR LIB_DIR "/art"
+static const char* artSave(const uint8_t* img, uint64_t n, int kind) {
+    uint32_t h1 = 2166136261u, h2 = 0x9E3779B9u;
+    for (uint64_t k = 0; k < n; k++) {
+        h1 = (h1 ^ img[k]) * 16777619u;
+        h2 = (h2 ^ img[k]) * 0x01000193u + 0x7F4A7C15u;
+    }
+    char name[64], path[160];
+    fmt(name, sizeof(name), "%08x%08x-%lu.%s", h1, h2, (unsigned long)n, artExt(kind));
+    for (int tile = 0; tile < 2; tile++) {
+        fmt(path, sizeof(path), ART_DIR "/%s%s", name, tile ? "&w=192&h=192" : "");
+        if (sysExists(path)) continue;
+        char tmp[176];
+        fmt(tmp, sizeof(tmp), "%s.new", path);
+        const int fd = sysOpen(tmp, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+        if (fd < 0) continue;
+        const int w = sysWrite(fd, img, (size_t)n);
+        sysClose(fd);
+        if (w == (int)n) sysRename(tmp, path);
+        else sysUnlink(tmp);
+    }
+    return poolCopy(name);
+}
+
+// The file's title from its name, without its type or a video id.
+static const char* titleFromName(const char* path) {
+    char t[LIB_TEXT];
+    fmt(t, sizeof(t), "%s", baseName(path));
+    for (char* q = t + strlen(t); q > t; q--)
+        if (*q == '.') {
+            *q = 0;
+            break;
+        }
+    titleTidy(t);
+    return poolCopy(t);
+}
+
+// A local file's own tags and cover: from the cache if its size is the one
+// cached and its cover file is there, else read (its ID3 tag only).
+static int g_cacheHits, g_cacheReads;
+static void fileTags(int i) {
     static uint8_t head[10];
     const char* path = g_tracks[i];
-    g_lib[i].title[0] = g_lib[i].artist[0] = g_lib[i].album[0] = 0;
-    if (isUrl(path)) {
-        // Streamed (0.72): its tags as queue.txt gives them, its cover by
-        // its URL (trackart<n>-<rev>.url, for the music watch's rows).
-        const char* name = path;
-        for (const char* q = path; *q && *q != '?'; q++)
-            if (*q == '/') name = q + 1;
-        char base[GIVEN_TEXT];
-        size_t k = 0;
-        for (; name[k] && name[k] != '?' && k + 1 < sizeof(base); k++) base[k] = name[k];
-        base[k] = 0;
-        fmt(g_lib[i].title, LIB_TEXT, "%s", g_given[i].title[0] ? g_given[i].title : base);
-        fmt(g_lib[i].artist, LIB_TEXT, "%s", g_given[i].artist[0] ? g_given[i].artist : "Unknown artist");
-        fmt(g_lib[i].album, LIB_TEXT, "%s", g_given[i].album[0] ? g_given[i].album : "Streamed");
-        int a = 0;
-        while (a < g_nAlbums && !libSame(g_lib[g_albums[a].tracks].album, g_lib[i].album)) a++;
-        if (a == g_nAlbums && g_nAlbums < MAX_ALBUMS) {
-            g_albums[a].tracks = i;
-            g_albums[a].art = 0;
-            g_albums[a].url = -1;
-            g_nAlbums++;
-        }
-        g_lib[i].albumId = a < g_nAlbums ? a : -1;
-        if (g_given[i].cover[0]) {
-            if (a < g_nAlbums && !g_albums[a].art && g_albums[a].url < 0) g_albums[a].url = i;
-            char urlPath[96];
-            fmt(urlPath, sizeof(urlPath), LIB_DIR "/trackart%d-%d.url", i, g_artRev);
-            writeText(urlPath, g_given[i].cover);
-        }
-        logLine("library %d: streamed, \"%s\" by \"%s\", album \"%s\"; cover: %s", i, g_lib[i].title,
-                g_lib[i].artist, g_lib[i].album, g_given[i].cover[0] ? "a URL" : "none");
-        return;
-    }
+    g_file[i].title = g_file[i].artist = g_file[i].album = "";
+    g_lib[i].art = "";
     const int fd = sysOpen(path, SC_O_RDONLY, 0);
-    size_t size = 0;
-    if (fd >= 0) {
-        if (sysRead(fd, head, 10) == 10 && !memcmp(head, "ID3", 3)) size = 10 + syncsafe(head + 6);
-        if (size > (16u << 20)) size = 16u << 20;
+    if (fd < 0) return;
+    const int64_t fsize = sysSeek(fd, 0, 2);
+    g_file[i].size = fsize > 0 ? (uint64_t)fsize : 0;
+    const int c = cacheFind(path);
+    if (c >= 0 && g_cache.e[c].size == g_file[i].size) {
+        char artPath[160];
+        fmt(artPath, sizeof(artPath), ART_DIR "/%s", g_cache.e[c].art);
+        if (!g_cache.e[c].art[0] || sysExists(artPath)) {
+            g_file[i].title = poolCopy(g_cache.e[c].title);
+            g_file[i].artist = poolCopy(g_cache.e[c].artist);
+            g_file[i].album = poolCopy(g_cache.e[c].album);
+            g_lib[i].art = poolCopy(g_cache.e[c].art);
+            sysClose(fd);
+            g_cacheHits++;
+            return;
+        }
     }
+    g_cacheReads++;
+    sysSeek(fd, 0, 0);
+    size_t size = 0;
+    if (sysRead(fd, head, 10) == 10 && !memcmp(head, "ID3", 3)) size = 10 + syncsafe(head + 6);
+    if (size > (16u << 20)) size = 16u << 20;
     uint8_t* tag = size ? (uint8_t*)sysMap((size + 0x3FFF) & ~(size_t)0x3FFF) : NULL;
     size_t got = 0;
     if (tag) {
@@ -1144,82 +1375,76 @@ static void libRead(int i) {
             got += (size_t)n;
         }
     }
-    if (fd >= 0) sysClose(fd);
+    sysClose(fd);
+    if (!tag) return;
     // id3Read fills g_meta, the playing track's: kept and put back.
     static char keepCover[128];
-    const uint64_t keepOff = g_meta.artOff, keepLen = g_meta.artLen;
     static char keep[3][META_LEN];
+    const uint64_t keepOff = g_meta.artOff, keepLen = g_meta.artLen;
     memcpy(keep[0], g_meta.title, META_LEN);
     memcpy(keep[1], g_meta.artist, META_LEN);
     memcpy(keep[2], g_meta.album, META_LEN);
     memcpy(keepCover, g_meta.cover, sizeof(keepCover));
-    if (tag) id3Read(tag, got);
-    else memset(&g_meta, 0, sizeof(g_meta));
-    // An app's own title, artist and album over the file's tags (0.81).
-    fmt(g_lib[i].title, LIB_TEXT, "%s", g_given[i].title[0] ? g_given[i].title : g_meta.title);
-    fmt(g_lib[i].artist, LIB_TEXT, "%s",
-        g_given[i].artist[0] ? g_given[i].artist : g_meta.artist[0] ? g_meta.artist : "Unknown artist");
-    fmt(g_lib[i].album, LIB_TEXT, "%s",
-        g_given[i].album[0] ? g_given[i].album : g_meta.album[0] ? g_meta.album : "Unknown album");
-    if (!g_lib[i].title[0]) {  // the file's name, without its type
-        fmt(g_lib[i].title, LIB_TEXT, "%s", baseName(path));
-        for (char* q = g_lib[i].title + strlen(g_lib[i].title); q > g_lib[i].title; q--)
-            if (*q == '.') {
-                *q = 0;
-                break;
-            }
-        titleTidy(g_lib[i].title);
-    }
-    // Its album: one already seen, or a new one.
-    int a = 0;
-    while (a < g_nAlbums && !libSame(g_lib[g_albums[a].tracks].album, g_lib[i].album)) a++;
-    if (a == g_nAlbums && g_nAlbums < MAX_ALBUMS) {
-        g_albums[a].tracks = i;  // its first track, for its name
-        g_albums[a].art = 0;
-        g_albums[a].url = -1;
-        g_nAlbums++;
-    }
-    g_lib[i].albumId = a < g_nAlbums ? a : -1;
-    // The cover: a JPEG or a PNG; the album's a JPEG if one of its tracks
-    // has one (the tiles showed JPEGs in 0.58).
-    const uint8_t* img = tag ? tag + g_meta.artOff : NULL;
-    const int kind = img && g_meta.artLen > 4 && g_meta.artOff + g_meta.artLen <= got
-                         ? artKind(img, g_meta.artLen) : 0;
-    if (a < g_nAlbums && kind && (!g_albums[a].art || (g_albums[a].art == 2 && kind == 1))) {
-        char name[32];
-        fmt(name, sizeof(name), "album%d-%d.%s", a, g_artRev, artExt(kind));
-        libArt(name, img, (size_t)g_meta.artLen);
-        g_albums[a].art = kind;
-    }
-    // The track's own cover, for its row in a track list (the music watch
-    // draws it there, 0.62): trackart<n>-<rev>.jpg or .png.
-    if (!kind && g_given[i].cover[0]) {
-        // No cover in the file: the app's, by its URL (0.81).
-        if (a < g_nAlbums && !g_albums[a].art && g_albums[a].url < 0) g_albums[a].url = i;
-        char urlPath[96];
-        fmt(urlPath, sizeof(urlPath), LIB_DIR "/trackart%d-%d.url", i, g_artRev);
-        writeText(urlPath, g_given[i].cover);
-    }
-    if (kind) {
-        char artPath[96];
-        fmt(artPath, sizeof(artPath), LIB_DIR "/trackart%d-%d.%s", i, g_artRev, artExt(kind));
-        const int afd = sysOpen(artPath, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
-        if (afd >= 0) {
-            sysWrite(afd, img, (size_t)g_meta.artLen);
-            sysClose(afd);
-        }
-    }
-    logLine("library %d: \"%s\" by \"%s\", album \"%s\"; cover: %s (%lu bytes)", i, g_meta.title,
-            g_meta.artist, g_meta.album,
-            !g_meta.artLen ? "none" : kind == 1 ? "JPEG" : kind == 2 ? "PNG" : "another kind, not used",
-            g_meta.artLen);
-    if (tag) sysUnmap(tag, (size + 0x3FFF) & ~(size_t)0x3FFF);
+    id3Read(tag, got);
+    g_file[i].title = poolCopy(g_meta.title);
+    g_file[i].artist = poolCopy(g_meta.artist);
+    g_file[i].album = poolCopy(g_meta.album);
+    const uint8_t* img = tag + g_meta.artOff;
+    const int kind = g_meta.artLen > 4 && g_meta.artOff + g_meta.artLen <= got ? artKind(img, g_meta.artLen) : 0;
+    if (kind) g_lib[i].art = artSave(img, g_meta.artLen, kind);
+    sysUnmap(tag, (size + 0x3FFF) & ~(size_t)0x3FFF);
     memcpy(g_meta.title, keep[0], META_LEN);
     memcpy(g_meta.artist, keep[1], META_LEN);
     memcpy(g_meta.album, keep[2], META_LEN);
     memcpy(g_meta.cover, keepCover, sizeof(keepCover));
     g_meta.artOff = keepOff;
     g_meta.artLen = keepLen;
+}
+
+static int g_logged;  // library lines logged, the first 40 only (0.84)
+
+// A track's title, artist, album and cover: an app's (queue.txt) over the
+// file's own; its album found or made.
+static void libRead(int i) {
+    const char* path = g_tracks[i];
+    const int url = isUrl(path);
+    g_file[i].title = g_file[i].artist = g_file[i].album = "";
+    g_file[i].size = 0;
+    g_lib[i].art = "";
+    if (!url) fileTags(i);
+    const char* title = g_given[i].title[0] ? g_given[i].title : g_file[i].title;
+    if (!title[0]) {
+        if (url) {
+            const char* name = path;
+            for (const char* q = path; *q && *q != '?'; q++)
+                if (*q == '/') name = q + 1;
+            size_t k = 0;
+            while (name[k] && name[k] != '?') k++;
+            title = poolStr(name, k);
+        } else {
+            title = titleFromName(path);
+        }
+    }
+    g_lib[i].title = title;
+    g_lib[i].artist = g_given[i].artist[0] ? g_given[i].artist
+                      : g_file[i].artist[0] ? g_file[i].artist : "Unknown artist";
+    g_lib[i].album = g_given[i].album[0] ? g_given[i].album
+                     : g_file[i].album[0] ? g_file[i].album : url ? "Streamed" : "Unknown album";
+    const int a = albumOf(i);
+    g_lib[i].albumId = a;
+    if (a >= 0) {
+        // The album's cover: a JPEG if one of its tracks has one (the tiles
+        // showed JPEGs only in 0.58), else a PNG, else a cover URL.
+        const char* art = g_lib[i].art;
+        if (art[0] && (!g_albums[a].art[0] || (hasText(g_albums[a].art, ".png") && hasText(art, ".jpg"))))
+            g_albums[a].art = art;
+        if (!art[0] && g_given[i].cover[0] && g_albums[a].url < 0) g_albums[a].url = i;
+    }
+    if (g_logged < 40) {
+        g_logged++;
+        logLine("library %d: \"%s\" by \"%s\", album \"%s\"; cover: %s", i, g_lib[i].title, g_lib[i].artist,
+                g_lib[i].album, g_lib[i].art[0] ? g_lib[i].art : g_given[i].cover[0] ? "a URL" : "none");
+    }
 }
 
 // One playlist's tracks, the library's numbers list[0..n), as
@@ -1249,28 +1474,32 @@ static void libTracks(char* out, size_t cap, const char* id, const int* list, in
     writeText(path, out);
 }
 
-#define LIB_CAP (512u * 1024u)
-static char* g_libOut;  // the files' text, made here: mapped once
+// The files' text, made here: mapped for the library's size (0.84: 512 KB
+// before, which All songs of 4000 tracks would have passed).
+static char* g_libOut;
+static size_t g_libOutCap;
+#define LIB_CAP g_libOutCap
 
 // The liked tracks (liked.txt, a path a line, as the music watch keeps it for
 // R3 "+"): their library numbers, into list; how many.
 static int likedList(int* list) {
-    static char text[64 * 1024];
-    const int len = readText(SC_BGM_DIR "/liked.txt", text, sizeof(text));
+    char* text;
+    size_t mapped;
+    const int64_t len = readMapped(SC_BGM_DIR "/liked.txt", &text, &mapped);
     int n = 0;
-    for (int at = 0; at < len;) {
-        int end = at;
+    static uint8_t seen[MAX_TRACKS];
+    memset(seen, 0, sizeof(seen));
+    for (int64_t at = 0; at < len;) {
+        int64_t end = at;
         while (end < len && text[end] != '\n' && text[end] != '\r') end++;
-        text[end] = 0;
-        for (int i = 0; end > at && i < g_libCount; i++)
-            if (libSame(g_tracks[i], text + at)) {
-                int seen = 0;
-                for (int k = 0; k < n; k++) seen |= list[k] == i;
-                if (!seen) list[n++] = i;
-                break;
-            }
+        const int t = end > at ? pathFind(text + at, (size_t)(end - at)) : -1;
+        if (t >= 0 && !seen[t]) {
+            seen[t] = 1;
+            list[n++] = t;
+        }
         at = end + 1;
     }
+    if (text) sysUnmap(text, mapped);
     return n;
 }
 
@@ -1288,7 +1517,7 @@ static int g_list[MAX_TRACKS];  // a list's numbers, made here (the player's thr
 static int listArt(const int* list, int n) {
     for (int k = 0; k < n; k++) {
         const int a = g_lib[list[k]].albumId;
-        if (a >= 0 && a < g_nAlbums && (g_albums[a].art || g_albums[a].url >= 0)) return a;
+        if (a >= 0 && a < g_nAlbums && (g_albums[a].art[0] || g_albums[a].url >= 0)) return a;
     }
     return -1;
 }
@@ -1298,8 +1527,7 @@ static void viewList(size_t* at, const char* name, const char* id, int art, int 
     libAdd(out, LIB_CAP, at, "%s{\"name\":\"", first ? "" : ",");
     jsonPut(out, LIB_CAP, at, name);
     libAdd(out, LIB_CAP, at, "\",\"uri\":\"" LIB_URI "%s\",\"type\":\"playlist\",\"image_url\":\"", id);
-    if (art >= 0 && g_albums[art].art)
-        libAdd(out, LIB_CAP, at, LIB_URL "album%d-%d.%s", art, g_artRev, artExt(g_albums[art].art));
+    if (art >= 0 && g_albums[art].art[0]) libAdd(out, LIB_CAP, at, LIB_URL "art/%s", g_albums[art].art);
     else if (art >= 0 && g_albums[art].url >= 0) {  // a cover by its URL, the shell fetching it (0.72)
         const char* url = g_given[g_albums[art].url].cover;
         jsonPut(out, LIB_CAP, at, url);
@@ -1328,7 +1556,7 @@ static void writeViews(void) {
             char id[16];
             fmt(id, sizeof(id), "album%d", a);
             viewList(&at, g_lib[g_albums[a].tracks].album, id,
-                     g_albums[a].art || g_albums[a].url >= 0 ? a : -1,
+                     g_albums[a].art[0] || g_albums[a].url >= 0 ? a : -1,
                      albumList(a, g_list), a == 0);
         }
         libAdd(g_libOut, LIB_CAP, &at, "]}");
@@ -1353,13 +1581,52 @@ static void writeLiked(void) {
     writeViews();
 }
 
+// Each track's cover for its row, a line a track (its number the line's):
+// a file:// URL of its cover in ebgm/art/, its cover's URL, or empty. The
+// music watch reads it whole once a library (0.84: a file a track before).
+static void writeRowArt(void) {
+    const size_t cap = 4096 + (size_t)g_libCount * 160 + 1;
+    size_t extra = 0;
+    for (int i = 0; i < g_libCount; i++) extra += strlen(g_given[i].cover);
+    char* out = (char*)sysMap(cap + extra);
+    if (!out) return;
+    size_t at = 0;
+    for (int i = 0; i < g_libCount; i++) {
+        if (g_lib[i].art[0]) at += (size_t)fmt(out + at, cap + extra - at, LIB_URL "art/%s", g_lib[i].art);
+        else at += (size_t)fmt(out + at, cap + extra - at, "%s", g_given[i].cover);
+        out[at++] = '\n';
+    }
+    out[at] = 0;
+    char path[96];
+    fmt(path, sizeof(path), LIB_DIR "/rowart-%d.txt", g_artRev);
+    writeText(path, out);
+    sysUnmap(out, cap + extra);
+}
+
 static void writeLibrary(void) {
     sysMkdir(LIB_DIR, 0777);
+    sysMkdir(ART_DIR, 0777);
     g_nAlbums = 0;
+    memset(g_albumSlot, 0, sizeof(g_albumSlot));
     g_artRev = (int)((sysNowUs() / 1000u) % 1000000u);
+    const uint64_t t0 = sysNowUs();
+    cacheLoad();
+    g_cacheHits = g_cacheReads = g_logged = 0;
     for (int i = 0; i < g_libCount; i++) libRead(i);
+    cacheSave();
+    writeRowArt();
     artClean();
-    if (!g_libOut) g_libOut = (char*)sysMap(LIB_CAP);
+    logLine("library: tags of %d file(s) from the cache, %d read, in %lu ms", g_cacheHits, g_cacheReads,
+            (unsigned long)((sysNowUs() - t0) / 1000u));
+    const size_t want = ((size_t)(1u << 20) + (size_t)g_libCount * 900 + 0x3FFF) & ~(size_t)0x3FFF;
+    if (g_libOut && g_libOutCap < want) {
+        sysUnmap(g_libOut, g_libOutCap);
+        g_libOut = NULL;
+    }
+    if (!g_libOut) {
+        g_libOut = (char*)sysMap(want);
+        g_libOutCap = g_libOut ? want : 0;
+    }
     if (!g_libOut) return;
     for (int i = 0; i < g_libCount; i++) g_list[i] = i;
     libTracks(g_libOut, LIB_CAP, "all", g_list, g_libCount);

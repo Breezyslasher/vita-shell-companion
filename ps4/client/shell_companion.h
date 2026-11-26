@@ -71,8 +71,9 @@ typedef struct ScQueue {
     uint32_t positionMs;   // where in it
 } ScQueue;
 
-// The queue, written whole (queue.txt): MP3 and 16-bit WAV, up to 512
-// tracks. A field may not hold a tab or a line break (they are made
+// The queue, written whole (queue.txt): MP3 and 16-bit WAV, up to 10000
+// tracks (the Music section groups them in up to 1000 albums; a local file's
+// tags are read once and cached). A field may not hold a tab or a line break (they are made
 // spaces). 0, or -1 if it could not be written.
 int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
 

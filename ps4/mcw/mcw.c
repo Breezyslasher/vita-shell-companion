@@ -595,8 +595,8 @@ static int contains(const char* s, const char* part);
 
 #define EBGM_DIR SC_BGM_DIR "/ebgm"
 #define EBGM_SLOTS 16
-#define EBGM_MAX (64u * 1024u)
-#define TRACKS_MAX (1024u * 1024u)  // a track list file, whole (0.78)
+#define EBGM_MAX (256u * 1024u)  // 0.84: 64 KB, which the front page of 300 albums nearly filled
+#define TRACKS_MAX (4u * 1024u * 1024u)  // a track list file, whole (0.78; 1 MB before 0.84)
 
 typedef struct {
     int64_t id;     // the request's, 0 for a free slot
@@ -675,7 +675,7 @@ static int likedHas(const char* file, char* text, size_t cap) {
 }
 
 static void likedSet(const char* file, int on) {
-    static char text[64 * 1024];
+    static char text[512 * 1024];  // liked.txt (0.84: 64 KB)
     const int had = likedHas(file, text, sizeof(text));
     if (on == had) return;
     const int fd = sysOpen(LIKED ".tmp", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
@@ -716,7 +716,7 @@ static int ebgmLibrary(const char* sub, int64_t id) {
         likedSet(file, save);
         sendPlayer("liked\n");  // the Liked list again (0.67)
     }
-    static char text[64 * 1024];
+    static char text[512 * 1024];  // liked.txt (0.84: 64 KB)
     const int has = likedHas(file, text, sizeof(text));
     EbgmReq* r = ebgmClaim(id);
     if (!r) return 0;
@@ -1473,6 +1473,63 @@ static int rowIndex(void* data) {
     return n;
 }
 
+// The player's covers for rows, read whole when its library changes.
+static struct {
+    int rev, lines;
+    char* text;
+    size_t mapped;
+    uint32_t* at;  // each line's start
+} g_rowMap = {-1, 0, NULL, 0, NULL};
+
+// Track idx's cover into out: 1 if it has one.
+static int rowCover(int idx, int rev, char* out, size_t cap) {
+    out[0] = 0;
+    if (rev != g_rowMap.rev) {
+        if (g_rowMap.text) sysUnmap(g_rowMap.text, g_rowMap.mapped);
+        g_rowMap.text = NULL;
+        g_rowMap.lines = 0;
+        g_rowMap.rev = rev;
+        char path[128];
+        fmt(path, sizeof(path), EBGM_DIR "/rowart-%d.txt", rev);
+        const int fd = sysOpen(path, SC_O_RDONLY, 0);
+        if (fd >= 0) {
+            const int64_t size = sysSeek(fd, 0, 2);
+            sysSeek(fd, 0, 0);
+            if (size > 0 && size < (int64_t)(32u << 20)) {
+                g_rowMap.mapped = ((size_t)size + 1 + 0x3FFF) & ~(size_t)0x3FFF;
+                g_rowMap.text = (char*)sysMap(g_rowMap.mapped);
+                int64_t got = 0;
+                while (g_rowMap.text && got < size) {
+                    const int k = sysRead(fd, g_rowMap.text + got, (size_t)(size - got));
+                    if (k <= 0) break;
+                    got += k;
+                }
+                if (g_rowMap.text) g_rowMap.text[got] = 0;
+            }
+            sysClose(fd);
+        }
+        if (!g_rowMap.at) g_rowMap.at = (uint32_t*)sysMap(10000 * sizeof(uint32_t) + 0x4000);
+        if (g_rowMap.text && g_rowMap.at) {
+            uint32_t p = 0;
+            while (g_rowMap.text[p] && g_rowMap.lines < 10000) {
+                g_rowMap.at[g_rowMap.lines++] = p;
+                while (g_rowMap.text[p] && g_rowMap.text[p] != '\n') p++;
+                if (g_rowMap.text[p]) p++;
+            }
+        }
+        say("rowart: covers of library %d: %d track(s)", rev, g_rowMap.lines);
+    }
+    if (idx < 0 || idx >= g_rowMap.lines) return 0;
+    const char* p = g_rowMap.text + g_rowMap.at[idx];
+    size_t k = 0;
+    while (p[k] && p[k] != '\n' && k + 1 < cap) {
+        out[k] = p[k];
+        k++;
+    }
+    out[k] = 0;
+    return k > 0;
+}
+
 // A new ImageBox on the row, 64 square at its left.
 static void* rowNewBox(void* row) {
     void* img = g_row.objectNew(g_row.domain, g_row.imageBox);
@@ -1537,33 +1594,12 @@ static void rowArt(Frame* f) {
     if (g_row.fType) g_mono.get(data, g_row.fType, &type);
     void* json = monoGet(data, g_row.fData);
     const int idx = type == 0 ? rowIndex(json) : -1;
-    char path[128];
-    // The cover's name changes with each library (0.71: the shell keeps
-    // pictures by their address).
+    // The track's cover, from the player's ebgm/rowart-<rev>.txt (0.84: a
+    // file a track before): a file:// URL of a cover in ebgm/art/, a URL,
+    // or nothing.
     const int rev = statusInt("art_rev");
-    fmt(path, sizeof(path), EBGM_DIR "/trackart%d-%d.jpg", idx, rev);
-    int has = idx >= 0 && sysExists(path);
-    if (idx >= 0 && !has) {  // a PNG (0.71)
-        fmt(path, sizeof(path), EBGM_DIR "/trackart%d-%d.png", idx, rev);
-        has = sysExists(path);
-    }
-    // A streamed track's cover: its URL, in trackart<n>-<rev>.url (0.72),
-    // the shell fetching it.
     static char webCover[1048];
-    webCover[0] = 0;
-    if (idx >= 0 && !has) {
-        char urlPath[128];
-        fmt(urlPath, sizeof(urlPath), EBGM_DIR "/trackart%d-%d.url", idx, rev);
-        const int fd = sysOpen(urlPath, SC_O_RDONLY, 0);
-        if (fd >= 0) {
-            const int n = sysRead(fd, webCover, sizeof(webCover) - 1);
-            sysClose(fd);
-            webCover[n > 0 ? n : 0] = 0;
-            for (int k = 0; webCover[k]; k++)
-                if (webCover[k] == '\n' || webCover[k] == '\r') webCover[k] = 0;
-            has = webCover[0] != 0;
-        }
-    }
+    const int has = idx >= 0 && rowCover(idx, rev, webCover, sizeof(webCover));
     if (e < 0 && !has) return;  // nothing to show, nothing shown
     if (e < 0) {
         if (free_ < 0) return;
@@ -1601,8 +1637,7 @@ static void rowArt(Frame* f) {
                 }
             }
             static char url[1100];
-            if (webCover[0]) fmt(url, sizeof(url), "%s", webCover);
-            else fmt(url, sizeof(url), "file://%s", path);
+            fmt(url, sizeof(url), "%s", webCover);
             void* args[3] = {g_row.stringNew(g_row.domain, url), NULL, rowOptions()};
             g_row.ourLoad = 1;
             rowCall(g_row.loadAsync, img, args);

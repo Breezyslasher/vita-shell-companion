@@ -266,8 +266,14 @@ static size_t putField(char* out, size_t at, size_t cap, const char* s) {
 
 int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count) {
     if (!tracks && count) return -1;
-    if (count > 512) count = 512;
-    const size_t cap = 64 + (size_t)count * 2600;
+    if (count > 10000) count = 10000;
+    size_t cap = 64;
+    for (uint32_t i = 0; i < count; i++) {
+        const ScTrack* t = &tracks[i];
+        const char* f[6] = {t->local, t->url, t->title, t->artist, t->album, t->coverUrl};
+        cap += 16;
+        for (int k = 0; k < 6; k++) cap += f[k] ? strlen(f[k]) : 0;
+    }
     char* out = (char*)malloc(cap);
     if (!out) return -1;
     size_t at = (size_t)snprintf(out, cap, "#start %u\n#position %u\n", queue ? queue->index : 0,
