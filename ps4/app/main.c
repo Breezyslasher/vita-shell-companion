@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.59"
+#define APP_VERSION "0.60"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -869,21 +869,8 @@ static void writeEbgm(void) {
     static const char profile[] =
         "{\"spotify\":{\"subscriptionType\":\"PREMIUM\",\"legalCountry\":\"US\"}}\n";
     writeFile(SC_BGM_DIR "/ebgm/me_partner_profile.json", profile, sizeof(profile) - 1);
-    // The shell reads views[], each view's "name" (the section's title) and
-    // its "lists" (0.42's key log), each list's image_url, name and total
-    // (0.43's); and accounts_linked (0.44's). The tile loads image_url +
-    // "&w=192&h=192" as the file's own name, and only a JPEG (0.58: of five
-    // ways, only C and D were shown; 0.57's PNG by that name was not).
-#define PL(name, url)                                                                          \
-    "{\"name\":\"" name "\",\"uri\":\"spotify:user:shellcompanion:playlist:queue\","            \
-    "\"type\":\"playlist\",\"image_url\":\"" url "\",\"total\":2}"
-#define EBGM_URL "file:///user/data/ShellCompanion/ps4/ebgm/"
-    static const char views[] =
-        "{\"upgrade_scopes_required\":false,\"accounts_linked\":true,"
-        "\"views\":[{\"name\":\"Shell Companion\",\"lists\":["
-        PL("Shell Companion queue", EBGM_URL "playlist.jpg")
-        "]}]}\n";
-    writeFile(SC_BGM_DIR "/ebgm/recommended_views.json", views, sizeof(views) - 1);
+    // The sections, their playlists and tracks, and the covers: written
+    // by our player from its queue (ps4/bgm, writeLibrary) from 0.60.
     // A track chosen reads its id and token (0.55: id missing; the login's
     // userName and oauth, it seems).
     // The Spotify session link a playlist's track list asks for
@@ -893,25 +880,6 @@ static void writeEbgm(void) {
         "{\"id\":\"shellcompanion\",\"token\":\"shellcompanion\","
         "\"access_token\":\"shellcompanion\",\"expires_in\":3600}\n";
     writeFile(SC_BGM_DIR "/ebgm/sp_sessionlink.json", session, sizeof(session) - 1);
-    // A playlist's tracks (/v1/ebgm/playlist/tracks?uri=...&offset=0&limit=15,
-    // 0.53: any playlist's, the file without the query): a first guess, the
-    // shell's strings near it track_list, artists, explicit, is_playable.
-#define TRACK_GUESS(n, title, artist, uri, ms)                                                \
-    "{\"name\":\"" title "\",\"title\":\"" title "\",\"uri\":\"" uri "\",\"id\":\"" n "\","          \
-    "\"artists\":[{\"name\":\"" artist "\"}],\"artist\":\"" artist "\","                           \
-    "\"album\":{\"name\":\"Shell Companion\"},\"explicit\":false,\"is_playable\":true,"           \
-    "\"duration_ms\":" ms ",\"image_url\":\"file:///user/data/ShellCompanion/ps4/ebgm/playlist.jpg\"}"
-    static const char tracks[] =
-        "{\"total\":2,\"offset\":0,\"limit\":15,\"track_list\":["
-        TRACK_GUESS("0", "Your song", "Shell Companion", "spotify:track:shellcompanion0", "281000") ","
-        TRACK_GUESS("1", "Test tone", "Shell Companion", "spotify:track:shellcompanion1", "60000")
-        "]}\n";
-    writeFile(SC_BGM_DIR "/ebgm/playlist_tracks.json", tracks, sizeof(tracks) - 1);
-    // The playlist's picture: this app's icon.
-    // The tile asks for image_url + "&w=192&h=192" (PlayListPanelItem.
-    // UpdatePlayList: string.Format("&w={0}&h={0}", 192f)) as a file's name,
-    // a JPEG (0.58).
-    copyFromPackage("playlist.jpg", SC_BGM_DIR "/ebgm/playlist.jpg&w=192&h=192");
 }
 
 // ---- the app ----

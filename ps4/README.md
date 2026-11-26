@@ -533,6 +533,26 @@ name was not shown). 0.59 has one playlist again, `image_url`
 `file:///user/data/ShellCompanion/ps4/ebgm/playlist.jpg`, its picture written
 as `ebgm/playlist.jpg&w=192&h=192`.
 
+### The Music section from the real queue (0.60)
+
+Our player now writes the Music section's library each time it reads its
+queue (`writeLibrary` in `ps4/bgm/bgm.c`), from each track's ID3 tags:
+
+- `recommended_views.json`: a "Shell Companion" section with **Queue** (the
+  whole queue, the first album cover as its picture), and **Albums**, one
+  playlist an album (up to 64), its cover as its picture
+- `tracks_queue.json`, `tracks_album<n>.json`: their tracks (title, or the
+  file's name; artist; album), JSON-escaped
+- `album<n>.jpg&w=192&h=192`: each album's cover, from the first of its
+  tracks with an APIC picture that is a JPEG (the tile shows no other)
+
+The watch picks a playlist's tracks file by its uri's last part
+(`…%3Aplaylist%3Aalbum3` → `tracks_album3.json`), and turns `PlaySpUri` into
+`pick=<id>:<n>`, which our player maps to its queue (the n-th track of that
+album, or of the queue) and plays. The test app no longer writes these, only
+the profile and the session link. A track's row has no picture: the shell
+reads only `name`, `explicit`, `artists[].name` and `is_playable` for it.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

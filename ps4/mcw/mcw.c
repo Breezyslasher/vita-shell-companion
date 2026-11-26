@@ -585,13 +585,35 @@ static void ebgmCreated(Frame* f) {
         if (memcmp(path, socialPrefix, sizeof(socialPrefix) - 1) != 0) return;
         sub = path + sizeof(socialPrefix) - 1;
     }
-    char name[3][200];
-    for (int i = 0; i < 3; i++) ebgmName(sub, i, name[i], sizeof(name[i]));
+    char name[4][200];
+    for (int i = 0; i < 3; i++) ebgmName(sub, i, name[i + 1], sizeof(name[0]));
+    // A playlist's tracks by its id, the end of its uri (...%3Aplaylist%3Aalbum3:
+    // tracks_album3.json), as our player writes them (ps4/bgm, writeLibrary).
+    name[0][0] = 0;
+    const char* uri = sub;
+    while (*uri && memcmp(uri, "uri=", 4) != 0) uri++;
+    if (*uri && contains(sub, "tracks")) {
+        uri += 4;
+        const char* end = uri;
+        while (*end && *end != '&') end++;
+        const char* id = uri;
+        for (const char* q = uri; q + 2 < end; q++)
+            if (q[0] == '%' && q[1] == '3' && (q[2] == 'A' || q[2] == 'a')) id = q + 3;
+        for (const char* q = uri; q < end; q++)
+            if (*q == ':') id = q + 1;
+        char idText[48];
+        size_t k = 0;
+        for (const char* q = id; q < end && k + 1 < sizeof(idText); q++)
+            idText[k++] = ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') || (*q >= '0' && *q <= '9')) ? *q : '_';
+        idText[k] = 0;
+        fmt(name[0], sizeof(name[0]), EBGM_DIR "/tracks_%s.json", idText);
+    }
     int fd = -1, which = 0;
-    for (; which < 3 && fd < 0; which++) fd = sysOpen(name[which], SC_O_RDONLY, 0);
+    for (; which < 4 && fd < 0; which++)
+        if (name[which][0]) fd = sysOpen(name[which], SC_O_RDONLY, 0);
     if (fd < 0) {
-        say("ebgm: %s (method %lu): no file (%s, %s or %s), left as it was", path, f->gpr[3],
-            name[0], name[1], name[2]);
+        say("ebgm: %s (method %lu): no file (%s, %s, %s or %s), left as it was", path, f->gpr[3],
+            name[0], name[1], name[2], name[3]);
         return;
     }
     if (!g_ebgmPool) g_ebgmPool = sysMap(EBGM_SLOTS * EBGM_MAX);
@@ -794,8 +816,13 @@ static void fakeApply(Frame* f) {
         const size_t n = hookReadable(u, sizeof(uri) - 1);
         for (size_t i = 0; i < n && u[i]; i++) uri[i] = u[i], uri[i + 1] = 0;
         const int32_t index = (int32_t)f->gpr[2];
-        char cmd[48];
-        fmt(cmd, sizeof(cmd), "index=%d\n%s", index < 0 ? 0 : index,
+        // The playlist's id, after the uri's last ':' (queue, album<n>): our
+        // player maps its index to the queue's (pick=).
+        const char* id = uri;
+        for (const char* q = uri; *q; q++)
+            if (*q == ':') id = q + 1;
+        char cmd[80];
+        fmt(cmd, sizeof(cmd), "pick=%s:%d\n%s", id, index < 0 ? 0 : index,
             (uint32_t)f->gpr[4] ? "shuffle=1\n" : "");
         sendPlayer(cmd);
         say("fake: PlaySpUri(\"%s\", track %d, view %lu, shuffle %lu): %s", uri, index, f->gpr[3],

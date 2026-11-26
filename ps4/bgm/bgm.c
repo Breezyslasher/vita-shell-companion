@@ -509,6 +509,8 @@ static void scanMusic(void) {
 
 // The queue, from queue.txt or music/. "#start N" in queue.txt picks the
 // first track (from 0).
+static void writeLibrary(void);
+
 static void loadQueue(void) {
     static char text[MAX_TRACKS * 96];
     g_count = 0;
@@ -535,6 +537,7 @@ static void loadQueue(void) {
         logLine("no queue.txt; music/: %d track(s)", g_count);
     }
     if (start < g_count) g_index = start;
+    writeLibrary();
 }
 
 static const char* baseName(const char* path) {
@@ -542,6 +545,227 @@ static const char* baseName(const char* path) {
     for (const char* p = path; *p; p++)
         if (*p == '/') b = p + 1;
     return b;
+}
+
+// ---- the Music section's library (the music watch's ebgm/ answers) ----
+//
+// The quick menu's Music section, with the music watch (ps4/mcw) answering
+// its requests from ebgm/, shows sections of playlists, each a picture and a
+// count, and a playlist's tracks. Written here from the queue, each time it
+// is read: a "Shell Companion" section with the whole queue, and "Albums",
+// one playlist an album, its cover as the picture.
+//
+// The shapes are the shell's own (ps4/README.md): recommended_views.json,
+// {"views": [{"name", "lists": [{"name", "uri", "image_url", "total"}]}]};
+// tracks_<id>.json, {"total", "offset", "track_list": [{"name", "artists":
+// [{"name"}], "explicit", "is_playable"}]}, the watch choosing the file by
+// the playlist's uri. A tile's picture is image_url + "&w=192&h=192" as a
+// file's own name, and a JPEG.
+
+#define LIB_DIR SC_BGM_DIR "/ebgm"
+#define LIB_URL "file:///user/data/ShellCompanion/ps4/ebgm/"
+#define LIB_URI "spotify:user:shellcompanion:playlist:"
+#define MAX_ALBUMS 64
+#define LIB_TEXT 160
+
+static struct {
+    char title[LIB_TEXT], artist[LIB_TEXT], album[LIB_TEXT];
+    int albumId;
+} g_lib[MAX_TRACKS];
+static struct {
+    int tracks;
+    int art;  // its cover written
+} g_albums[MAX_ALBUMS];
+static int g_nAlbums;
+
+static int libSame(const char* a, const char* b) {
+    while (*a && *a == *b) a++, b++;
+    return *a == *b;
+}
+
+// s into out at *at, as a JSON string's inside.
+static void jsonPut(char* out, size_t cap, size_t* at, const char* s) {
+    for (; *s && *at + 8 < cap; s++) {
+        const unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') {
+            out[(*at)++] = '\\';
+            out[(*at)++] = (char)c;
+        } else if (c < 0x20) {
+            *at += (size_t)fmt(out + *at, cap - *at, "\\u%04x", c);
+        } else {
+            out[(*at)++] = (char)c;
+        }
+    }
+    out[*at] = 0;
+}
+
+static void libAdd(char* out, size_t cap, size_t* at, const char* f, ...) {
+    va_list ap;
+    va_start(ap, f);
+    const int n = fmtv(out + *at, cap - *at, f, ap);
+    va_end(ap);
+    *at += (size_t)n;
+    if (*at >= cap) *at = cap - 1;
+}
+
+static void libArt(const char* name, const uint8_t* img, size_t n) {
+    char path[160];
+    fmt(path, sizeof(path), LIB_DIR "/%s&w=192&h=192", name);
+    const int fd = sysOpen(path, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    if (fd < 0) return;
+    sysWrite(fd, img, n);
+    sysClose(fd);
+}
+
+// A track's tags, and its cover written for its album if it has none yet.
+static void libRead(int i) {
+    static uint8_t head[10];
+    const char* path = g_tracks[i];
+    g_lib[i].title[0] = g_lib[i].artist[0] = g_lib[i].album[0] = 0;
+    const int fd = sysOpen(path, SC_O_RDONLY, 0);
+    size_t size = 0;
+    if (fd >= 0) {
+        if (sysRead(fd, head, 10) == 10 && !memcmp(head, "ID3", 3)) size = 10 + syncsafe(head + 6);
+        if (size > (16u << 20)) size = 16u << 20;
+    }
+    uint8_t* tag = size ? (uint8_t*)sysMap((size + 0x3FFF) & ~(size_t)0x3FFF) : NULL;
+    size_t got = 0;
+    if (tag) {
+        memcpy(tag, head, 10);
+        got = 10;
+        while (got < size) {
+            const int n = sysRead(fd, tag + got, size - got);
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+    }
+    if (fd >= 0) sysClose(fd);
+    // id3Read fills g_meta, the playing track's: kept and put back.
+    static char keepCover[128];
+    const uint64_t keepOff = g_meta.artOff, keepLen = g_meta.artLen;
+    static char keep[3][META_LEN];
+    memcpy(keep[0], g_meta.title, META_LEN);
+    memcpy(keep[1], g_meta.artist, META_LEN);
+    memcpy(keep[2], g_meta.album, META_LEN);
+    memcpy(keepCover, g_meta.cover, sizeof(keepCover));
+    if (tag) id3Read(tag, got);
+    else memset(&g_meta, 0, sizeof(g_meta));
+    fmt(g_lib[i].title, LIB_TEXT, "%s", g_meta.title);
+    fmt(g_lib[i].artist, LIB_TEXT, "%s", g_meta.artist[0] ? g_meta.artist : "Unknown artist");
+    fmt(g_lib[i].album, LIB_TEXT, "%s", g_meta.album[0] ? g_meta.album : "Unknown album");
+    if (!g_lib[i].title[0]) {  // the file's name, without its type
+        fmt(g_lib[i].title, LIB_TEXT, "%s", baseName(path));
+        for (char* q = g_lib[i].title + strlen(g_lib[i].title); q > g_lib[i].title; q--)
+            if (*q == '.') {
+                *q = 0;
+                break;
+            }
+    }
+    // Its album: one already seen, or a new one.
+    int a = 0;
+    while (a < g_nAlbums && !libSame(g_lib[g_albums[a].tracks].album, g_lib[i].album)) a++;
+    if (a == g_nAlbums && g_nAlbums < MAX_ALBUMS) {
+        g_albums[a].tracks = i;  // its first track, for its name
+        g_albums[a].art = 0;
+        g_nAlbums++;
+    }
+    g_lib[i].albumId = a < g_nAlbums ? a : -1;
+    // The cover, a JPEG only (the tile shows no other).
+    const uint8_t* img = tag ? tag + g_meta.artOff : NULL;
+    if (a < g_nAlbums && !g_albums[a].art && img && g_meta.artLen > 4 &&
+        g_meta.artOff + g_meta.artLen <= got && img[0] == 0xFF && img[1] == 0xD8) {
+        char name[32];
+        fmt(name, sizeof(name), "album%d.jpg", a);
+        libArt(name, img, (size_t)g_meta.artLen);
+        g_albums[a].art = 1;
+    }
+    if (tag) sysUnmap(tag, (size + 0x3FFF) & ~(size_t)0x3FFF);
+    memcpy(g_meta.title, keep[0], META_LEN);
+    memcpy(g_meta.artist, keep[1], META_LEN);
+    memcpy(g_meta.album, keep[2], META_LEN);
+    memcpy(g_meta.cover, keepCover, sizeof(keepCover));
+    g_meta.artOff = keepOff;
+    g_meta.artLen = keepLen;
+}
+
+// One playlist's tracks: those of album (or all, album -1).
+static void libTracks(char* out, size_t cap, const char* id, int album) {
+    size_t at = 0;
+    int n = 0;
+    for (int i = 0; i < g_count; i++) n += album < 0 || g_lib[i].albumId == album;
+    libAdd(out, cap, &at, "{\"total\":%d,\"offset\":0,\"limit\":%d,\"track_list\":[", n, n);
+    int first = 1;
+    for (int i = 0; i < g_count; i++) {
+        if (album >= 0 && g_lib[i].albumId != album) continue;
+        libAdd(out, cap, &at, "%s{\"name\":\"", first ? "" : ",");
+        jsonPut(out, cap, &at, g_lib[i].title);
+        libAdd(out, cap, &at, "\",\"artists\":[{\"name\":\"");
+        jsonPut(out, cap, &at, g_lib[i].artist);
+        libAdd(out, cap, &at, "\"}],\"album\":{\"name\":\"");
+        jsonPut(out, cap, &at, g_lib[i].album);
+        libAdd(out, cap, &at, "\"},\"uri\":\"spotify:track:sc%d\",\"explicit\":false,"
+                              "\"is_playable\":true}", i);
+        first = 0;
+    }
+    libAdd(out, cap, &at, "]}\n");
+    char path[96];
+    fmt(path, sizeof(path), LIB_DIR "/tracks_%s.json", id);
+    writeText(path, out);
+}
+
+static void writeLibrary(void) {
+    sysMkdir(LIB_DIR, 0777);
+    g_nAlbums = 0;
+    for (int i = 0; i < g_count; i++) libRead(i);
+    const size_t cap = 512u * 1024u;
+    char* out = (char*)sysMap(cap);
+    if (!out) return;
+    // The whole queue's picture: the first album's with a cover.
+    int queueArt = -1;
+    for (int a = 0; a < g_nAlbums && queueArt < 0; a++)
+        if (g_albums[a].art) queueArt = a;
+    size_t at = 0;
+    libAdd(out, cap, &at, "{\"upgrade_scopes_required\":false,\"accounts_linked\":true,\"views\":["
+                          "{\"name\":\"Shell Companion\",\"lists\":[{\"name\":\"Queue\",\"uri\":\""
+                          LIB_URI "queue\",\"type\":\"playlist\",\"image_url\":\"");
+    if (queueArt >= 0) libAdd(out, cap, &at, LIB_URL "album%d.jpg", queueArt);
+    libAdd(out, cap, &at, "\",\"total\":%d}]}", g_count);
+    if (g_nAlbums) {
+        libAdd(out, cap, &at, ",{\"name\":\"Albums\",\"lists\":[");
+        for (int a = 0; a < g_nAlbums; a++) {
+            int n = 0;
+            for (int i = 0; i < g_count; i++) n += g_lib[i].albumId == a;
+            libAdd(out, cap, &at, "%s{\"name\":\"", a ? "," : "");
+            jsonPut(out, cap, &at, g_lib[g_albums[a].tracks].album);
+            libAdd(out, cap, &at, "\",\"uri\":\"" LIB_URI "album%d\",\"type\":\"playlist\","
+                                  "\"image_url\":\"", a);
+            if (g_albums[a].art) libAdd(out, cap, &at, LIB_URL "album%d.jpg", a);
+            libAdd(out, cap, &at, "\",\"total\":%d}", n);
+        }
+        libAdd(out, cap, &at, "]}");
+    }
+    libAdd(out, cap, &at, "]}\n");
+    writeText(LIB_DIR "/recommended_views.json", out);
+    libTracks(out, cap, "queue", -1);
+    for (int a = 0; a < g_nAlbums; a++) {
+        char id[16];
+        fmt(id, sizeof(id), "album%d", a);
+        libTracks(out, cap, id, a);
+    }
+    sysUnmap(out, cap);
+    logLine("library: %d track(s), %d album(s), written to ebgm/", g_count, g_nAlbums);
+}
+
+// A track chosen in the Music section: a playlist's id (queue, album<n>)
+// and the track's place in it, to its place in the queue; -1 if none.
+static int libPick(const char* id, int n) {
+    if (libSame(id, "queue")) return n >= 0 && n < g_count ? n : -1;
+    if (memcmp(id, "album", 5) != 0) return -1;
+    int a = 0;
+    for (const char* p = id + 5; *p >= '0' && *p <= '9'; p++) a = a * 10 + (*p - '0');
+    for (int i = 0; i < g_count; i++)
+        if (g_lib[i].albumId == a && n-- == 0) return i;
+    return -1;
 }
 
 static uint64_t g_lastStatus;
@@ -660,6 +884,23 @@ static void runCommand(const char* text, int n) {
         if (!g_count) loadQueue();
         if (g_count) {
             g_index = v < g_count ? v : 0;
+            if (openTrack()) g_state = ST_PLAYING;
+            else stop("that track would not open");
+        }
+    } else if (n > 5 && !memcmp(text, "pick=", 5)) {
+        // pick=<playlist id>:<n>: a track chosen in the Music section,
+        // through the music watch (PlaySpUri's playlist and index).
+        char id[32];
+        int k = 0, i = 5;
+        while (i < n && text[i] != ':' && k < 31) id[k++] = text[i++];
+        id[k] = 0;
+        int v = 0;
+        for (i++; i < n && text[i] >= '0' && text[i] <= '9'; i++) v = v * 10 + (text[i] - '0');
+        if (!g_count) loadQueue();
+        const int at = libPick(id, v);
+        logLine("pick %s:%d: track %d", id, v, at);
+        if (at >= 0) {
+            g_index = at;
             if (openTrack()) g_state = ST_PLAYING;
             else stop("that track would not open");
         }
