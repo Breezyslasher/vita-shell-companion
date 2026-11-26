@@ -15,10 +15,14 @@ CFLAGS="--target=x86_64-pc-freebsd12-elf -fPIC -fvisibility=hidden -ffreestandin
         -fno-stack-protector -fno-jump-tables -O2 -isystem $OO/include"
 WARN="-Wall -Wextra -Werror"
 # The module: a .prx, which the system's loader relocates, inside the shell.
-clang $CFLAGS $WARN -DSC_PRX -c "$RT/prx_crt.c" -o "$OUT/bgm_crt.o"
-clang $CFLAGS $WARN -DSC_PRX -c "$RT/sys.c" -o "$OUT/bgm_sys.o"
-clang $CFLAGS $WARN -DSC_PRX -c "$SRC/bgm.c" -o "$OUT/bgm.o"
-clang $CFLAGS -w -DSC_PRX -c "$SRC/mp3.c" -o "$OUT/bgm_mp3.o"  # minimp3, as it is
+# With unwind tables, as OpenOrbis builds everything: without them the
+# module had no PT_GNU_EH_FRAME, and the PS4 refused it as not executable
+# (ENOEXEC) where it loaded OpenOrbis's own modules.
+MODFLAGS="-funwind-tables -fasynchronous-unwind-tables"
+clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$RT/prx_crt.c" -o "$OUT/bgm_crt.o"
+clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$RT/sys.c" -o "$OUT/bgm_sys.o"
+clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$SRC/bgm.c" -o "$OUT/bgm.o"
+clang $CFLAGS $MODFLAGS -w -DSC_PRX -c "$SRC/mp3.c" -o "$OUT/bgm_mp3.o"  # minimp3, as it is
 ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init \
     -o "$OUT/sc_bgm.elf" "$OUT/bgm_crt.o" "$OUT/bgm_sys.o" "$OUT/bgm.o" "$OUT/bgm_mp3.o" \
     -L"$OO/lib" -lkernel
@@ -38,9 +42,9 @@ SDK_FSELF=$OO/bin/linux/create-fself
     --lib="$OUT/sc_bgm_b.prx" --paid 0x3800000000000011
 CFLAGS_C=$(echo "$CFLAGS" | sed 's/-fvisibility=hidden//')
 for f in "$RT/prx_crt.c" "$RT/sys.c" "$SRC/bgm.c"; do
-    clang $CFLAGS_C $WARN -DSC_PRX -c "$f" -o "$OUT/c_$(basename "$f" .c).o"
+    clang $CFLAGS_C $MODFLAGS $WARN -DSC_PRX -c "$f" -o "$OUT/c_$(basename "$f" .c).o"
 done
-clang $CFLAGS_C -w -DSC_PRX -c "$SRC/mp3.c" -o "$OUT/c_mp3.o"
+clang $CFLAGS_C $MODFLAGS -w -DSC_PRX -c "$SRC/mp3.c" -o "$OUT/c_mp3.o"
 ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init \
     -o "$OUT/sc_bgm_c.elf" "$OUT/c_prx_crt.o" "$OUT/c_sys.o" "$OUT/c_bgm.o" "$OUT/c_mp3.o" \
     -L"$OO/lib" -lkernel
@@ -57,4 +61,10 @@ if objdump -h "$OUT/sc_bgm_raw.elf" | grep -q '\.rela\.dyn'; then
 fi
 objcopy --set-section-flags .bss=alloc,load,contents -O binary -R .rela.dyn \
     "$OUT/sc_bgm_raw.elf" "$OUT/sc_bgm.bin"
+for e in sc_bgm sc_bgm_c; do
+    if ! readelf -lW "$OUT/$e.elf" | grep -q GNU_EH_FRAME; then
+        echo "bgm: $e.elf has no PT_GNU_EH_FRAME" >&2
+        exit 1
+    fi
+done
 ls -l "$OUT"/sc_bgm*.prx "$OUT/sc_bgm.bin"
