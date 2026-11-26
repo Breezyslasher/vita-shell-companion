@@ -23,33 +23,18 @@ clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$RT/prx_crt.c" -o "$OUT/bgm_crt.o"
 clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$RT/sys.c" -o "$OUT/bgm_sys.o"
 clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$SRC/bgm.c" -o "$OUT/bgm.o"
 clang $CFLAGS $MODFLAGS -w -DSC_PRX -c "$SRC/mp3.c" -o "$OUT/bgm_mp3.o"  # minimp3, as it is
-ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init \
+# 16 KB pages (-z max-page-size, common-page-size), as both projects that
+# load a module into SceShellUI link theirs (j117mw3/ps4-hen-rest, with
+# lld 18 too, and Zenalios/ps4-thumbgrid-ime): lld's default, 4 KB, left
+# the read-only segment at 0x9510, and the PS4 refused the module
+# (ENOEXEC) where it loaded OpenOrbis's own.
+PAGES="-z max-page-size=0x4000 -z common-page-size=0x4000"
+ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init $PAGES \
     -o "$OUT/sc_bgm.elf" "$OUT/bgm_crt.o" "$OUT/bgm_sys.o" "$OUT/bgm.o" "$OUT/bgm_mp3.o" \
     -L"$OO/lib" -lkernel
 CREATE_FSELF=${CREATE_FSELF:-$OUT/create-fself}
 "$CREATE_FSELF" -in="$OUT/sc_bgm.elf" -out="$OUT/sc_bgm.oelf" \
     --lib="$OUT/sc_bgm.prx" --paid 0x3800000000000011
-# Two other builds, for the test app to try, as a PS4 (GoldHEN 2.4b18.6,
-# 11.50) refused sc_bgm.prx as not executable (ENOEXEC) where it loaded
-# OpenOrbis's own libSceFios2.prx:
-# b: the same ELF, made a .prx with the toolchain's own create-fself, which
-#    OpenOrbis's modules are made with, if it has one;
-# c: built without -fvisibility=hidden, every global exported, as GoldHEN's
-#    plugins are, with that create-fself too.
-SDK_FSELF=$OO/bin/linux/create-fself
-[ -x "$SDK_FSELF" ] || SDK_FSELF=$CREATE_FSELF
-"$SDK_FSELF" -in="$OUT/sc_bgm.elf" -out="$OUT/sc_bgm_b.oelf" \
-    --lib="$OUT/sc_bgm_b.prx" --paid 0x3800000000000011
-CFLAGS_C=$(echo "$CFLAGS" | sed 's/-fvisibility=hidden//')
-for f in "$RT/prx_crt.c" "$RT/sys.c" "$SRC/bgm.c"; do
-    clang $CFLAGS_C $MODFLAGS $WARN -DSC_PRX -c "$f" -o "$OUT/c_$(basename "$f" .c).o"
-done
-clang $CFLAGS_C $MODFLAGS -w -DSC_PRX -c "$SRC/mp3.c" -o "$OUT/c_mp3.o"
-ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init \
-    -o "$OUT/sc_bgm_c.elf" "$OUT/c_prx_crt.o" "$OUT/c_sys.o" "$OUT/c_bgm.o" "$OUT/c_mp3.o" \
-    -L"$OO/lib" -lkernel
-"$SDK_FSELF" -in="$OUT/sc_bgm_c.elf" -out="$OUT/sc_bgm_c.oelf" \
-    --lib="$OUT/sc_bgm_c.prx" --paid 0x3800000000000011
 # The loader: a raw payload, the module inside it.
 clang $CFLAGS $WARN -c "$RT/sys.c" -o "$OUT/bgm_load_sys.o"
 clang $CFLAGS $WARN "-DSC_PRX_PATH=\"$OUT/sc_bgm.prx\"" -c "$SRC/load.c" -o "$OUT/bgm_load.o"
@@ -61,9 +46,15 @@ if objdump -h "$OUT/sc_bgm_raw.elf" | grep -q '\.rela\.dyn'; then
 fi
 objcopy --set-section-flags .bss=alloc,load,contents -O binary -R .rela.dyn \
     "$OUT/sc_bgm_raw.elf" "$OUT/sc_bgm.bin"
-for e in sc_bgm sc_bgm_c; do
+for e in sc_bgm; do
     if ! objdump -p "$OUT/$e.elf" | grep -q EH_FRAME; then  # GNU objdump: the image's readelf prints nothing
         echo "bgm: $e.elf has no PT_GNU_EH_FRAME" >&2
+        exit 1
+    fi
+    # Every LOAD segment aligned to 16 KB pages (where the segments start
+    # is link.x's, as in the projects above).
+    if objdump -p "$OUT/$e.elf" | grep LOAD | grep -qv 'align 2\*\*14'; then
+        echo "bgm: $e.elf has a LOAD segment not aligned to 16 KB" >&2
         exit 1
     fi
 done

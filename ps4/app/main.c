@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.6"
+#define APP_VERSION "0.8"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -339,14 +339,14 @@ static int selfLoad(const char* path) {
 #define PKG_DIR "/mnt/sandbox/pfsmnt/SCMP00001-app0"
 #define SHELL_SANDBOX "/mnt/sandbox/NPXS20001_000"
 
-// The three builds of the module in the package (ps4/bgm/build.sh), and
-// the first that loads into this app, or -1.
-static const char* const g_builds[3] = {"sc_bgm.prx", "sc_bgm_b.prx", "sc_bgm_c.prx"};
+// The module in the package (ps4/bgm/build.sh), and whether it loads into
+// this app: 0, or -1.
+static const char* const g_builds[1] = {"sc_bgm.prx"};
 static int g_build = -1;
 
 static void findBuild(void) {
     if (g_build >= 0) return;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 1; i++) {
         char path[160];
         snprintf(path, sizeof(path), PKG_DIR "/%s", g_builds[i]);
         if (selfLoad(path)) {
@@ -438,22 +438,27 @@ static void loadPlayer(void) {
     findBuild();
     listShellSandbox();
     if (g_build < 0) return;
-    // Into the shell: the package's copy, a copy in the shell's sandbox (as
-    // /sc_bgm.prx, and by name), /user/data. By name worked for its own
-    // libSceAudioOut.sprx, its full /system path did not.
+    // Into the shell, where the two projects that do it load from:
+    // Zenalios/ps4-thumbgrid-ime asks for /data/..., then /user/data/...;
+    // j117mw3/ps4-hen-rest copies its module into the shell's sandbox,
+    // under Temp/, and loads it from there.
+    if (copyBuild(SC_BGM_PRX) == 0) {
+        if (shellLoad("/user" SC_BGM_PRX) || shellLoad(SC_BGM_PRX)) {
+            g_loadedFrom = 1;
+            return;
+        }
+    }
+    mkdir(SHELL_SANDBOX "/Temp/ShellCompanion", 0777);
+    if (copyBuild(SHELL_SANDBOX "/Temp/ShellCompanion/sc_bgm.prx") == 0 &&
+        (shellLoad("/Temp/ShellCompanion/sc_bgm.prx") ||
+         shellLoad(SHELL_SANDBOX "/Temp/ShellCompanion/sc_bgm.prx"))) {
+        g_loadedFrom = 3;
+        return;
+    }
     char path[160];
     snprintf(path, sizeof(path), PKG_DIR "/%s", g_builds[g_build]);
     if (shellLoad(path)) {
         g_loadedFrom = 4;
-        return;
-    }
-    if (copyBuild(SHELL_SANDBOX "/sc_bgm.prx") == 0 &&
-        (shellLoad("/sc_bgm.prx") || shellLoad("sc_bgm.prx"))) {
-        g_loadedFrom = 3;
-        return;
-    }
-    if (copyBuild(SC_BGM_PRX) == 0 && shellLoad("/user" SC_BGM_PRX)) {
-        g_loadedFrom = 1;
         return;
     }
     say("The shell would not load it: send app.log");
