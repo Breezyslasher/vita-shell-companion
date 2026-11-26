@@ -167,6 +167,14 @@ service's are, not the managed wrappers 0.85 hooked.
 - **1.11, a test build:** also logs (only) the list's task info calls,
   whichever libSceBgft has (`DownloadGetTaskInfo`, `GetTaskInfoValue*`):
   every call for ours, the first 30 for others.
+- **1.11 on the PS4:** the list asks of ours only task info (ok), value 15
+  (the content id) and 16 (a notification tick): nothing else to answer.
+  Labels differ between runs for the same answers (B done read "Queued for
+  downloading" in 1.08, nothing here): the list asks progress every second
+  but the query (state) only when told a task changed, 3 times in 70 s
+  here, so a row mixes an old state with new progress. 1.12 pauses a
+  placeholder again when its item changes state, logging the answer, to
+  see whether that tells the list.
 
 ### One module, and the cleanup (0.95)
 

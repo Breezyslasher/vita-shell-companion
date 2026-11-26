@@ -91,6 +91,7 @@ static struct {
         uint64_t lastParam;          // its param in the last query logged (0.99)
         volatile int failed;         // the service failed it: to be replaced (1.02)
         uint32_t tries;              // replaced so far
+        int lastState;               // the item's state when last poked (1.12), -1 none
     } e[DLL_MAX];
     struct {
         int32_t task;
@@ -516,6 +517,24 @@ static int32_t dllRegister(int i) {
 // fails at once doesn't come back for ever.
 static void dllRepair(void) {
     int changed = 0;
+    // A placeholder whose item changed state is paused again (1.12): the
+    // list reads the query (state) only when told a task changed, while it
+    // asks progress every second; 1.11's list re-queried 3 times in 70 s,
+    // so rows mixed an old state with new progress ("Cannot download",
+    // "Calculating..." with a full bar). The PS4's own tasks tell it; ours
+    // never change. Whether pausing again tells it is what this tries.
+    for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
+        const int i = g_dll.e[k].item;
+        if (i < 0 || i >= g_dls.count || !g_dll.pause) continue;
+        const int st = g_dls.item[i].state;
+        if (st == g_dll.e[k].lastState) continue;
+        const int was = g_dll.e[k].lastState;
+        g_dll.e[k].lastState = st;
+        if (was < 0) continue;  // its first state: registered so
+        const int rc = g_dll.pause(g_dll.e[k].task);
+        logLine("dllist: task %d (item %d) %s -> %s: paused again 0x%08X", g_dll.e[k].task, i, g_dlStateName[was],
+                g_dlStateName[st], (unsigned)rc);
+    }
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
         if (!g_dll.e[k].failed) continue;
         if (g_dll.e[k].tries >= 3) continue;
@@ -587,6 +606,7 @@ static void dlListBegin(void) {
         g_dll.e[k].logged = 0;
         g_dll.e[k].failed = 0;
         g_dll.e[k].tries = 0;
+        g_dll.e[k].lastState = -1;
         g_dll.e[k].lastParam = 0;
         g_dll.e[k].task = task;
         __atomic_store_n(&g_dll.count, k + 1, __ATOMIC_RELEASE);
