@@ -776,8 +776,12 @@ A queue.txt line for a stream:
 URL<tab>title<tab>artist<tab>album<tab>cover URL
 ```
 
-Only the URL is needed. The test app adds `streams.txt`'s lines (in the
-player's folder) to the end of the queue it writes. Logs show URLs up to
+Only the URL is needed. Put `streams.txt` in the player's folder
+(`/data/ShellCompanion/ps4/`), in `/data/ShellCompanion/`, or on a USB
+drive's root. The test app copies it into the player's folder and adds its
+lines to the end of the queue it writes. The player also reads it there
+whenever it loads the queue (0.74), and skips URLs already in the queue. A
+UTF-8 byte-order mark and spaces before a URL are ignored. Logs show URLs up to
 their `?`, so a token in the query isn't logged. HTTPS checks the server's
 certificate unless `https-noverify` is in the player's folder.
 

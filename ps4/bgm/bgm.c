@@ -833,6 +833,35 @@ static void loadQueue(void) {
         scanMusic();
         logLine("no queue.txt; music/: %d track(s)", g_libCount);
     }
+    // streams.txt's URLs too, read here as well as by the app (0.74): those
+    // not already in, after the rest.
+    static char streams[64 * 1024];
+    const int sn = readText(SC_BGM_DIR "/streams.txt", streams, sizeof(streams));
+    int added = 0;
+    for (int at = 0; at < sn;) {
+        int end = at;
+        while (end < sn && streams[end] != '\n' && streams[end] != '\r') end++;
+        const char* line = streams + at;
+        int len = end - at;
+        if (len >= 3 && (uint8_t)line[0] == 0xEF && (uint8_t)line[1] == 0xBB && (uint8_t)line[2] == 0xBF) {
+            line += 3;
+            len -= 3;
+        }
+        while (len > 0 && (*line == ' ' || *line == '\t')) line++, len--;
+        if (len > 8 && isUrl(line)) {
+            int urlLen = 0;
+            while (urlLen < len && line[urlLen] != '\t') urlLen++;
+            int seen = 0;
+            for (int i = 0; i < g_libCount && !seen; i++)
+                seen = (int)strlen(g_tracks[i]) == urlLen && !memcmp(g_tracks[i], line, (size_t)urlLen);
+            if (!seen) {
+                addTrack(line, (size_t)len);
+                added++;
+            }
+        }
+        at = end + 1;
+    }
+    logLine("streams.txt: %d byte(s), %d stream(s) added", sn, added);
     // The queue: the whole library, in order.
     for (int i = 0; i < g_libCount; i++) g_q[i] = i;
     g_count = g_libCount;

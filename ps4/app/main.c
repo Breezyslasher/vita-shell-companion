@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.73"
+#define APP_VERSION "0.74"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -345,8 +345,22 @@ static void writeQueue(void) {
     if (access(SC_BGM_MUSIC "/test-tone.wav", R_OK) == 0)
         at += (size_t)snprintf(queue + at, sizeof(queue) - at, SC_BGM_MUSIC "/test-tone.wav\n");
     int streams = 0, lineNo = 0;
+    // streams.txt on a USB drive's root, or in ShellCompanion/, is copied
+    // here first, the player reading it here too (0.74).
+    char from[96] = "";
+    for (int i = 0; i < 8 && !from[0]; i++) {
+        char path[96];
+        snprintf(path, sizeof(path), "/mnt/usb%d/streams.txt", i);
+        if (access(path, R_OK) == 0) snprintf(from, sizeof(from), "%s", path);
+    }
+    if (!from[0] && access("/user/data/ShellCompanion/streams.txt", R_OK) == 0)
+        snprintf(from, sizeof(from), "/user/data/ShellCompanion/streams.txt");
+    if (from[0]) {
+        const int kb = copyFile(from, STREAMS);
+        say("streams.txt: copied from %s (%d KB)", from, kb);
+    }
     FILE* f = fopen(STREAMS, "r");
-    if (!f) say("streams.txt: not there (%s)", STREAMS);
+    if (!f) say("streams.txt: not there (%s, nor a USB drive's root, nor /user/data/ShellCompanion/)", STREAMS);
     static char line[4096];
     while (f && fgets(line, sizeof(line), f)) {
         lineNo++;
