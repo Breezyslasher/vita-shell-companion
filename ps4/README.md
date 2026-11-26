@@ -737,6 +737,12 @@ setup, so `mcw-norowart` turns them off too).
 
 ### Covers by name, and PNGs (0.71)
 
+Since 0.75 each cover a row shows gets an ImageBox of its own, and the row's
+earlier box is taken off it (`Widget.RemoveFromParent`). The list reuses rows
+as it scrolls, and a load still coming into the earlier box put an earlier
+track's cover on the row: the Power Ballad PNG on the Agatha song.
+
+
 The shell keeps pictures by their address. When the library changed, 0.70
 showed `trackart0.jpg`'s old picture on the new first track. The player now
 names covers with a number that changes each time the library is written
@@ -775,6 +781,12 @@ A queue.txt line for a stream:
 ```
 URL<tab>title<tab>artist<tab>album<tab>cover URL
 ```
+
+0.72–0.74 failed on 11.50 with `http: … libSceSsl 0 …: functions missing`:
+the shell's TLS library there is `libSceSsl2.sprx`. 0.75 tries
+`libSceSsl.sprx`, then `libSceSsl2.sprx`, and looks for any function still
+missing in every module the shell has loaded (`anySym`). It logs each
+function it can't find.
 
 Only the URL is needed. Put `streams.txt` in the player's folder
 (`/data/ShellCompanion/ps4/`), in `/data/ShellCompanion/`, or on a USB

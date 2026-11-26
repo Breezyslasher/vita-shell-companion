@@ -1234,6 +1234,7 @@ static struct {
     int ourLoad;                                 // in our own LoadAsync call
     void *setX, *setY, *setW, *setH, *getX, *setVisible;  // UINode
     void* appendChild;                           // Widget
+    void* removeChild;                           // Widget.RemoveFromParent (0.75)
     void* jsonItem;                              // JsonObject.get_Item
     void *fType, *fData;                         // TrackListMenuData
     void *fText, *fSub;                          // TrackListPanelItem's labels
@@ -1376,6 +1377,25 @@ static int rowIndex(void* data) {
     return n;
 }
 
+// A new ImageBox on the row, 64 square at its left.
+static void* rowNewBox(void* row) {
+    void* img = g_row.objectNew(g_row.domain, g_row.imageBox);
+    if (!img) return NULL;
+    rowCall(g_row.ctor, img, NULL);
+    rowFloat(g_row.setX, img, 10.0f);
+    rowFloat(g_row.setY, img, 10.0f);
+    rowFloat(g_row.setW, img, 64.0f);
+    rowFloat(g_row.setH, img, 64.0f);
+    if (g_row.scaleType) {
+        int st = 2;  // ImageScaleType.AspectInside
+        void* sargs[1] = {&st};
+        rowCall(g_row.scaleType, img, sargs);
+    }
+    void* args[1] = {img};
+    rowCall(g_row.appendChild, row, args);
+    return img;
+}
+
 static void rowArt(Frame* f) {
     if (!g_row.ready) return;
     void* row = (void*)(uintptr_t)f->gpr[0];
@@ -1431,20 +1451,8 @@ static void rowArt(Frame* f) {
     if (e < 0 && !has) return;  // nothing to show, nothing shown
     if (e < 0) {
         if (free_ < 0) return;
-        void* img = g_row.objectNew(g_row.domain, g_row.imageBox);
+        void* img = rowNewBox(row);
         if (!img) return;
-        rowCall(g_row.ctor, img, NULL);
-        rowFloat(g_row.setX, img, 10.0f);
-        rowFloat(g_row.setY, img, 10.0f);
-        rowFloat(g_row.setW, img, 64.0f);
-        rowFloat(g_row.setH, img, 64.0f);
-        if (g_row.scaleType) {
-            int st = 2;  // ImageScaleType.AspectInside
-            void* sargs[1] = {&st};
-            rowCall(g_row.scaleType, img, sargs);
-        }
-        void* args[1] = {img};
-        rowCall(g_row.appendChild, row, args);
         e = free_;
         g_rows[e].row = g_row.weak(row, 0);
         g_rows[e].img = g_row.weak(img, 0);
@@ -1458,6 +1466,20 @@ static void rowArt(Frame* f) {
     }
     if (has) {
         if (g_rows[e].idx != idx || g_rows[e].rev != rev) {
+            // A box of its own for each cover (0.75): a load still coming
+            // into the row's earlier box (the list reuses rows as it
+            // scrolls) put an earlier track's cover on this one. The earlier
+            // box is taken off the row.
+            if (g_rows[e].idx >= 0 && g_row.removeChild) {
+                rowShow(img, 0);
+                rowCall(g_row.removeChild, img, NULL);
+                void* fresh = rowNewBox(row);
+                if (fresh) {
+                    if (g_row.freeHandle) g_row.freeHandle(g_rows[e].img);
+                    g_rows[e].img = g_row.weak(fresh, 0);
+                    img = fresh;
+                }
+            }
             static char url[1100];
             if (webCover[0]) fmt(url, sizeof(url), "%s", webCover);
             else fmt(url, sizeof(url), "file://%s", path);
@@ -1848,7 +1870,10 @@ static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* class
         g_row.getX = m(node, "get_X", 0);
         g_row.setVisible = m(node, "set_Visible", 1);
     }
-    if (widget) g_row.appendChild = m(widget, "AppendChild", 1);
+    if (widget) {
+        g_row.appendChild = m(widget, "AppendChild", 1);
+        g_row.removeChild = m(widget, "RemoveFromParent", 0);
+    }
     if (jobj) g_row.jsonItem = m(jobj, "get_Item", 1);
     if (data) {
         g_row.fType = g_mono.fieldByName(data, "Type");

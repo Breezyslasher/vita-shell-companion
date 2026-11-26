@@ -145,16 +145,35 @@ static struct {
     FnHttpsOption httpsOff;
 } g_http;
 
+// A function from the module given, else from any module the shell has
+// loaded (0.75: on 11.50 its TLS library is libSceSsl2.sprx).
+static void* anySym(int handle, const char* symbol) {
+    void* p = handle ? libSym(handle, symbol) : NULL;
+    if (p) return p;
+    int handles[256], count = 0;
+    if (sysCall(592, (long)handles, 256, (long)&count, 0, 0, 0) < 0) return NULL;
+    for (int i = 0; i < count && i < 256; i++)
+        if ((p = libSym(handles[i], symbol))) return p;
+    return NULL;
+}
+
 // libSceHttp, once: 1 if it is there to use.
 static int httpSetup(void) {
     if (g_http.tried) return g_http.ok;
     g_http.tried = 1;
-    const int net = libLoad("libSceNet.sprx"), ssl = libLoad("libSceSsl.sprx"),
-              http = libLoad("libSceHttp.sprx");
-    FnNetPool pool = net ? (FnNetPool)libSym(net, "sceNetPoolCreate") : NULL;
-    FnSslInit sslInit = ssl ? (FnSslInit)libSym(ssl, "sceSslInit") : NULL;
-    FnHttpInit httpInit = http ? (FnHttpInit)libSym(http, "sceHttpInit") : NULL;
-#define HTTP_SYM(field, type, name) g_http.field = http ? (type)libSym(http, name) : NULL
+    const int net = libLoad("libSceNet.sprx"), http = libLoad("libSceHttp.sprx");
+    int ssl = libLoad("libSceSsl.sprx");
+    if (!ssl) ssl = libLoad("libSceSsl2.sprx");
+    FnNetPool pool = (FnNetPool)anySym(net, "sceNetPoolCreate");
+    FnSslInit sslInit = (FnSslInit)anySym(ssl, "sceSslInit");
+    FnHttpInit httpInit = (FnHttpInit)anySym(http, "sceHttpInit");
+    logLine("http: libSceNet %d, libSceSsl(2) %d, libSceHttp %d; sceNetPoolCreate %p, sceSslInit %p, "
+            "sceHttpInit %p", net, ssl, http, (void*)pool, (void*)sslInit, (void*)httpInit);
+#define HTTP_SYM(field, type, name)                    \
+    do {                                               \
+        g_http.field = (type)anySym(http, name);       \
+        if (!g_http.field) logLine("http: no %s", name); \
+    } while (0)
     HTTP_SYM(tmpl, FnHttpTmpl, "sceHttpCreateTemplate");
     HTTP_SYM(conn, FnHttpConn, "sceHttpCreateConnectionWithURL");
     HTTP_SYM(req, FnHttpReq, "sceHttpCreateRequestWithURL");
@@ -172,7 +191,7 @@ static int httpSetup(void) {
     if (!pool || !sslInit || !httpInit || !g_http.tmpl || !g_http.conn || !g_http.req ||
         !g_http.send || !g_http.status || !g_http.length || !g_http.read || !g_http.delReq ||
         !g_http.delConn || !g_http.delTmpl) {
-        logLine("http: libSceNet %d, libSceSsl %d, libSceHttp %d: functions missing", net, ssl, http);
+        logLine("http: functions missing (above)");
         return 0;
     }
     const int memId = pool("ScBgmNet", 64 * 1024, 0);
