@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.2"
+#define APP_VERSION "0.3"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -322,32 +322,66 @@ static int shellLoad(const char* path) {
 
 static int g_loadedFrom = -1;
 
-// The first run on a PS4 (11.50, GoldHEN) had the shell answer
-// 0x80020002, ENOENT, for /data/...: the path is looked up in the shell,
-// whose root is its sandbox. So other paths are tried, each logged.
+// Loads path into this app, not started (sys_dynlib_load_prx), and
+// unloads it: logged.
+static int selfLoad(const char* path) {
+    int handle = 0;
+    const long rc = sysCall(594, (long)path, 0, (long)&handle);
+    say("Load into this app (not started) %s: 0x%lX, handle 0x%X", path, (unsigned long)rc,
+        handle);
+    if (rc == 0 && handle > 0) sysCall(595 /* sys_dynlib_unload_prx */, handle, 0, 0);
+    return rc == 0;
+}
+
+// Tries the shell with each of this app's package folders (pfsmnt's
+// SCMP00001-app0...), where the package carries sc_bgm.prx: 1 if it loaded.
+static int fromPackage(void) {
+    DIR* d = opendir("/mnt/sandbox/pfsmnt");
+    if (!d) {
+        say("No /mnt/sandbox/pfsmnt");
+        return 0;
+    }
+    int ok = 0;
+    struct dirent* e;
+    while (!ok && (e = readdir(d))) {
+        if (strncmp(e->d_name, "SCMP00001", 9)) continue;
+        char path[160];
+        snprintf(path, sizeof(path), "/mnt/sandbox/pfsmnt/%s/sc_bgm.prx", e->d_name);
+        if (access(path, F_OK) != 0) {
+            say("Not there: %s", path);
+            continue;
+        }
+        selfLoad(path);
+        ok = shellLoad(path);
+    }
+    closedir(d);
+    return ok;
+}
+
+// The first runs on a PS4 (11.50, GoldHEN) had the shell answer ENOENT
+// (0x80020002) for /data/... and EACCES (0x8002000D) for /user/data/...,
+// /system_tmp and its own sandbox, and this app EACCES (-13) loading it
+// from /data itself. So: a system module first, which the shell has, to
+// see that the call can work at all; then the copy in this app's package,
+// a place modules are allowed to come from; then the rest.
 static void loadPlayer(void) {
     readStatus();
     if (g_status.running) {
         sendCommand("reload\nplay\n");
         return;
     }
+    say("-- loading, app " APP_VERSION " --");
+    shellLoad("/system/common/lib/libSceAudioOut.sprx");  // the control
+
+    if (fromPackage()) {
+        g_loadedFrom = 4;
+        return;
+    }
     if (putModule(SC_BGM_PRX) != 0) {
         say("Could not write %s (is the app jailbroken?)", SC_BGM_PRX);
         return;
     }
-    // Is the module itself loadable? Into this app, loaded but not started
-    // (sys_dynlib_load_prx), then unloaded.
-    int handle = 0;
-    const long rcSelf = sysCall(594, (long)SC_BGM_PRX, 0, (long)&handle);
-    say("Load into this app (not started): 0x%lX, handle 0x%X", (unsigned long)rcSelf, handle);
-    if (rcSelf == 0 && handle > 0) sysCall(595 /* sys_dynlib_unload_prx */, handle, 0, 0);
-
-    // 0: /data, 1: /user/data (what /data is), 2: /system_tmp, then the
-    // shell's sandbox (its root, and by its full path).
-    if (shellLoad(SC_BGM_PRX)) {
-        g_loadedFrom = 0;
-        return;
-    }
+    selfLoad(SC_BGM_PRX);
     if (shellLoad("/user" SC_BGM_PRX)) {
         g_loadedFrom = 1;
         return;
@@ -356,29 +390,7 @@ static void loadPlayer(void) {
         g_loadedFrom = 2;
         return;
     }
-    DIR* d = opendir("/mnt/sandbox");
-    if (!d) {
-        say("No /mnt/sandbox to look in");
-        return;
-    }
-    struct dirent* e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        if (g_log) fprintf(g_log, "  sandbox: %s\n", e->d_name);
-        if (strncmp(e->d_name, "NPXS20001", 9)) continue;  // SceShellUI's
-        char path[160];
-        snprintf(path, sizeof(path), "/mnt/sandbox/%s/sc_bgm.prx", e->d_name);
-        if (putModule(path) != 0) {
-            say("Could not write %s", path);
-            continue;
-        }
-        if (shellLoad("/sc_bgm.prx") || shellLoad(path)) {
-            g_loadedFrom = 3;
-            break;
-        }
-    }
-    closedir(d);
-    if (g_loadedFrom < 0) say("The shell would not load it from any path: send app.log");
+    say("The shell would not load it from any path: send app.log");
 }
 
 // ---- the screen: two frame buffers, drawn by the CPU ----
