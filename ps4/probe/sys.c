@@ -38,6 +38,83 @@ __attribute__((noinline)) long sysCall(long num, long a, long b, long c, long d,
     return rax;
 }
 
+#ifdef SC_PRX
+// In a module, which may run inside SceShellUI, through libkernel, as the
+// projects that run modules there do (ps4-hen-rest: sceKernelOpen,
+// sceKernelMkdir; OpenOrbis's libc "uses libkernel instead of syscalls for
+// compatibility"). With system calls of its own the player never got as far
+// as its log inside the shell.
+int sceKernelOpen(const char* path, int flags, int mode);
+long sceKernelWrite(int fd, const void* buf, size_t n);
+long sceKernelRead(int fd, void* buf, size_t n);
+int sceKernelClose(int fd);
+int sceKernelMkdir(const char* path, int mode);
+int sceKernelFsync(int fd);
+int sceKernelUsleep(unsigned int us);
+int sceKernelClockGettime(int clock, void* ts);
+int sceKernelMmap(void* addr, size_t len, int prot, int flags, int fd, int64_t off, void** out);
+int sceKernelMunmap(void* addr, size_t len);
+int sceKernelUnlink(const char* path);
+int sceKernelRename(const char* from, const char* to);
+int64_t sceKernelLseek(int fd, int64_t off, int whence);
+int sceKernelGetdents(int fd, char* buf, int n);
+
+int sysOpen(const char* path, int flags, int mode) {
+    return sceKernelOpen(path, flags, mode);
+}
+int sysWrite(int fd, const void* buf, size_t n) {
+    return (int)sceKernelWrite(fd, buf, n);
+}
+int sysRead(int fd, void* buf, size_t n) {
+    return (int)sceKernelRead(fd, buf, n);
+}
+int sysClose(int fd) {
+    return sceKernelClose(fd);
+}
+int sysMkdir(const char* path, int mode) {
+    return sceKernelMkdir(path, mode);
+}
+int sysFsync(int fd) {
+    return sceKernelFsync(fd);
+}
+int sysExists(const char* path) {
+    const int fd = sysOpen(path, SC_O_RDONLY, 0);
+    if (fd < 0) return 0;
+    sysClose(fd);
+    return 1;
+}
+void sysSleepMs(uint32_t ms) {
+    sceKernelUsleep(ms * 1000u);
+}
+uint64_t sysNowUs(void) {
+    struct {
+        int64_t sec, nsec;
+    } t = {0, 0};
+    sceKernelClockGettime(4 /* CLOCK_MONOTONIC */, &t);
+    return (uint64_t)t.sec * 1000000u + (uint64_t)t.nsec / 1000u;
+}
+void* sysMap(size_t size) {
+    void* p = NULL;
+    const int rc = sceKernelMmap(NULL, size, 3 /* read, write */, 0x1000 | 0x2 /* anon, private */,
+                                 -1, 0, &p);
+    return rc < 0 ? NULL : p;
+}
+void sysUnmap(void* p, size_t size) {
+    sceKernelMunmap(p, size);
+}
+int sysUnlink(const char* path) {
+    return sceKernelUnlink(path);
+}
+int sysRename(const char* from, const char* to) {
+    return sceKernelRename(from, to);
+}
+int64_t sysSeek(int fd, int64_t off, int whence) {
+    return sceKernelLseek(fd, off, whence);
+}
+int sysGetdents(int fd, void* buf, size_t n) {
+    return sceKernelGetdents(fd, (char*)buf, (int)n);
+}
+#else
 int sysOpen(const char* path, int flags, int mode) {
     return (int)sysCall(5, (long)path, flags, mode, 0, 0, 0);
 }
@@ -95,6 +172,7 @@ int64_t sysSeek(int fd, int64_t off, int whence) {
 int sysGetdents(int fd, void* buf, size_t n) {
     return (int)sysCall(272, fd, (long)buf, (long)n, 0, 0, 0);
 }
+#endif
 void sysExit(int code) {
     sysCall(1, code, 0, 0, 0, 0, 0);
     for (;;) {

@@ -560,20 +560,24 @@ static void* player(void* arg) {
 // .prx must have; the system's loader resolves it, inside the shell.
 int sceKernelUsleep(unsigned int us);
 
-__attribute__((visibility("default"))) int module_start(size_t args, const void* argp) {
-    (void)args;
-    (void)argp;
+// The player's start, on its own thread: its folders, its log, then the
+// player. module_start does nothing but start it, so that the shell, which
+// waits for module_start, is never kept waiting.
+static void* begin(void* arg) {
     sysMkdir("/user/data/ShellCompanion", 0777);
     sysMkdir(SC_BGM_DIR, 0777);
     sysMkdir(SC_BGM_MUSIC, 0777);
     logOpen("ps4/bgm.log");
-    sceKernelUsleep(0);
     char fw[64];
     firmware(fw, sizeof(fw));
-    logLine("background music %s: in pid %ld, firmware %s", SC_BGM_VERSION,
-            sysCall(20, 0, 0, 0, 0, 0, 0), fw);
-    const int rc = threadStart(player, NULL, "ScBgm");
-    logLine("its thread: 0x%08X", (unsigned)rc);
+    logLine("background music %s: started, firmware %s", SC_BGM_VERSION, fw);
+    return player(arg);
+}
+
+__attribute__((visibility("default"))) int module_start(size_t args, const void* argp) {
+    (void)args;
+    (void)argp;
+    const int rc = threadStart(begin, NULL, "ScBgm");
     if (rc < 0) notify("Background music: its thread would not start (0x%08X)", (unsigned)rc);
     return 0;
 }
