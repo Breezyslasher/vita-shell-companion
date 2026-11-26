@@ -896,6 +896,35 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### "+" as each app wants it (0.86)
+
+The Music section's "+" (R3, Spotify's "Add to Your Music") is the shell's,
+and its label can't change. What it does is now the app's, through
+`ScQueue.plus` (`ps4/bgm/plus.c`):
+
+- **Always:** the track is added to or taken from Liked (`liked.txt`), which
+  lights the "+". Every press is added to `plus-events.txt`
+  (`<ms>\t<save|delete>\t<the app's id>\t<path or URL>`), which
+  `scReadPlusEvents` reads and empties when the app comes back.
+- **`SC_PLUS_HTTP`:** the app's server is told **at once**, while the app is
+  away. `saveUrl` and `deleteUrl` are URL templates, sent with `method` (GET
+  by default; `sceHttpCreateRequestWithURL2` for any method, PATCH
+  included), `body`, `type` and `headers`. Placeholders: `{id}` (the track's
+  `ScTrack.id`, a sixth field on its queue.txt line), `{title}`, `{artist}`,
+  `{album}` and `{file}`, URL-encoded in a URL and escaped as in a JSON
+  string in a body. A failed request shows a notification.
+- **`containsUrl`** (optional) is asked as each track begins: a 2xx answer,
+  whose body holds `containsMatch` if one is given, marks the track saved in
+  `liked.txt`, and any other answer not. That's what the "+" shows.
+- **The requests** run one at a time on their own thread (`ScBgmPlus`). In
+  queue.txt the settings are `#plus.<key> <value>` lines, %-encoded. The
+  watch tells the player of a press with `plus_save=<track>` or
+  `plus_delete=<track>`.
+
+The player's command buffer is now 4 KB (256 bytes before). Commands have
+been added to `cmd` rather than replacing it since 0.67, so a burst could
+have overflowed it.
+
 ### Download progress (0.85)
 
 - **Notifications:** at each quarter of the whole list (25, 50, 75%), at

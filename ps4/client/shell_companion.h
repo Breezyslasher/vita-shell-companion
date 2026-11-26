@@ -64,11 +64,34 @@ typedef struct ScTrack {
     const char* artist;
     const char* album;     // tracks of one album are grouped in the Music section
     const char* coverUrl;  // its cover by URL (JPEG or PNG), fetched by the shell; NULL for none
+    const char* id;        // the app's own id for it: {id} in ScPlus's templates, and in
+                           // scReadPlusEvents; NULL for none
 } ScTrack;
+
+// What the Music section's "+" (R3, "Add to Your Music") does for this app's
+// tracks. Every press is recorded either way (scReadPlusEvents), and the
+// track added to or taken from Liked (liked.txt), which lights the "+".
+enum { SC_PLUS_LIKED = 0, SC_PLUS_HTTP = 1 };
+typedef struct ScPlus {
+    int mode;              // SC_PLUS_LIKED, or SC_PLUS_HTTP: the app's server told at once
+    // SC_PLUS_HTTP: URL templates, with {id}, {title}, {artist}, {album} and
+    // {file} (the track's path or URL), each URL-encoded where it goes.
+    const char* saveUrl;   // "+" lit: the track saved
+    const char* deleteUrl; // "+" put out: the track taken away
+    const char* method;    // for both: NULL for GET; POST, PUT, DELETE, PATCH
+    const char* body;      // a template too (its placeholders escaped as in a JSON string), NULL for none
+    const char* type;      // the body's Content-Type, application/json when NULL
+    const char* headers;   // "Name: value" lines, \r\n between (a token, say)
+    // Asked (GET) as each track begins, if given: a 2xx answer (whose body
+    // holds containsMatch, if given) lights the "+", any other puts it out.
+    const char* containsUrl;
+    const char* containsMatch;
+} ScPlus;
 
 typedef struct ScQueue {
     uint32_t index;        // the track to begin with, from 0
     uint32_t positionMs;   // where in it
+    const ScPlus* plus;    // NULL: SC_PLUS_LIKED
 } ScQueue;
 
 // The queue, written whole (queue.txt): MP3 and 16-bit WAV, up to 10000
@@ -148,6 +171,16 @@ typedef struct ScDownloadStatus {
 // What the shell says now (downloads-status.txt): running 1 while it
 // fetches; up to cap items into items, how many in *count. 0, or -1.
 int scReadDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count);
+
+// "+" pressed while the app was away, oldest first, each taken out of the
+// file as it is read: up to cap into events, how many in *count. 0, or -1.
+typedef struct ScPlusEvent {
+    uint64_t ms;           // when (the monotonic clock, ms)
+    int saved;             // 1 "+" lit, 0 put out
+    char id[128];          // the track's ScTrack.id, "" if it had none
+    char file[768];        // its path or URL
+} ScPlusEvent;
+int scReadPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count);
 
 // Liked tracks (R3 "+" in the Music section): /data/ShellCompanion/ps4/liked.txt,
 // a path or URL a line, as the queue gave them.

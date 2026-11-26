@@ -714,7 +714,11 @@ static int ebgmLibrary(const char* sub, int64_t id) {
     if (!file[0]) return 0;
     if (save || del) {
         likedSet(file, save);
-        sendPlayer("liked\n");  // the Liked list again (0.67)
+        // The Liked list again (0.67), and the press, for the app's own
+        // action (0.86: the player's plus.c), with the track's number.
+        char cmd[48];
+        fmt(cmd, sizeof(cmd), "liked\nplus_%s=%d\n", save ? "save" : "delete", statusInt("track"));
+        sendPlayer(cmd);
     }
     static char text[512 * 1024];  // liked.txt (0.84: 64 KB)
     const int has = likedHas(file, text, sizeof(text));

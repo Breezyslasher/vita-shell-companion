@@ -113,6 +113,7 @@ static uint64_t g_seekMs, g_heldPosMs;
 #define GIVEN_TEXT 160
 static struct {
     const char *title, *artist, *album, *cover;  // in g_pool, "" where not given
+    const char* id;  // the app's own id for the track (0.86, its sixth field), for "+"
 } g_given[MAX_TRACKS];
 
 // A path's track by its hash (FNV-1a), for streams.txt's and liked.txt's
@@ -891,10 +892,10 @@ static void addTrack(const char* path, size_t len) {
     size_t u = end;
     while (u && path[u - 1] == ' ') u--;
     g_tracks[g_libCount] = poolStr(path, u);
-    const char** fields[4] = {&g_given[g_libCount].title, &g_given[g_libCount].artist,
-                              &g_given[g_libCount].album, &g_given[g_libCount].cover};
+    const char** fields[5] = {&g_given[g_libCount].title, &g_given[g_libCount].artist,
+                              &g_given[g_libCount].album, &g_given[g_libCount].cover, &g_given[g_libCount].id};
     size_t at = end;
-    for (int f = 0; f < 4; f++) {
+    for (int f = 0; f < 5; f++) {
         *fields[f] = "";
         if (at >= len) continue;
         at++;  // the tab
@@ -948,6 +949,8 @@ static void scanMusic(void) {
 // The queue, from queue.txt or music/. "#start N" in queue.txt picks the
 // first track (from 0).
 static void writeLibrary(void);
+static void plusReset(void);
+static int plusLine(const char* line, int len);
 
 static void loadQueue(void) {
     char* text;
@@ -957,6 +960,7 @@ static void loadQueue(void) {
     g_count = 0;
     g_index = 0;
     poolReset();
+    plusReset();
     const int n = (int)readMapped(SC_BGM_QUEUE, &text, &textMapped);
     int start = 0;
     if (n > 0) {
@@ -965,7 +969,8 @@ static void loadQueue(void) {
             while (end < n && text[end] != '\n' && text[end] != '\r') end++;
             const char* line = text + at;
             const int len = end - at;
-            if (len > 10 && !memcmp(line, "#position ", 10)) {
+            if (plusLine(line, len)) {
+            } else if (len > 10 && !memcmp(line, "#position ", 10)) {
                 g_seekMs = 0;
                 for (int i = 10; i < len && line[i] >= '0' && line[i] <= '9'; i++)
                     g_seekMs = g_seekMs * 10 + (uint64_t)(line[i] - '0');
@@ -1725,6 +1730,9 @@ static void queueInsert(int at, int lib) {
     writeQueue();
 }
 
+// The Music section's "+" as each app wants it (0.86).
+#include "plus.c"
+
 static uint64_t g_lastStatus;
 
 static void writeStatus(void) {
@@ -1804,6 +1812,7 @@ static int openTrack(void) {
                 if (!g_meta.album[0]) fmt(g_meta.album, META_LEN, "%s", g_lib[lib].album);
             }
             notify("Now playing: %s", g_lib[lib].title[0] ? g_lib[lib].title : baseName(curPath()));
+            plusTrackBegun(lib);
             return 1;
         }
     }
@@ -1847,6 +1856,12 @@ static void runCommand(const char* text, int n) {
         if (!openTrack()) stop("nothing after it would open");
     } else if (IS("stop")) {
         stop("asked");
+    } else if (n > 10 && (!memcmp(text, "plus_save=", 10) || !memcmp(text, "plus_delete=", 12))) {
+        // "+" pressed in the Music section (the music watch, 0.86): plus.c.
+        const int save = text[5] == 's';
+        int lib = 0;
+        for (int i = save ? 10 : 12; i < n && text[i] >= '0' && text[i] <= '9'; i++) lib = lib * 10 + (text[i] - '0');
+        plusPressed(save, lib);
     } else if (IS("dl_start")) {
         // An app's downloads handed over (the client library's
         // scDownloadsStart, 0.82): downloads.c's thread takes them.
@@ -1967,7 +1982,7 @@ static void runCommand(const char* text, int n) {
 // The commands in cmd, one a line, if it is there. It is renamed first, so
 // that a command written meanwhile is not lost, nor one read half written.
 static void command(void) {
-    char text[256];
+    static char text[4096];  // 0.86: 256, and commands are added to cmd since 0.67
     if (sysRename(SC_BGM_CMD, SC_BGM_CMD ".work") < 0) return;
     const int len = readText(SC_BGM_CMD ".work", text, sizeof(text));
     sysUnlink(SC_BGM_CMD ".work");

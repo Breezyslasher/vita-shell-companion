@@ -258,6 +258,8 @@ int scOpen(char* what, size_t size) {
 
 // ── The queue ────────────────────────────────────────────────────────────────
 
+static size_t putEncoded(char* out, size_t at, size_t cap, const char* s);
+
 // A field, its tabs and line breaks made spaces.
 static size_t putField(char* out, size_t at, size_t cap, const char* s) {
     for (; s && *s && at + 1 < cap; s++) out[at++] = (*s == '\t' || *s == '\n' || *s == '\r') ? ' ' : *s;
@@ -267,17 +269,36 @@ static size_t putField(char* out, size_t at, size_t cap, const char* s) {
 int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count) {
     if (!tracks && count) return -1;
     if (count > 10000) count = 10000;
-    size_t cap = 64;
+    size_t cap = 64 + 16384;  // the head, "+"'s templates included
+    const ScPlus* plus = queue ? queue->plus : NULL;
+    if (plus) {
+        const char* f[8] = {plus->saveUrl, plus->deleteUrl, plus->method, plus->body,
+                            plus->type, plus->headers, plus->containsUrl, plus->containsMatch};
+        for (int k = 0; k < 8; k++) cap += f[k] ? 3 * strlen(f[k]) : 0;
+    }
     for (uint32_t i = 0; i < count; i++) {
         const ScTrack* t = &tracks[i];
-        const char* f[6] = {t->local, t->url, t->title, t->artist, t->album, t->coverUrl};
+        const char* f[7] = {t->local, t->url, t->title, t->artist, t->album, t->coverUrl, t->id};
         cap += 16;
-        for (int k = 0; k < 6; k++) cap += f[k] ? strlen(f[k]) : 0;
+        for (int k = 0; k < 7; k++) cap += f[k] ? strlen(f[k]) : 0;
     }
     char* out = (char*)malloc(cap);
     if (!out) return -1;
     size_t at = (size_t)snprintf(out, cap, "#start %u\n#position %u\n", queue ? queue->index : 0,
                                  queue ? queue->positionMs : 0);
+    if (plus && plus->mode == SC_PLUS_HTTP) {
+        // "+"'s settings, each %-encoded (the player's plus.c).
+        const char* key[8] = {"save", "delete", "method", "body", "type", "headers", "contains", "match"};
+        const char* val[8] = {plus->saveUrl, plus->deleteUrl, plus->method, plus->body,
+                              plus->type, plus->headers, plus->containsUrl, plus->containsMatch};
+        at += (size_t)snprintf(out + at, cap - at, "#plus.mode http\n");
+        for (int k = 0; k < 8; k++) {
+            if (!val[k] || !val[k][0]) continue;
+            at += (size_t)snprintf(out + at, cap - at, "#plus.%s ", key[k]);
+            at = putEncoded(out, at, cap, val[k]);
+            out[at++] = '\n';
+        }
+    }
     for (uint32_t i = 0; i < count; i++) {
         const ScTrack* t = &tracks[i];
         const char* where = t->local && t->local[0] ? t->local : t->url;
@@ -285,8 +306,8 @@ int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count) {
         // The shell's path: /data is /user/data inside it.
         if (!strncmp(where, "/data/", 6)) at = putField(out, at, cap, "/user");
         at = putField(out, at, cap, where);
-        const char* rest[4] = {t->title, t->artist, t->album, t->coverUrl};
-        int last = 3;
+        const char* rest[5] = {t->title, t->artist, t->album, t->coverUrl, t->id};
+        int last = 4;
         while (last >= 0 && !(rest[last] && rest[last][0])) last--;
         for (int k = 0; k <= last; k++) {
             if (at + 1 < cap) out[at++] = '\t';
@@ -458,6 +479,46 @@ int scReadDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t cap, u
         *e = keep;
         p = *e ? e + 1 : e;
     }
+    if (count) *count = n;
+    return 0;
+}
+
+// ── "+" pressed while the app was away ───────────────────────────────────────
+
+#define PLUS_EVENTS SC_BGM_DIR "/plus-events.txt"
+
+int scReadPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count) {
+    if (count) *count = 0;
+    // Taken first, so that a press meanwhile goes to a new file.
+    char work[128];
+    snprintf(work, sizeof(work), "%s.work", PLUS_EVENTS);
+    if (rename(PLUS_EVENTS, work) != 0) return access(PLUS_EVENTS, F_OK) == 0 ? -1 : 0;
+    static char text[256 * 1024];
+    const int len = readAll(work, text, sizeof(text));
+    uint32_t n = 0;
+    for (char* p = text; len > 0 && *p;) {
+        char* e = p;
+        while (*e && *e != '\n') e++;
+        const char keep = *e;
+        *e = 0;
+        char* f[4] = {p, NULL, NULL, NULL};
+        int k = 1;
+        for (char* q = p; *q && k < 4; q++)
+            if (*q == '\t') {
+                *q = 0;
+                f[k++] = q + 1;
+            }
+        if (k == 4 && events && n < cap) {
+            ScPlusEvent* ev = &events[n++];
+            ev->ms = strtoull(f[0], NULL, 10);
+            ev->saved = !strcmp(f[1], "save");
+            snprintf(ev->id, sizeof(ev->id), "%s", f[2]);
+            snprintf(ev->file, sizeof(ev->file), "%s", f[3]);
+        }
+        *e = keep;
+        p = *e ? e + 1 : e;
+    }
+    unlink(work);
     if (count) *count = n;
     return 0;
 }
