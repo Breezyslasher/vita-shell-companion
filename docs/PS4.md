@@ -222,8 +222,10 @@ Switches (an empty file of that name in the folder):
   failed in the shell.
 - **Covers:** tiles show JPEG and PNG; the shell appends `&w=192&h=192` to a
   tile's URL.
-- **Download progress:** notifications only, for now. An entry in
-  Notifications → Downloads is being worked on.
+- **Download progress:** notifications for ordinary files. The PS4's own
+  Notifications → Downloads list (its download service) takes packages only:
+  a test with an MP3, served from the PS4 itself, was refused before the
+  service asked for a byte.
 - **Rest mode:** whether downloads carry on in rest mode isn't known yet.
 - **Starting position:** for a stream, the start position works only
   within what has been downloaded when it begins.

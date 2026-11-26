@@ -896,6 +896,17 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### The experiment's answer: packages only
+
+0.94's run, served from the PS4 itself: the server answered (the probe's own
+HEAD request was logged: 200, 6,830,270 bytes), and the download service took
+the task (1061) and started it. Two seconds later it failed with `0x80990033`
+(CE-32942-0 on screen, "not on the server") **without a single request to the
+server**. The service doesn't fetch content that isn't a package: it gives up
+before asking for it. Plain media stays with our own downloader
+(`downloads.c`) and its notifications. Packages (`pkg` items, self-update) go
+to the service.
+
 ### A web server on the PS4 for the experiment (0.94)
 
 With no URL in `bgft-probe.txt`, the probe serves one of the console's MP3s
