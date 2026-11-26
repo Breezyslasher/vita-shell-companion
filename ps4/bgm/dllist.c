@@ -586,10 +586,7 @@ void dlListCtlHook(Frame* f) {
         __typeof__(g_dls.item[0])* it = i >= 0 && i < g_dls.count ? &g_dls.item[i] : NULL;
         const int open = it && it->state != DLS_DONE && it->state != DLS_GONE && it->state != DLS_FAILED &&
                          it->state != DLS_CANCELLED;
-        if (hasText(name, "State")) {
-            // The state calls: only logged (above) till a log shows what
-            // they say (1.33).
-        } else if (hasText(name, "Unregister")) {
+        if (hasText(name, "Unregister")) {
             g_dll.e[k].task = 0;
             if (open) it->cancel = 1;  // deleted: not fetched (1.29)
         } else if (hasText(name, "Pause") || hasText(name, "Stop")) {
@@ -597,6 +594,10 @@ void dlListCtlHook(Frame* f) {
             // it is writing, and the next one goes; Resume brings it back.
             if (open) it->paused = 1;
         } else if (hasText(name, "Start") || hasText(name, "Resume") || hasText(name, "HighPriority")) {
+            // (1.34: Resume is SetResumeState(task, 1), 1.33's log; Download
+            // Now StartTask(task). Both re-paused at once below: 1.33 left
+            // SetResumeState alone, and the service, trying to fetch the
+            // placeholder itself, failed it ("Cannot download").)
             // Resume, or Download Now: next, after the one going (1.29).
             if (open) {
                 it->paused = 0;

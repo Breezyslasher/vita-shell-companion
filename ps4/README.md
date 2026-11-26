@@ -357,6 +357,12 @@ service's are, not the managed wrappers 0.85 hooked.
   hooked: the set-state and "All" start/resume calls; every button call is
   logged with its arguments (the first 60), the task taken from the first
   or second; the state calls only logged till a log shows what they say.
+- **1.33 on the PS4:** Cancel and Delete took off only that song. Download
+  Now is `sceBgftServiceIntDownloadStartTask(task)`; Resume is
+  `sceBgftServiceIntDownloadSetResumeState(task, 1)`, which 1.33 only
+  logged: the song stayed paused, and the service, fetching the
+  placeholder itself, failed it ("Cannot download"). 1.34: the set-state
+  calls resume the song and re-pause the service's task, as Start does.
 
 ### One module, and the cleanup (0.95)
 
