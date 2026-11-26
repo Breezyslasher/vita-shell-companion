@@ -150,6 +150,13 @@ service's are, not the managed wrappers 0.85 hooked.
   registered, sat in section 5 (the failed ones) until replaced 5 s later,
   and the summary keeps its counts from when it is shown. 1.08 takes ours
   out of section 5's results (and marks them for replacing).
+- **1.08 with `dl-list-try`:** finished songs read: A (Stop/Complete,
+  `0x100c1`) nothing, "?" icon; B (Complete/Complete, bit 20) "Queued for
+  downloading"; C (Complete/Complete, type 3: `0x313`/`0x103c3`) the
+  music-note icon, no warning; D (Stop/Download, type 1) "Cannot
+  download"; E (Run/Install) nothing, "?". 1.09 answers C for finished
+  ones. The param's type 3 (finished games' `0x...63`) is what brings the
+  icon (1.07's `0x80c3` had it too).
 
 ### One module, and the cleanup (0.95)
 
