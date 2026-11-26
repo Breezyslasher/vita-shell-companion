@@ -423,8 +423,6 @@ static int pkgItem(int i) {
 // the folders it might have gone to. The "bgft_probe" command; its URL from
 // bgft-probe.txt (its first line), else a test MP3.
 
-typedef int (*FnBgftTaskInfo)(int32_t, void*);
-
 static void probeList(const char* dir, int depth) {
     const int fd = sysOpen(dir, SC_O_RDONLY | SC_O_DIRECTORY, 0);
     if (fd < 0) {
@@ -506,6 +504,12 @@ static void* probeMain(void* arg) {
             logLine("probe: type %s%s%s, entitlement %d: 0x%08X, task %d", types[t] ? "\"" : "",
                     types[t] ? types[t] : "NULL", types[t] ? "\"" : "", p.entitlementType, (unsigned)rc, id);
             if (rc >= 0 && id >= 0) task = id;
+            if (rc == (int)0x80990086 && g_bgft.find) {
+                // Registered by an earlier run: that task, followed.
+                const int fr = g_bgft.find(p.id, 0, &id);
+                logLine("probe: taken already, an earlier run's: 0x%08X, task %d", (unsigned)fr, id);
+                if (fr >= 0 && id >= 0) task = id;
+            }
         }
     }
     if (task < 0) {
@@ -516,18 +520,9 @@ static void* probeMain(void* arg) {
     const int st = g_bgft.start(task);
     logLine("probe: task %d started: 0x%08X", task, (unsigned)st);
     notify("Download service test: task %d taken, see Notifications > Downloads", task);
-    FnBgftTaskInfo info = (FnBgftTaskInfo)anySym(0, "sceBgftServiceIntDownloadGetTaskInfo");
-    if (info) {
-        struct {
-            char* title;
-            char* icon;
-            uint64_t tick;
-            uint8_t spare[0x40];
-        } ti;
-        memset(&ti, 0, sizeof(ti));
-        const int ir = info(task, &ti);
-        logLine("probe: task info 0x%08X: title %p, icon %p", (unsigned)ir, (void*)ti.title, (void*)ti.icon);
-    }
+    // (0.91 asked sceBgftServiceIntDownloadGetTaskInfo here, with null
+    // pointers for the title and icon: it writes into buffers it is given,
+    // and the shell went down. Not asked now.)
     for (int s = 0; s < 90; s++) {
         BgftProgress pr;
         memset(&pr, 0, sizeof(pr));

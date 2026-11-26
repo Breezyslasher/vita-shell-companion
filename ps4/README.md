@@ -896,6 +896,15 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### Media through the download service: taken (0.92)
+
+With a user (0.91), the service took the MP3 at once: package type `""`,
+entitlement type 5, `0x00000000`, task 1056, and `sceBgftServiceDownloadStartTask`
+`0x00000000`. The shell then went down. The experiment's next call was
+`sceBgftServiceIntDownloadGetTaskInfo`, given null pointers for the title and
+icon: it writes into buffers it is given. It is not asked now. An earlier
+run's task (`0x80990086`, taken already) is found and followed.
+
 ### The user the download service wants (0.91)
 
 The first run of the experiment had every registration refused with
