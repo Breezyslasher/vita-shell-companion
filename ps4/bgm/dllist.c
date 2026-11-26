@@ -787,7 +787,10 @@ static void dlListEnd(void) {
 // 30 minutes after it ended (1.15), unless dl-list-keep is there. Without
 // the module (after a reboot) they would show the service's own state, a
 // paused task, until the app's next start removed them.
+static void ndbIdle(void);  // ndbprobe.c (1.17)
+
 static void dlListIdle(void) {
+    ndbIdle();
     if (!g_dll.endedUs || !g_dll.count || sysNowUs() - g_dll.endedUs < 30ull * 60 * 1000000) return;
     g_dll.endedUs = 0;
     if (sysExists(SC_BGM_DIR "/dl-list-keep")) return;

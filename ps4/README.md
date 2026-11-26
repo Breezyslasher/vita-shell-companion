@@ -212,6 +212,17 @@ service's are, not the managed wrappers 0.85 hooked.
   there, first): in between they were in neither, gone from the screen.
   1.16 keeps a finished (or failed) one in section 3, answering going with
   every byte, until it has been in an answer of its new section.
+- **What tells the list (1.17, research):** the list's accessor
+  (`DownloadItemAccessor2`) is a `NotificationDbAccessor`: it asks the
+  service again when `notification.db`'s table `item` (`item_type`
+  DOWNLOAD/UPLOAD) changes (`DbItemAccessor.RegistDbEventCallback`). The
+  shell writes that database through `libSceVshNotificationDbWrapper`
+  (`sendJSON(json, blocking)`, `sendHintRecord`); a record of the item
+  table has itemType, itemId, subject, subjectId, subjectIdParams, titleId,
+  titleName, titleIcon, sentDate, receivedDate, readFlag, settingTarget,
+  extraData. The JSON is built in code that wasn't dumped. `ndb-probe`
+  (`ps4/bgm/ndbprobe.c`) copies the database to `code/`, writes the
+  wrapper's memory there, and logs every `sendJSON`; nothing is written.
 
 ### One module, and the cleanup (0.95)
 

@@ -1741,6 +1741,9 @@ static void queueInsert(int at, int lib) {
 // A download list's files in Notifications > Downloads (0.96).
 #include "dllist.c"
 
+// Research: how the Downloads list is told a task changed (1.17).
+#include "ndbprobe.c"
+
 static uint64_t g_lastStatus;
 
 static void writeStatus(void) {
