@@ -2226,8 +2226,9 @@ static void monoLog(Frame* f) {
 // file's one table, "notification", too). Nothing is written to the
 // database. On a thread of the shell's (the list's, in a hook): 1 if posted.
 int mcwDbNotifyPost(void) {
-    static int tried;
-    static void *post, *getPath;
+    static int tried, turn;
+    static void *post, *getPath, *ways[4];
+    static const char* const wayNames[4] = {"Post", "GlobalPost", "Send", "GlobalSend"};
     static char path[160];
     if (!g_setupAgain.imageLoaded || !g_setupAgain.classFromName || !g_mono.methodByName || !g_mono.invoke ||
         !g_row.stringNew || !g_setupAgain.domain)
@@ -2237,6 +2238,11 @@ int mcwDbNotifyPost(void) {
         void* nimg = ((FnMonoName)g_setupAgain.imageLoaded)("Sce.Vsh.Accessor.Db.Notify");
         void* ncls = nimg ? ((FnMonoClass)g_setupAgain.classFromName)(nimg, "Sce.Vsh.Accessor.Db.Notify", "DbNotify") : NULL;
         post = ncls ? g_mono.methodByName(ncls, "Post", 2) : NULL;
+        // 1.21: Post (1.19, 1.20) didn't make the list ask again (bgm.log:
+        // its re-reads unrelated to the posts). The four ways, in turn, one
+        // per change, to see which it hears.
+        for (int w = 0; w < 4; w++) ways[w] = ncls ? g_mono.methodByName(ncls, wayNames[w], 2) : NULL;
+        say("dbnotify: Post %p, GlobalPost %p, Send %p, GlobalSend %p", ways[0], ways[1], ways[2], ways[3]);
         void* bimg = ((FnMonoName)g_setupAgain.imageLoaded)("Sce.Vsh.Orbis.BgftAccessor");
         void* bcls = bimg ? ((FnMonoClass)g_setupAgain.classFromName)(bimg, "Sce.Vsh.Orbis.Bgft", "NotificationDbAccessor") : NULL;
         getPath = bcls ? g_mono.methodByName(bcls, "GetDbPath", 0) : NULL;
@@ -2246,17 +2252,21 @@ int mcwDbNotifyPost(void) {
         say("dbnotify: DbNotify %p, Post %p; NotificationDbAccessor %p, GetDbPath %p = \"%s\"%s", ncls, post, bcls,
             getPath, path, exc ? " (an exception)" : "");
     }
-    if (!post || !path[0]) return 0;
+    if (!path[0]) return 0;
+    int w = turn++ % 4;
+    for (int tries = 0; tries < 4 && !ways[w]; tries++) w = turn++ % 4;
+    if (!ways[w]) return 0;
     static const char* const tables[2] = {"item", "notification"};
     int ok = 0;
     for (int t = 0; t < 2; t++) {
         void* args[2] = {g_row.stringNew(g_setupAgain.domain, path), g_row.stringNew(g_setupAgain.domain, tables[t])};
         void* exc = NULL;
-        g_mono.invoke(post, NULL, args, &exc);
+        g_mono.invoke(ways[w], NULL, args, &exc);
         if (!exc) ok = 1;
-        say("dbnotify: Post(\"%s\", \"%s\")%s  [thread %d]", path, tables[t], exc ? ": an exception" : "",
-            scePthreadGetthreadid());
+        say("dbnotify: %s(\"%s\", \"%s\")%s  [thread %d]", wayNames[w], path, tables[t],
+            exc ? ": an exception" : "", scePthreadGetthreadid());
     }
+    logLine("dllist: told the list (DbNotify.%s)", wayNames[w]);  // in bgm.log too, beside its re-reads
     return ok;
 }
 #endif

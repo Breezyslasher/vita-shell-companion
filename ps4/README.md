@@ -248,6 +248,11 @@ service's are, not the managed wrappers 0.85 hooked.
   till they move. The list asked for section 3 at 34.8, 52.8, 108.7 s and
   for section 9 not after 34.9 s, so none moved. "Calculating..." is time
   left unknown (`0xFFFFFFFF`); 1.20 logs each going answer every 5 s.
+- **1.19's mcw.log:** GetDbPath gave `/<word>/priv/mms/notification.db`;
+  each Post went through without an exception, but the list's re-reads
+  (bgm.log) came at other times. 1.21 uses DbNotify's four ways in turn
+  (Post, GlobalPost, Send, GlobalSend), one per change, each also noted in
+  bgm.log ("told the list"), to see which the list hears.
 
 ### One module, and the cleanup (0.95)
 
