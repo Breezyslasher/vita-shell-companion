@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.22"
+#define APP_VERSION "0.23"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -131,6 +131,7 @@ __attribute__((noinline)) static long sysCall(long num, long a, long b, long c) 
 }
 
 int sceKernelDlsym(int handle, const char* symbol, void** addr);
+int sceSysmoduleLoadModule(uint16_t id);
 int scePthreadCreate(void* thread, const void* attr, void* (*fn)(void*), void* arg,
                      const char* name);
 int sceKernelLoadStartModule(const char* path, size_t args, const void* argp, uint32_t flags,
@@ -772,7 +773,13 @@ static void* mpsProbe(void* arg) {
     static uint64_t watcher;
     scePthreadCreate(&watcher, NULL, mpsWatch, NULL, "ScMpsWatch");
     int res = 0;
-    mpsStep("load libSceMusicPlayerService");
+    // As a game loads it: through the system's module loader, which links
+    // what it needs (0.22, loaded as a file by sceKernelLoadStartModule,
+    // died in Initialize() at once, as if a call it makes went nowhere).
+    mpsStep("sceSysmoduleLoadModule(0xDD, the music player service)");
+    const int sm = sceSysmoduleLoadModule(0xDD);
+    mpsLog("sceSysmoduleLoadModule(0xDD): 0x%08X", (unsigned)sm);
+    mpsStep("its handle");
     int lib = sceKernelLoadStartModule("libSceMusicPlayerService.sprx", 0, NULL, 0, NULL, &res);
     mpsLog("by name: 0x%08X", (unsigned)lib);
     if (lib < 0) {

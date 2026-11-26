@@ -28,7 +28,7 @@ clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -Wall -Wextra -
     -isysroot "$OO" -isystem "$OO/include" "-DSC_PRX_PATH=\"$OUT/sc_bgm.prx\"" \
     -c "$SRC/main.c" -o "$OUT/app.o"
 ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -o "$OUT/app.elf" "$OUT/app.o" \
-    -L"$OO/lib" -lc -lkernel -lSceVideoOut -lScePad -lSceUserService "$OO/lib/crt1.o"
+    -L"$OO/lib" -lc -lkernel -lSceVideoOut -lScePad -lSceUserService -lSceSysmodule "$OO/lib/crt1.o"
 
 PKG=$OUT/pkg
 rm -rf "$PKG"
