@@ -896,6 +896,18 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### Rows' covers after several lists (0.83)
+
+The watch keeps an entry for each row it gave a cover. An entry was freed
+only when the shell discarded the row, but the shell keeps the rows of lists
+opened before. After a few lists the 64 entries were all taken, and every new
+row got no cover: "Unknown album"'s rows went blank while its tile showed.
+There are now 256 entries, and when they are all taken the one updated
+longest ago is reused: its row's box is removed and its labels put back.
+
+Background downloads worked on the first test: three SoundHelix MP3s
+(8,945,229, 10,222,911 and 8,258,104 bytes), all `done`.
+
 ### Background downloads (0.82)
 
 An app's files, fetched in the shell after the app has gone, as the Vita

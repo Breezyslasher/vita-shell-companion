@@ -1295,7 +1295,7 @@ static void spotifyEntryFix(void* ctx) {
 // the list scrolls: each is known by a weak GC handle, never a pointer.
 // mcw-norowart turns it off.
 
-#define ROWS 64
+#define ROWS 256
 #define ROW_SHIFT 74.0f
 typedef void* (*FnMonoNew)(void*, void*);
 typedef void* (*FnMonoStrNew)(void*, const char*);
@@ -1337,6 +1337,7 @@ static struct {
     uint32_t row, img;  // weak handles
     int idx, shifted, rev;
     int loaded;         // a load was ever begun into its box
+    uint32_t used;      // when it was last updated (g_rowClock), for reusing it
     float x[2];         // the labels' own X, before they were moved
 } g_rows[ROWS];
 static int g_rowSaid;
@@ -1506,11 +1507,31 @@ static void rowArt(Frame* f) {
         }
     }
     // This row's entry, or a free one.
-    int e = -1, free_ = -1;
+    // (0.83) Full, as the shell keeps the rows of lists opened before (0.82
+    // and before then gave new rows no cover at all): the entry updated
+    // longest ago is taken, its row's box removed and its labels put back.
+    static uint32_t rowClock;
+    int e = -1, free_ = -1, oldest = -1;
     for (int i = 0; i < ROWS; i++) {
         void* t = g_rows[i].row ? g_row.target(g_rows[i].row) : NULL;
         if (t == row) e = i;
         else if (!t && free_ < 0) free_ = i;
+        if (t && t != row && (oldest < 0 || g_rows[i].used < g_rows[oldest].used)) oldest = i;
+    }
+    if (e < 0 && free_ < 0 && oldest >= 0) {
+        void* oldRow = g_row.target(g_rows[oldest].row);
+        void* oldImg = g_rows[oldest].img ? g_row.target(g_rows[oldest].img) : NULL;
+        if (oldImg) {
+            rowShow(oldImg, 0);
+            if (g_row.removeChild) rowCall(g_row.removeChild, oldImg, NULL);
+        }
+        if (oldRow && g_rows[oldest].shifted) rowShift(oldRow, oldest, 0, 0.0f);
+        if (g_row.freeHandle) {
+            if (g_rows[oldest].row) g_row.freeHandle(g_rows[oldest].row);
+            if (g_rows[oldest].img) g_row.freeHandle(g_rows[oldest].img);
+        }
+        memset(&g_rows[oldest], 0, sizeof(g_rows[oldest]));
+        free_ = oldest;
     }
     int type = -1;
     if (g_row.fType) g_mono.get(data, g_row.fType, &type);
@@ -1555,6 +1576,7 @@ static void rowArt(Frame* f) {
         g_rows[e].shifted = 0;
         g_rows[e].loaded = 0;
     }
+    g_rows[e].used = ++rowClock;
     void* img = g_row.target(g_rows[e].img);
     if (!img) {
         g_rows[e].row = 0;
