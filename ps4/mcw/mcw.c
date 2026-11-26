@@ -857,7 +857,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 7
+#define MONO_HOOKS 9
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -979,6 +979,10 @@ static void monoLog(Frame* f) {
                 g_forceApp && ver < APPVER_SAID ? ", made 9.99" : "", f->seq,
                 scePthreadGetthreadid());
         }
+    } else if (h->json == 5) {
+        if (f->seq <= 50)
+            say("mono: %s: %d (0x%X), 0x%X  [#%u, thread %d]", h->name, (int32_t)f->gpr[1],
+                (uint32_t)f->gpr[1], (uint32_t)f->gpr[2], f->seq, scePthreadGetthreadid());
     } else if (h->json == 3 && first) {
         float v;
         memcpy(&v, f->retXmm0, 4);
@@ -1019,6 +1023,8 @@ static struct {
     FnMonoJitPtr jitStart, jitMethod;
     FnMonoJitSize jitSize;
     FnMonoFieldOffset fieldOffset;
+    FnMonoIter nested;
+    FnMonoFieldName className;
 } g_dump;
 
 static int dumpPut(int fd, const char* f, ...) __attribute__((format(printf, 2, 3)));
@@ -1054,8 +1060,8 @@ static uint64_t followStub(uint64_t t) {
 }
 
 static void codeDump(void* domain, void* imageLoaded, void* classFromName, void* compile) {
-    if (sysExists(CODE_DIR "/methods.map")) {
-        say("code: code/methods.map is there already: not again");
+    if (sysExists(CODE_DIR "/methods2.map")) {
+        say("code: code/methods2.map is there already: not again");
         return;
     }
     if (!g_dump.methods || !g_dump.fullName || !g_dump.jitFind || !g_dump.jitStart ||
@@ -1090,8 +1096,8 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
         skips[n > 0 ? n : 0] = 0;
         sysClose(fd);
     }
-    const int map = sysOpen(CODE_DIR "/methods.map.new", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
-    const int bin = sysOpen(CODE_DIR "/code.bin", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    const int map = sysOpen(CODE_DIR "/methods2.map.new", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    const int bin = sysOpen(CODE_DIR "/code2.bin", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
     if (map < 0 || bin < 0) return;
     static const char* const want[][2] = {
         {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicPanel"},
@@ -1111,10 +1117,35 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
     void* image = ((FnMonoName)imageLoaded)("app");
     uint64_t at = 0;
     int methods = 0, calls = 0;
-    for (size_t k = 0; image && k < sizeof(want) / sizeof(want[0]); k++) {
+    // The classes, and those nested in them (lambdas, display classes, async
+    // state machines: where StartQuery's task is), two levels down.
+    static void* classes[256];
+    static char names[256][160];
+    int nClasses = 0;
+    for (size_t k = 0; image && k < sizeof(want) / sizeof(want[0]) && nClasses < 256; k++) {
         void* klass = ((FnMonoClass)classFromName)(image, want[k][0], want[k][1]);
         dumpPut(map, "class %s.%s %p", want[k][0], want[k][1], klass);
         if (!klass) continue;
+        const int top = nClasses;
+        fmt(names[nClasses], sizeof(names[0]), "%s", want[k][1]);
+        classes[nClasses++] = klass;
+        for (int level = 0; level < 2; level++) {
+            const int end = nClasses;
+            for (int c = level ? top + 1 : top; c < end && nClasses < 256; c++) {
+                if (!g_dump.nested) break;
+                void* iter = NULL;
+                void* n;
+                while (nClasses < 256 && (n = g_dump.nested(classes[c], &iter))) {
+                    fmt(names[nClasses], sizeof(names[0]), "%s/%s", names[c],
+                        g_dump.className ? g_dump.className(n) : "?");
+                    classes[nClasses++] = n;
+                }
+            }
+        }
+    }
+    for (int k = 0; k < nClasses; k++) {
+        void* klass = classes[k];
+        dumpPut(map, "class %s %p", names[k], klass);
         void* iter = NULL;
         void* f;
         while (g_dump.fieldOffset && g_mono.fields && (f = g_mono.fields(klass, &iter)))
@@ -1176,15 +1207,15 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
             at += (uint64_t)size;
             methods++;
         }
-        say("code: %s: done, %d methods so far", want[k][1], methods);
+        say("code: %s: done, %d methods so far", names[k], methods);
         drain();
     }
     sysClose(bin);
     sysClose(map);
     sysUnlink(CODE_DIR "/dumping");
-    sysRename(CODE_DIR "/methods.map.new", CODE_DIR "/methods.map");
-    say("code: %d methods, %lu bytes, %d calls named: code/methods.map and code/code.bin", methods,
-        at, calls);
+    sysRename(CODE_DIR "/methods2.map.new", CODE_DIR "/methods2.map");
+    say("code: %d methods, %lu bytes, %d calls named: code/methods2.map and code/code2.bin",
+        methods, at, calls);
     notify("Music watch: the Music section's code is in ShellCompanion/ps4/code");
 }
 
@@ -1226,6 +1257,8 @@ static void monoHooks(void) {
     if (!sceKernelDlsym(mono, "mono_jit_info_get_code_size", &p)) g_dump.jitSize = (FnMonoJitSize)p;
     if (!sceKernelDlsym(mono, "mono_jit_info_get_method", &p)) g_dump.jitMethod = (FnMonoJitPtr)p;
     if (!sceKernelDlsym(mono, "mono_field_get_offset", &p)) g_dump.fieldOffset = (FnMonoFieldOffset)p;
+    if (!sceKernelDlsym(mono, "mono_class_get_nested_types", &p)) g_dump.nested = (FnMonoIter)p;
+    if (!sceKernelDlsym(mono, "mono_class_get_name", &p)) g_dump.className = (FnMonoFieldName)p;
     say("mono: object class %p, field by name %p, get %p, set %p, fields %p, field name %p, invoke %p",
         (void*)g_mono.objectClass, (void*)g_mono.fieldByName, (void*)g_mono.get, (void*)g_mono.set,
         (void*)g_mono.fields, (void*)g_mono.fieldName, (void*)g_mono.invoke);
@@ -1257,6 +1290,12 @@ static void monoHooks(void) {
          "get_AppVer", 0, 3, "AppVer"},
         {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicContext",
          "NotifyAppVerChanged", 1, 4, "NotifyAppVerChanged"},
+        // The track list's query, as it ends (0.50): its error code chooses
+        // the panel's message ("Download Spotify": 0x80BA0027-29).
+        {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListPanel", "OnQueryFinish", 2,
+         5, "TrackListPanel.OnQueryFinish(errorCode, list)"},
+        {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuPanel",
+         "OnTotalChanged", 2, 5, "TrackListMenuPanel.OnTotalChanged(total, errorCode)"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);

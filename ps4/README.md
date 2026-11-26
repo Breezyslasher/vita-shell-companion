@@ -409,6 +409,28 @@ runtime) are skipped, as asking for them would abort the runtime; the one
 being asked for is kept in `code/dumping`, and one the shell went down on is
 skipped from then on (`code/skip.txt`).
 
+### What the code says about "Download Spotify" (0.49's dump)
+
+0.49 dumped 349 methods (77 KB, 1284 calls named) with no trouble, and
+0.48's check found Spotify's app entry not empty (left as it was): that
+guess was wrong. The code instead:
+
+- `PlayStationMusicPanel.OnItemSelected(PlayListMenuData)`: type (`+0x28`) 0,
+  a playlist: a call, then `FocusToChildMenu()`: focus to the panel on the
+  right, the playlist's `TrackListMenuPanel`.
+- `TrackListMenuPanel.OnTotalChanged(total, errorCode)` keeps the track
+  query's error code (`+0x2e4`); `UpdatePanelErrorMessage` picks the message
+  by it: 0x80BA0028, 0x80BA0027, 0x80BA0029, else another; its button
+  (`<Create>b__17_0`) opens a link chosen by the same codes. "Enhance your
+  gaming experience with music. Download Spotify" is that panel in error.
+- `TrackListPanel.StartQuery` hands the query to a task
+  (`PostCancellableTask`), in a nested class the dump did not have, and no
+  tracks request was ever made: the error comes before any.
+
+0.50 dumps the nested classes too (`code/methods2.map`, `code/code2.bin`),
+and logs `TrackListPanel.OnQueryFinish(errorCode, list)` and
+`TrackListMenuPanel.OnTotalChanged(total, errorCode)` as they are called.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
