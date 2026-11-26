@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.23"
+#define APP_VERSION "0.24"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -715,6 +715,10 @@ static void draw(void) {
 
 // ---- the app ----
 
+// What GoldHEN's jailbreak replaced (the SDK's jailbreak_backup), to put
+// back: the music service refuses a jailbroken app, it seems.
+static struct JailbreakBackup g_jb;
+
 // ---- the system music service, in this app's own process ----
 //
 // Inside the shell its Initialize crashed SceShellUI (0.20): the service is
@@ -799,6 +803,16 @@ static void* mpsProbe(void* arg) {
     MpsPlay play = (MpsPlay)mpsSym(lib, "sceMusicPlayerServicePlay");
     MpsStatus ext = (MpsStatus)mpsSym(lib, "sceMusicPlayerServiceGetPlayStatusExtension");
 
+    // 0.23: Initialize and Initialize3 answered 0x812F0107,
+    // SCE_MUSIC_PLAYER_SERVICE_ERROR_PROHIBITED ("Using MusicPlayerService
+    // is prohibited", psdevwiki). The jailbreak replaced this app's user,
+    // program authority and capabilities; GoldHEN puts them back with its
+    // UNJAILBREAK (command 3) and the backup its JAILBREAK filled in. The
+    // log stays open, its file already open.
+    mpsStep("GoldHEN UNJAILBREAK (the app as it was installed)");
+    const long un = sysCall(500, 3 /* UNJAILBREAK */, (long)&g_jb, 0);
+    mpsLog("UNJAILBREAK: 0x%lX", (unsigned long)un);
+
     // Initialize takes no arguments (read from the library, 0.21).
     int32_t rc = -1;
     if (init) {
@@ -816,6 +830,7 @@ static void* mpsProbe(void* arg) {
         }
     }
     if (rc < 0 && (uint32_t)rc != 0x812F0002u) {
+        mpsLog("JAILBREAK again: 0x%lX", (unsigned long)sysCall(500, 2, (long)&g_jb, 0));
         say("Music service: it would not initialise (0x%08X)", (unsigned)rc);
         g_mpsDone = 1;
         g_mpsRunning = 0;
@@ -857,6 +872,8 @@ static void* mpsProbe(void* arg) {
                (unsigned long long)st.totalS, st.track, st.count, st.loading);
     }
     mpsLog("done");
+    mpsStep("GoldHEN JAILBREAK again");
+    mpsLog("JAILBREAK: 0x%lX", (unsigned long)sysCall(500, 2, (long)&g_jb, 0));
     say("Music service test done: open the quick menu, then send app.log");
     g_mpsDone = 1;
     g_mpsRunning = 0;
@@ -881,8 +898,7 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
     // Out of the sandbox, to reach /data. GoldHEN gives this to homebrew.
-    static struct JailbreakBackup jb;
-    const long jbrc = sysCall(500, 2 /* JAILBREAK */, (long)&jb, 0);
+    const long jbrc = sysCall(500, 2 /* JAILBREAK */, (long)&g_jb, 0);
 
     mkdir("/data/ShellCompanion", 0777);
     mkdir(SC_BGM_DIR, 0777);
