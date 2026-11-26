@@ -2735,6 +2735,7 @@ void mcwPre(Frame* f) {
 // service's progress call, answered for a download list's placeholders.
 void dlListHook(Frame* f);
 void dlListQueryHook(Frame* f);
+void dlListInfoHook(Frame* f);
 
 // A native function hooked for the player, under the install lock.
 int mcwHookNative(Hook* h, void* fn, const char** why) {
@@ -2753,6 +2754,10 @@ void mcwPost(Frame* f) {
     }
     if (f->hook->json == 19) {
         dlListQueryHook(f);
+        return;
+    }
+    if (f->hook->json == 20) {
+        dlListInfoHook(f);
         return;
     }
 #endif

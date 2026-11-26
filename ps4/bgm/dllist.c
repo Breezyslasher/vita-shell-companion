@@ -71,6 +71,8 @@ static struct {
     int tried, hooked;
     Hook hooks[2];
     Hook query[4];  // the list's task queries (0.98)
+    Hook info[8];   // its task info calls, logged only (1.11)
+    uint32_t infoLogged;
     uint32_t queryCalls[4];
     FnBgftUnregister unregister, stop, pause;
     uint32_t bitsGoing, bitsWaiting, bitsDone;
@@ -343,6 +345,25 @@ void dlListQueryHook(Frame* f) {
     (void)count;  // read only (1.00): 0.98 cleared a flag in memory an argument pointed to, which was not the results
 }
 
+// After one of the service's task info calls (1.11), logged only: what
+// else the list asks of a task (its info, a value by id: TaskInfoValueId
+// 18 Paused, 20 Title, ...), and what it was told, for ours above all.
+void dlListInfoHook(Frame* f) {
+    const int32_t task = (int32_t)f->gpr[0];
+    int ours = 0;
+    for (int k = 0; k < g_dll.count && k < DLL_MAX; k++)
+        if (g_dll.e[k].task == task && task > 0) ours = 1;
+    const uint32_t n = __atomic_add_fetch(&g_dll.infoLogged, 1, __ATOMIC_RELAXED);
+    if (!(ours ? n <= 400 : n <= 30)) return;
+    uint64_t out = 0;
+    const uint64_t* p = (const uint64_t*)(uintptr_t)f->gpr[2];
+    int have = (uintptr_t)p > 0x10000 && hookReadable(p, 8) == 8;
+    if (have) out = *p;
+    logLine("dllist: %s(%d, %lx, %lx)%s = 0x%08X, a2 -> %s%lx  [thread %d]", f->hook->name, task,
+            (unsigned long)f->gpr[1], (unsigned long)f->gpr[2], ours ? " [ours]" : "", (unsigned)f->retRax,
+            have ? "" : "(not read) ", (unsigned long)out, scePthreadGetthreadid());
+}
+
 static int dllHex(const char* text, const char* key, uint32_t* out) {
     char v[24];
     statusFieldBgm(text, key, v, sizeof(v));
@@ -403,6 +424,26 @@ static int dllSetup(void) {
         logLine("dllist: %s %p: %s%s", names[i], fn, rc == 0 ? "hooked" : "not hooked: ", rc == 0 ? "" : why);
     }
     logLine("dllist: unregister %p, stop %p, pause %p", (void*)g_dll.unregister, (void*)g_dll.stop, (void*)g_dll.pause);
+    // The list's other calls for a task (1.11, logged only): whichever of
+    // these names libSceBgft has.
+    static const char* const inames[8] = {
+        "sceBgftServiceIntDownloadGetTaskInfo",     "sceBgftServiceDownloadGetTaskInfo",
+        "sceBgftServiceIntGetTaskInfoValueInt",     "sceBgftServiceIntGetTaskInfoValueUInt",
+        "sceBgftServiceIntGetTaskInfoValueString",  "sceBgftServiceGetTaskInfoValueInt",
+        "sceBgftServiceIntDownloadGetTaskInfoValueInt", "sceBgftServiceIntDownloadGetPlayGoProgress"};
+    for (int i = 0; i < 8; i++) {
+        void* fn = anySym(lib, inames[i]);
+        if (!fn) {
+            logLine("dllist: %s: not found", inames[i]);
+            continue;
+        }
+        Hook* h = &g_dll.info[i];
+        h->name = inames[i] + 10;
+        h->json = 20;
+        const char* why = "";
+        const int rc = mcwHookNative(h, fn, &why);
+        logLine("dllist: %s %p: %s%s", inames[i], fn, rc == 0 ? "hooked (logged only)" : "not hooked: ", rc == 0 ? "" : why);
+    }
     // Left from a crash or an earlier boot.
     char text[1024];
     const int n = readText(DLL_TASKS, text, sizeof(text));

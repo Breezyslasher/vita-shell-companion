@@ -164,6 +164,9 @@ service's are, not the managed wrappers 0.85 hooked.
   (Ready/Standby) read "Cannot download" in 1.08's photo; `dl-list-try`
   now also tries six waiting answers (`g_dllTryWait`), B being what read
   "Queued for downloading".
+- **1.11, a test build:** also logs (only) the list's task info calls,
+  whichever libSceBgft has (`DownloadGetTaskInfo`, `GetTaskInfoValue*`):
+  every call for ours, the first 30 for others.
 
 ### One module, and the cleanup (0.95)
 
