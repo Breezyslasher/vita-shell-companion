@@ -310,6 +310,19 @@ the views were read and nothing else was asked. 0.41's guess makes each view
 a playlist itself, with its section's title (the shell's strings have
 `section_title` before `views`), the nested lists kept inside it too.
 
+### Which keys the shell reads (0.42, an experiment)
+
+0.41's views were read whole and the Music section still showed "No
+playlists.", with nothing more asked. Rather than guess on, the watch asks
+Mono itself, in the shell (`libmonosgen-2.0`: `mono_get_root_domain`,
+`mono_thread_attach`, `mono_image_loaded("Sce.PlayStation.Json")`,
+`mono_class_from_name(…, "JsonObject")`, `mono_class_get_method_from_name`,
+`mono_compile_method`), for the native code of `JsonObject`'s `this[string]`,
+`ValueOrDefault`, `ContainsKey` and `TryGetValue`, hooks them, and for 10 s
+after it answers one of the Music section's requests logs each key asked for
+(`json: Item("views") = …`, `json: ContainsKey("…") = yes|no`). An empty
+`mcw-nojson` file turns this off.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

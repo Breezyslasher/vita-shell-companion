@@ -533,6 +533,7 @@ typedef struct {
     char* body;     // EBGM_MAX bytes of g_ebgmPool
 } EbgmReq;
 static EbgmReq g_ebgm[EBGM_SLOTS];
+static volatile uint64_t g_jsonUntil;  // JSON keys are logged until then: 10 s after an answer
 static char* g_ebgmPool;
 static volatile int g_ebgmLock;
 
@@ -596,6 +597,7 @@ static void ebgmCreated(Frame* f) {
     }
     unlock(&g_ebgmLock);
     sysClose(fd);
+    g_jsonUntil = sysNowUs() + 10000000u;
     say("ebgm: %s: answered with %s (%u bytes), request %lx", path, name[which - 1],
         r ? r->len : 0, r ? (uint64_t)r->id : 0);
 }
@@ -793,10 +795,134 @@ static void fakeApply(Frame* f) {
     }
 }
 
+// ── The keys the shell's JSON is asked for (an experiment) ───────────────────
+//
+// The Music section reads the answers above with Sce.PlayStation.Json's
+// JsonObject, managed code, precompiled (full AOT) into its .dll.sprx. Mono's
+// own API, in the shell (libmonosgen-2.0), gives that code's address
+// (mono_compile_method); those methods are hooked like the rest, and while an
+// answer is being read (g_jsonUntil) each key asked for is logged: the
+// answers' format, from what the shell looks for.
+
+static void hex16(char* out, size_t cap, const uint8_t* p);
+
+typedef void* (*FnMonoVoid)(void);
+typedef void* (*FnMonoPtr)(void*);
+typedef void* (*FnMonoName)(const char*);
+typedef void* (*FnMonoClass)(void*, const char*, const char*);
+typedef void* (*FnMonoMethod)(void*, const char*, int);
+typedef void (*FnMonoDetach)(void*);
+
+// A MonoString (64-bit: vtable, sync, int32 length, UTF-16), as ASCII.
+static void monoText(uint64_t p, char* out, size_t cap) {
+    out[0] = 0;
+    const uint8_t* s = (const uint8_t*)(uintptr_t)p;
+    if (hookReadable(s, 20) < 20) {
+        fmt(out, cap, "(not a string: %lx)", p);
+        return;
+    }
+    int32_t len;
+    memcpy(&len, s + 16, 4);
+    if (len < 0 || len > 200) {
+        fmt(out, cap, "(length %d)", len);
+        return;
+    }
+    const size_t have = hookReadable(s + 20, (size_t)len * 2) / 2;
+    size_t o = 0;
+    for (size_t i = 0; i < have && o + 1 < cap; i++) {
+        uint16_t c;
+        memcpy(&c, s + 20 + i * 2, 2);
+        out[o++] = c >= 0x20 && c < 0x7F ? (char)c : '?';
+    }
+    out[o] = 0;
+}
+
+static void jsonLog(Frame* f) {
+    if (sysNowUs() > g_jsonUntil) return;
+    char key[100];
+    monoText(f->gpr[1], key, sizeof(key));
+    const Hook* h = f->hook;
+    if (eq(h->name, "json.ContainsKey") || eq(h->name, "json.TryGetValue"))
+        say("json: %s(\"%s\") = %s  [object %lx, thread %d]", h->name + 5, key,
+            (f->retRax & 0xFF) ? "yes" : "no", f->gpr[0], scePthreadGetthreadid());
+    else
+        say("json: %s(\"%s\") = %lx  [object %lx, thread %d]", h->name + 5, key, f->retRax,
+            f->gpr[0], scePthreadGetthreadid());
+}
+
+static Hook g_jsonHooks[4];
+
+static void monoHooks(void) {
+    int mono = -1;
+    for (int i = 0; i < 2 && mono < 0; i++) {
+        char path[160];
+        const char* word = sceKernelGetFsSandboxRandomWord();
+        fmt(path, sizeof(path), "/%s/common/lib/libmonosgen-2.0.sprx", word ? word : "?");
+        int res = 0;
+        mono = sceKernelLoadStartModule(path, 0, NULL, 0, NULL, &res);
+        say("json: %s: 0x%08X", path, (unsigned)mono);
+    }
+    if (mono < 0) return;
+    void *rootDomain = NULL, *attach = NULL, *detach = NULL, *imageLoaded = NULL,
+         *classFromName = NULL, *methodFromName = NULL, *compile = NULL;
+    sceKernelDlsym(mono, "mono_get_root_domain", &rootDomain);
+    sceKernelDlsym(mono, "mono_thread_attach", &attach);
+    sceKernelDlsym(mono, "mono_thread_detach", &detach);
+    sceKernelDlsym(mono, "mono_image_loaded", &imageLoaded);
+    sceKernelDlsym(mono, "mono_class_from_name", &classFromName);
+    sceKernelDlsym(mono, "mono_class_get_method_from_name", &methodFromName);
+    sceKernelDlsym(mono, "mono_compile_method", &compile);
+    say("json: mono's API: root domain %p, attach %p, detach %p, image %p, class %p, method %p, "
+        "compile %p", rootDomain, attach, detach, imageLoaded, classFromName, methodFromName,
+        compile);
+    drain();
+    if (!rootDomain || !attach || !imageLoaded || !classFromName || !methodFromName || !compile)
+        return;
+    void* domain = ((FnMonoVoid)rootDomain)();
+    void* thread = domain ? ((FnMonoPtr)attach)(domain) : NULL;
+    say("json: domain %p, this thread attached: %p", domain, thread);
+    drain();
+    if (!thread) return;
+    void* image = ((FnMonoName)imageLoaded)("Sce.PlayStation.Json");
+    void* klass = image ? ((FnMonoClass)classFromName)(image, "Sce.PlayStation.Json", "JsonObject")
+                        : NULL;
+    say("json: Sce.PlayStation.Json %p, JsonObject %p", image, klass);
+    static const struct {
+        const char* method;
+        int args;
+        const char* name;
+    } want[4] = {{"get_Item", 1, "json.Item"},
+                 {"ValueOrDefault", 1, "json.ValueOrDefault"},
+                 {"ContainsKey", 1, "json.ContainsKey"},
+                 {"TryGetValue", 2, "json.TryGetValue"}};
+    for (int i = 0; klass && i < 4; i++) {
+        void* m = ((FnMonoMethod)methodFromName)(klass, want[i].method, want[i].args);
+        void* code = m ? ((FnMonoPtr)compile)(m) : NULL;
+        Hook* h = &g_jsonHooks[i];
+        h->name = want[i].name;
+        h->json = 1;
+        char bytes[64] = "";
+        if (code && hookReadable(code, 16) == 16) hex16(bytes, sizeof(bytes), code);
+        const char* why = "no code";
+        int rc = -1;
+        if (code) {
+            lock(&g_installLock);
+            rc = hookInstall(h, code, &why);
+            unlock(&g_installLock);
+        }
+        say("json: JsonObject.%s: method %p, code %p: %s; %s%s", want[i].method, m, code, bytes,
+            rc == 0 ? "hooked" : "NOT hooked: ", rc == 0 ? "" : why);
+        drain();
+    }
+    if (detach) ((FnMonoDetach)detach)(thread);
+    say("json: this thread detached");
+}
+
 void mcwPre(Frame* f) {
     f->t0 = sysNowUs();
     Hook* h = f->hook;
     f->seq = __atomic_add_fetch(&h->calls, 1, __ATOMIC_RELAXED);
+    if (h->json) return;  // the key, after: nothing read here
     for (int i = 0; i < 6; i++) {
         f->preLen[i] = 0;
         if (g_quiet || deadStack(f, f->gpr[i])) continue;
@@ -814,6 +940,10 @@ void mcwPre(Frame* f) {
 }
 
 void mcwPost(Frame* f) {
+    if (f->hook->json) {
+        if (!g_quiet) jsonLog(f);
+        return;
+    }
     fakeApply(f);
     ebgmApply(f);
     if (g_quiet) return;
@@ -1264,6 +1394,8 @@ static void* watchMain(void* arg) {
         say("music library: 0x%08X %s", (unsigned)g_mods[i], g_modNames[i]);
     drain();
     installAll();
+    drain();
+    if (!sysExists(SC_BGM_DIR "/mcw-nojson")) monoHooks();
     drain();
     notify("Music watch: %d functions watched. Play music, then use the quick menu", g_nHooks);
     drain();
