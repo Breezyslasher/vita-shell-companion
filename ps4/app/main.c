@@ -24,7 +24,7 @@
 #include "../client/shell_companion.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.81"
+#define APP_VERSION "0.82"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -901,9 +901,9 @@ static void draw(void) {
     y += LINE;
     text(x, y, FG, "OPTIONS  write a test tone into music/ again");
     y += LINE;
-    text(x, y, FG, "L2     music service probe in the shell (reads it, calls nothing)");
+    text(x, y, FG, "L2     background downloads test: 3 songs to ShellCompanion/ps4/downloads");
     y += LINE;
-    text(x, y, FG, "R2     try the PS4's own music service in this app (quick menu test)");
+    text(x, y, FG, "R2     take the downloads back (stops them), their status in app.log");
     y += LINE;
     text(x, y, FG, "UP     music watch in the shell: logs the quick menu's music calls");
     y += LINE;
@@ -1130,7 +1130,7 @@ static void* mpsProbe(void* arg) {
     return NULL;
 }
 
-static void startMusicService(void) {
+__attribute__((unused)) static void startMusicService(void) {
     if (g_mpsRunning) return;
     g_mpsRunning = 1;
     g_mpsDone = 0;
@@ -1142,6 +1142,49 @@ static void startMusicService(void) {
     } else {
         say("Music service test in this app: watch, then hold PS for the quick menu");
     }
+}
+
+// Background downloads (0.82), through the client library: three test
+// songs and three pages, into /data/ShellCompanion/ps4/downloads/. Its
+// own downloads.txt (lines of URLs) is used instead if there is one.
+static void testDownloads(void) {
+    char what[512];
+    const int rc = scOpen(what, sizeof(what));
+    say("scOpen: %d: %s", rc, what);
+    static ScDownload items[16];
+    static char urls[16][512], files[16][256], titles[16][64], ids[16][16];
+    int n = 0;
+    FILE* f = fopen(SC_BGM_DIR "/test-downloads.txt", "r");
+    char line[512];
+    while (f && n < 16 && fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r' || line[len - 1] == ' ')) line[--len] = 0;
+        if (strncmp(line, "http", 4)) continue;
+        snprintf(urls[n], sizeof(urls[n]), "%s", line);
+        const char* name = strrchr(line, '/');
+        snprintf(files[n], sizeof(files[n]), "/data/ShellCompanion/ps4/downloads/%s", name ? name + 1 : "file");
+        char* q = strchr(files[n], '?');
+        if (q) *q = 0;
+        snprintf(titles[n], sizeof(titles[n]), "%s", name ? name + 1 : line);
+        n++;
+    }
+    if (f) fclose(f);
+    if (!n) {
+        for (int i = 0; i < 3; i++) {
+            snprintf(urls[n], sizeof(urls[n]), "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-%d.mp3", i + 1);
+            snprintf(files[n], sizeof(files[n]), "/data/ShellCompanion/ps4/downloads/SoundHelix-Song-%d.mp3", i + 1);
+            snprintf(titles[n], sizeof(titles[n]), "SoundHelix Song %d", i + 1);
+            n++;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        snprintf(ids[i], sizeof(ids[i]), "test%d", i + 1);
+        items[i] = (ScDownload){.id = ids[i], .file = files[i], .title = titles[i], .kind = "url", .args = {urls[i], NULL, NULL}};
+    }
+    mkdir(SC_BGM_DIR "/downloads", 0777);
+    const int w = scWriteDownloads(1, NULL, items, (uint32_t)n);
+    const int s = scDownloadsStart();
+    say("Downloads handed over: %d item(s), written %d, started %d: see bgm.log and downloads/", n, w, s);
 }
 
 int main(void) {
@@ -1225,15 +1268,19 @@ int main(void) {
             sendCommand("reload\nplay\n");
             say("Port type %d: restarting the queue", g_portType);
         }
-        if (down & ORBIS_PAD_BUTTON_R2) startMusicService();
-        if (down & ORBIS_PAD_BUTTON_L2) {
-            // The music service probe (ps4/mps), into the shell: our player
-            // stopped first, so that only the service is heard.
-            sendCommand("stop\n");
-            mkdir("/user/data/GoldHEN/plugins", 0777);
-            if (copyFromPackage("sc_mps.prx", "/user/data/GoldHEN/plugins/sc_mps.prx") == 0 &&
-                shellLoad("/user/data/GoldHEN/plugins/sc_mps.prx"))
-                say("Music service probe in the shell: open the quick menu when it says so");
+        // Background downloads (0.82; the music service probes these
+        // buttons had are gone): L2 hands over a test list, R2 takes it back.
+        if (down & ORBIS_PAD_BUTTON_L2) testDownloads();
+        if (down & ORBIS_PAD_BUTTON_R2) {
+            const int rc = scDownloadsTakeBack();
+            int running = 0;
+            ScDownloadStatus st[8];
+            uint32_t n = 0;
+            scReadDownloadsStatus(&running, st, 8, &n);
+            say("Downloads taken back: %d; running %d", rc, running);
+            for (uint32_t i = 0; i < n; i++)
+                say("  %s: %s, %llu of %llu bytes%s", st[i].id, st[i].state, (unsigned long long)st[i].bytes,
+                    (unsigned long long)st[i].size, "");
         }
         if (down & ORBIS_PAD_BUTTON_R3) {
             // The watch answers the quick menu for our player while this

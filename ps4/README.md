@@ -896,6 +896,44 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### Background downloads (0.82)
+
+An app's files, fetched in the shell after the app has gone, as the Vita
+plugin's (docs/PROTOCOL.md §5), by a thread of the player module
+(`ScBgmDl`, `ps4/bgm/downloads.c`) with the same HTTP library as streaming.
+
+- **Handing over:** `scWriteDownloads(notify, headers, items, count)` writes
+  `downloads.txt`, then `scDownloadsStart()` sends `dl_start`. Each item has
+  an id, a file (`/data/...`), a size (0 if unknown), a title, a kind (`url`
+  or `pages`) and that kind's arguments. A field that holds a tab, a line
+  break or a `%` is %-encoded.
+- **Fetching:** in order, 2 s after the hand-over. A partial file is
+  continued with `Range`. A 200 to a Range rewrites the file, 416 counts as
+  complete, 503 is waited for every 10 s for up to an hour, 404 and 410 mark
+  the item `gone`, and anything else is tried again after 5, 15 and 60 s
+  (any bytes received reset the count). The list's headers and the item's
+  own go with every request.
+- **`pages`:** a URL and a file template with `{page}` or `{page:N}` (zero
+  padded to N digits), and `count` or `count,first`. Each page goes to
+  `<file>.part` and is moved in once whole; a page already there is
+  skipped.
+- **Notifications:** at the start, as each item of several ends, and at the
+  end (with failures counted). The PS4 has no progress notification like
+  the Vita's.
+- **Status:** `downloads-status.txt`, every 2 s and at each change:
+  `running=`, `paused=0`, then
+  `item=<id>\t<going|waiting|done|gone|failed>\t<bytes>\t<size>\t\t[\t<done>/<pages>]`.
+  `scReadDownloadsStatus` reads it.
+- **Taking back:** `scDownloadsTakeBack()` sends `dl_takeback`. The thread
+  stops after the piece it is writing (64 KB), and the call waits up to 5 s
+  for `running=0`.
+
+Not yet done: Plex's `plexqueue`/`plexadd`, and finding out whether
+downloads go on in rest mode. In the test app, L2 hands over three
+SoundHelix songs (or the URLs in `test-downloads.txt`) to
+`/data/ShellCompanion/ps4/downloads/`, and R2 takes them back and logs
+their status.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our

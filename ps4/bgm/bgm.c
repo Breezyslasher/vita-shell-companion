@@ -767,6 +767,9 @@ static void writeText(const char* path, const char* text) {
     sysRename(tmp, path);
 }
 
+// Background downloads (0.82): their own file, with this one's HTTP and files.
+#include "downloads.c"
+
 static int cmpName(const char* a, const char* b) {
     for (;; a++, b++) {
         char x = *a, y = *b;
@@ -1577,6 +1580,16 @@ static void runCommand(const char* text, int n) {
         if (!openTrack()) stop("nothing after it would open");
     } else if (IS("stop")) {
         stop("asked");
+    } else if (IS("dl_start")) {
+        // An app's downloads handed over (the client library's
+        // scDownloadsStart, 0.82): downloads.c's thread takes them.
+        g_dls.takeBack = 0;
+        g_dls.start = 1;
+    } else if (IS("dl_takeback")) {
+        // Back to the app: stopped after the piece being written,
+        // running=0 in downloads-status.txt once it has.
+        g_dls.takeBack = 1;
+        if (!g_dls.running) dlStatus();
     } else if (IS("takeback")) {
         // An app takes the music back (the client library's
         // scMusicTakeBack, 0.81): where it was kept for status.txt, so the
@@ -1797,6 +1810,7 @@ static void* begin(void* arg) {
     char fw[64];
     firmware(fw, sizeof(fw));
     logLine("background music %s: started, firmware %s", SC_BGM_VERSION, fw);
+    if (threadStart(dlMain, NULL, "ScBgmDl") < 0) logLine("downloads: no thread");
     return player(arg);
 }
 
