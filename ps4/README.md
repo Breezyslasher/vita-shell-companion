@@ -2,11 +2,26 @@
 
 ## Background music (first version)
 
-`sc_bgm.bin` loads a music player into the PS4's shell (`SceShellUI`), so
-it keeps playing while you are on the home screen and, we hope, in games.
-It is built on what the probes below found: a payload is not heard, so the
-player runs inside the shell, loaded by GoldHEN, as the shell probe is.
+**Working:** on a PS4 on firmware 11.50 with GoldHEN 2.4b18.12, the test app
+loads the player (`sc_bgm.prx`) into the shell (`SceShellUI`), and it plays
+the queue there: MP3 or 16-bit WAV, on audio port type 0 (MAIN), 1 or 2.
 It does not show in the quick menu yet; that comes later.
+
+What it took, each found on the console:
+
+| | Why |
+|---|---|
+| **GoldHEN's toolchain** (illusion0001's fork of OpenOrbis, as GoldHEN's own plugins are built; CI downloads it) | the PS4 refused every module the official OpenOrbis toolchain made as not executable (ENOEXEC), where it loaded GoldHEN's own plugin |
+| **16 KB pages** (`-z max-page-size=0x4000 -z common-page-size=0x4000`) | as ps4-hen-rest and ps4-thumbgrid-ime link their shell modules |
+| **The module file 0777** | the shell answered EACCES for a module written 0666 |
+| **`/user/data/...`**, for the module and all the player's files | the shell's sandbox has `/user`, not `/data` |
+| **libkernel for files, memory and the clock** (`sceKernelOpen`, `sceKernelMkdir`, ...), and its functions linked, not looked up | with system calls of its own, the player never got to its log inside the shell |
+| **`module_start` only starts the player's thread** | the shell waits for `module_start` |
+
+Its files are in `/user/data/ShellCompanion/ps4/` (the same folder as
+`/data/ShellCompanion/ps4/` over FTP); the module is copied to
+`/user/data/GoldHEN/plugins/sc_bgm.prx` and loaded with GoldHEN's
+`PROCESS_PRX_LOAD` (system call 500, command 6).
 
 ### Trying it with the test app (easiest)
 
@@ -15,10 +30,12 @@ The test app needs no BinLoader. Install
 `/data/pkg` and use GoldHEN's Package Installer), then open **Shell
 Companion BGM Test** from the home screen.
 
-- It loads the player into the shell at once. With no music copied over it
-  writes `music/test-tone.wav` (a C-E-G-C tune) so there is something to hear.
+- It loads the player into the shell at once. A `yoursong.mp3` at the root
+  of a USB drive (beside the `.pkg`) or in `/data/ShellCompanion/ps4/` is
+  copied into `music/` and played first; with no music at all it writes
+  `music/test-tone.wav` (a C-E-G-C tune) so there is something to hear.
 - **X** load / play, **Square** pause, **Triangle** stop, **R1** / **L1**
-  next / previous, **Left** / **Right** another audio port type,
+  next / previous, **Left** / **Right** another audio port type (0, 1, 2),
   **Options** write the test tone again.
 - The screen shows whether the player is running, the track, and the end
   of `bgm.log`.
