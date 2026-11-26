@@ -149,7 +149,8 @@ static void dllFill(int k, BgftProgress* pr) {
         const uint64_t came = bytes > g_dll.e[k].b0 ? bytes - g_dll.e[k].b0 : 0;
         if (us > 2000000u && came) {
             const uint64_t left = it->size > bytes ? it->size - bytes : 0;
-            rest = (uint32_t)(left * (us / 1000u) / came / 1000u);
+            rest = (uint32_t)((left * (us / 1000u) / came + 999u) / 1000u);  // rounded up (1.22)
+            if (!rest && left) rest = 1;
         }
     }
     if (it->state == DLS_DONE) rest = 0;
@@ -429,7 +430,9 @@ void dlListQueryHook(Frame* f) {
                     // Finished but still in section 3 (1.20): its going
                     // param, as its progress answers going (1.19's log: 80c3
                     // in section 3 beside going progress).
-                    if (st == DLS_DONE && !g_dll.e[k].movedOut) st = DLS_GOING;
+                    // (Not in section 9's answer, where it is finished: 1.20's
+                    // log had them there with the going param.)
+                    if (st == DLS_DONE && !g_dll.e[k].movedOut && f->gpr[2] != 9) st = DLS_GOING;
                     const uint32_t prm = st == DLS_FAILED || st == DLS_GONE ? 0x40080c1u  // 1097's 0x14008061: error, Stop/Download; Package
                                        : st == DLS_DONE && g_dll.trying ? g_dllTry[i % 6].param
                                        : st != DLS_DONE && st != DLS_GOING && g_dll.trying ? g_dllTryWait[i % 6].param

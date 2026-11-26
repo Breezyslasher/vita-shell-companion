@@ -253,6 +253,11 @@ service's are, not the managed wrappers 0.85 hooked.
   (bgm.log) came at other times. 1.21 uses DbNotify's four ways in turn
   (Post, GlobalPost, Send, GlobalSend), one per change, each also noted in
   bgm.log ("told the list"), to see which the list hears.
+- **1.20's logs:** time left was answered (unknown only in a song's first
+  2 s, then e.g. "0 s" with 1 MB to go, rounded down): 1.22 rounds it up.
+  At 85.3 s ours were put in section 9 but with the going param (1.20's
+  "going till moved" applied there too): 1.22 answers finished in section
+  9. The list re-read on its own (18.4, 71.1, 85.3 s), as with Post.
 
 ### One module, and the cleanup (0.95)
 
