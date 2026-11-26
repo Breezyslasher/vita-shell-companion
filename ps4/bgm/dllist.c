@@ -128,10 +128,15 @@ static void dllFill(int k, BgftProgress* pr) {
     // each progress answer (UpdateProgress's b__1, the debug dump), so it
     // shows finished at once; 1.25's "going, every byte, 0 s" read
     // "(1 Second Left)" till the row moved.
+    // 1.27: not Stop/Download. The list keeps a row's type from when it
+    // was made (going: type 1), and its map (DownloadItemBehavior's .cctor,
+    // the debug dump) sends type 1, Stop, Download to a lambda that always
+    // returns DownloadError: "Cannot download". Type 1, Complete, Complete
+    // goes to the one that returns Installed for a game.
     if (st == DLS_DONE && !g_dll.e[k].movedOut) {
         const uint64_t all = it->bytes ? it->bytes : it->size;
         pr->errorResult = 0;
-        pr->bits = (pr->bits & ~0x3FFu) | 0x188u;  // Game, Stop, Download
+        pr->bits = (pr->bits & ~0x3FFu) | 0x193u;  // Game, Complete, Complete
         pr->length = pr->lengthTotal = all;
         pr->transferred = pr->transferredTotal = all;
         pr->numIndex = pr->numTotal = 1;
@@ -456,7 +461,10 @@ void dlListQueryHook(Frame* f) {
                     // (1.26: finished, still in section 3, as a finished game's
                     // param, 0x10008063, as its progress answers.)
                     const int doneHere = st == DLS_DONE && !g_dll.e[k].movedOut && f->gpr[2] != 9;
-                    const uint32_t prm = doneHere ? 0x10008063u
+                    // (1.27: type 1, Game, Complete/Complete, 0x10010361,
+                    // so a row made again here is type 1 too and reads
+                    // Installed; type 3 has no Complete/Complete entry.)
+                    const uint32_t prm = doneHere ? 0x10010361u
                                        : st == DLS_FAILED || st == DLS_GONE ? 0x40080c1u  // 1097's 0x14008061: error, Stop/Download; Package
                                        : st == DLS_DONE && g_dll.trying ? g_dllTry[i % 6].param
                                        : st != DLS_DONE && st != DLS_GOING && g_dll.trying ? g_dllTryWait[i % 6].param

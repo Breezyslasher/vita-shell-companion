@@ -297,6 +297,14 @@ service's are, not the managed wrappers 0.85 hooked.
   (b__1 writes param 0x3c, 0x40): 1.26 answers a finished one as package
   1099 did when finished (Game, Stop/Download, every byte, `...88`,
   preparing 0) at once, its section 3 param `0x10008063`.
+- **1.26 on the PS4:** finished ones read "Cannot download" until the
+  page was opened again, then "Installed.". The list's state map (the
+  `.cctor` of `DownloadItemBehavior`, keyed by type, state, runstate)
+  sends type 1 + Stop/Download to a lambda that always returns
+  DownloadError, and a row keeps the type it was made with (type 1 while
+  going; `UpdateTaskInfo` reads it from the query param). 1.27 answers a
+  finished one not yet moved as Complete/Complete (`...93`; type 1 then
+  maps to Installed for a game), its section 3 param `0x10010361`.
 
 ### One module, and the cleanup (0.95)
 
