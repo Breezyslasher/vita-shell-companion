@@ -28,3 +28,7 @@ its text with font8x8 by Daniel Hepper (public domain).
 The test app's test module (ps4/app/recipe) uses crt/crtprx.c of the
 GoldHEN Plugins SDK (https://github.com/GoldHEN/GoldHEN_Plugins_SDK, MIT
 licence, ps4/app/recipe/LICENSE-GoldHEN_Plugins_SDK).
+
+The test app's control module, ps4/app/control/no_share_watermark.prx, is
+GoldHEN's own plugin, unchanged, from GoldHEN_Plugins_Repository release
+1.188 (https://github.com/GoldHEN/GoldHEN_Plugins_Repository, GPL-3.0).

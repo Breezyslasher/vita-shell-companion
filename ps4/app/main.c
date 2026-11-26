@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.10"
+#define APP_VERSION "0.11"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -468,6 +468,7 @@ static void loadPlayer(void) {
     if (!helloTried) {
         helloTried = 1;
         selfLoad(PKG_DIR "/hello.prx");
+        selfLoad(PKG_DIR "/no_share_watermark.prx");  // GoldHEN's own: the control
         // The documented route first: ps4-hen-rest's starter asks for its
         // module in SceShellCore from /data/GoldHEN/plugins/, and
         // ps4-thumbgrid-ime's list has /data/GoldHEN/plugins/ and
@@ -663,6 +664,30 @@ static void draw(void) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
+    // Before the jailbreak: the shell asked for the test module 0.10 left in
+    // the GoldHEN plugins folder, as neither project that loads modules into
+    // the shell jailbreaks first. Logged once the log is open.
+    static struct ProcPrxLoad pre[3];
+    static const char* const preProc[3] = {"SceShellCore", "SceShellUI", "SceShellUI"};
+    static const char* const prePath[3] = {"/data/GoldHEN/plugins/sc_hello.prx",
+                                           "/user/data/GoldHEN/plugins/sc_hello.prx",
+                                           "/data/GoldHEN/plugins/sc_hello.prx"};
+    long preRc[3];
+    for (int i = 0; i < 3; i++) {
+        memset(&pre[i], 0, sizeof(pre[i]));
+        strncpy(pre[i].processName, preProc[i], sizeof(pre[i].processName) - 1);
+        strncpy(pre[i].prxPath, prePath[i], sizeof(pre[i].prxPath) - 1);
+        pre[i].res = ~0ULL;
+        preRc[i] = sysCall(500, 6 /* PROCESS_PRX_LOAD */, (long)&pre[i], 0);
+    }
+    // And GoldHEN's own plugin into this app, not started: the control.
+    int ctlHandle = 0;
+    const long ctlRc = sysCall(594, (long)"/app0/no_share_watermark.prx", 0, (long)&ctlHandle);
+    if (ctlRc == 0 && ctlHandle > 0) sysCall(595, ctlHandle, 0, 0);
+    int ownHandle = 0;
+    const long ownRc = sysCall(594, (long)"/app0/hello.prx", 0, (long)&ownHandle);
+    if (ownRc == 0 && ownHandle > 0) sysCall(595, ownHandle, 0, 0);
+
     // Out of the sandbox, to reach /data. GoldHEN gives this to homebrew.
     static struct JailbreakBackup jb;
     const long jbrc = sysCall(500, 2 /* JAILBREAK */, (long)&jb, 0);
@@ -673,6 +698,13 @@ int main(void) {
     g_log = fopen(SC_BGM_DIR "/app.log", "w");
     say("App %s; jailbreak 0x%lX; GoldHEN SDK 0x%lX", APP_VERSION, (unsigned long)jbrc,
         (unsigned long)sysCall(500, 0 /* VERSION */, 0, 0));
+    for (int i = 0; i < 3; i++)
+        say("Before the jailbreak, %s load %s: 0x%lX, result 0x%lX%s", preProc[i], prePath[i],
+            (unsigned long)preRc[i], (unsigned long)pre[i].res,
+            preRc[i] == 0 && (int32_t)pre[i].res >= 0 ? " - loaded" : "");
+    say("Before the jailbreak, into this app (not started): GoldHEN's no_share_watermark.prx "
+        "0x%lX handle 0x%X; our hello.prx 0x%lX handle 0x%X",
+        (unsigned long)ctlRc, ctlHandle, (unsigned long)ownRc, ownHandle);
 
     char portText[16];
     if (readFile(SC_BGM_PORT, portText, sizeof(portText)) > 0) g_portType = atoi(portText);
