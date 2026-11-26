@@ -168,7 +168,27 @@ static int mp3Decode(void) {
 static struct {
     char title[META_LEN], artist[META_LEN], album[META_LEN];
     uint64_t artOff, artLen;  // the cover's image in the file (APIC), or 0
+    char cover[128];          // that image as a file of its own, or ""
 } g_meta;
+static unsigned g_coverN;
+
+// The cover as a file of its own, for the Music section's panel, which loads
+// a picture by its address alone (Spotify's, CoverArtLoadAsync(uri)): a new
+// name each track, so that no cached picture is shown for another.
+static void coverWrite(const uint8_t* data) {
+    if (g_meta.cover[0]) sysUnlink(g_meta.cover);
+    g_meta.cover[0] = 0;
+    if (!g_meta.artLen || g_meta.artLen > (8u << 20)) return;
+    const uint8_t* img = data + g_meta.artOff;
+    const int png = img[0] == 0x89 && img[1] == 'P' && img[2] == 'N' && img[3] == 'G';
+    char path[128];
+    fmt(path, sizeof(path), SC_BGM_DIR "/cover-%u.%s", g_coverN++ % 1000u, png ? "png" : "jpg");
+    const int fd = sysOpen(path, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    if (fd < 0) return;
+    const int n = sysWrite(fd, img, (size_t)g_meta.artLen);
+    sysClose(fd);
+    if (n == (int)g_meta.artLen) fmt(g_meta.cover, sizeof(g_meta.cover), "%s", path);
+}
 
 static uint32_t syncsafe(const uint8_t* p) {
     return (uint32_t)(p[0] & 0x7F) << 21 | (uint32_t)(p[1] & 0x7F) << 14 |
@@ -309,6 +329,7 @@ static int srcOpen(const char* path) {
     sysClose(fd);
     g_src.size = got;
     if (endsWith(path, ".wav")) {
+        if (g_meta.cover[0]) sysUnlink(g_meta.cover);
         memset(&g_meta, 0, sizeof(g_meta));
         g_src.type = SRC_WAV;
         if (!wavOpen()) {
@@ -322,7 +343,11 @@ static int srcOpen(const char* path) {
                           : 0;
     } else {
         g_src.type = SRC_MP3;
+        char was[128];
+        fmt(was, sizeof(was), "%s", g_meta.cover);
         id3Read(g_src.data, g_src.size);
+        fmt(g_meta.cover, sizeof(g_meta.cover), "%s", was);  // coverWrite removes it
+        coverWrite(g_src.data);
         // An ID3v2 tag first, cover art and all: skipped, its size syncsafe.
         if (g_src.size > 10 && !memcmp(g_src.data, "ID3", 3)) {
             const uint8_t* h = g_src.data;
@@ -526,10 +551,10 @@ static void writeStatus(void) {
     const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : 0;
     fmt(text, sizeof(text),
         "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\ndur_ms=%lu\nfile=%s\nbeat_ms=%lu\n"
-        "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\nvolume=%d\nrepeat=%d\nshuffle=%d\n",
+        "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\nvolume=%d\nrepeat=%d\nshuffle=%d\ncover=%s\n",
         SC_BGM_PROTOCOL, stateName(g_state), g_index, g_count, (uint64_t)posMs, g_src.durMs,
         g_count ? g_tracks[g_index] : "", (uint64_t)(sysNowUs() / 1000u), g_meta.title,
-        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen, (int)g_volume, g_repeat, g_shuffle);
+        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen, (int)g_volume, g_repeat, g_shuffle, g_meta.cover);
     writeText(SC_BGM_STATUS, text);
     g_lastStatus = sysNowUs();
 }

@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.36"
+#define APP_VERSION "0.37"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -1136,8 +1136,8 @@ int main(void) {
                 writeFile(SC_BGM_DIR "/mcw-fake.txt", "off\n", 4);
                 say("Quick menu answers: off");
             } else {
-                writeFile(SC_BGM_DIR "/mcw-fake.txt", "SCMP00001\n", 10);
-                say("Quick menu answers: on, as SCMP00001. Play, then open the quick menu");
+                writeFile(SC_BGM_DIR "/mcw-fake.txt", "CUSA01780\n", 10);
+                say("Quick menu answers: on, as Spotify (CUSA01780): the Music section too");
             }
         }
         if (down & ORBIS_PAD_BUTTON_DOWN) {

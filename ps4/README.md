@@ -233,6 +233,15 @@ Network" message, which stays. The sign-in check guards Spotify's own part
 (playlists); the player panel reads the music server, as the music entry
 does. The cover did not show there.
 
+### 0.37: Spotify mode by default, and its cover
+
+The watch now names our player `CUSA01780` unless `mcw-fake.txt` gives
+another title (`SCMP00001` for the test app's own name and icon) or `off`.
+The Music section's panel loads its cover by address alone
+(`CoverArtLoadAsync(string uri)`, no offset or size), so our player writes
+each track's cover to a file of its own (`cover-<n>.jpg` or `.png`, a new name
+each track, the last removed) and both panels are given that file.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

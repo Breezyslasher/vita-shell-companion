@@ -25,7 +25,8 @@
  *   mcw.quiet      while there, nothing is logged (the hooks stay)
  *   mcw-fake.txt   while our player (sc_bgm) has a track, the quick menu is
  *                  answered for it (fakeApply) unless this says off; its
- *                  first word is the title, SCMP00001 (the test app) if none
+ *                  first word is the title: CUSA01780 (Spotify's, so that the
+ *                  Music section shows us too) if none; SCMP00001 the test app
  *   mcw.carve      when it appears (the test app's DOWN), the .NET assemblies
  *                  in the shell's memory are copied to shell/, then it is
  *                  deleted
@@ -320,7 +321,7 @@ static struct {
     char title[16];
     // The track, under a lock: the watch's thread writes, the shell's read.
     volatile int lock;
-    char file[256], name[300], artist[300], album[300];
+    char file[256], name[300], artist[300], album[300], cover[160];
     uint64_t artOff, artLen;
 } g_fake;
 
@@ -375,7 +376,7 @@ static void fakeRefresh(void) {
         size_t k = 0;
         for (const char* p = v; *p && *p != '\n' && *p != '\r' && *p != ' ' && k < 9; p++)
             title[k++] = *p;
-        if (!k) memcpy(title, "SCMP00001", (k = 9));
+        if (!k) memcpy(title, "CUSA01780", (k = 9));  // Spotify's: the Music section shows us too
         title[k] = 0;
         if (!eq(title, g_fake.title)) {
             // Another title while we are the core: announced again, as a
@@ -417,8 +418,11 @@ static void fakeRefresh(void) {
             if (repeat != g_fake.repeat || shuffle != g_fake.shuffle) owe(EV_PLAY_STATUS);
             g_fake.repeat = repeat;
             g_fake.shuffle = shuffle;
+            char cover[160];
+            statusField(text, "cover", cover, sizeof(cover));
             statusField(text, "file", v, sizeof(v));
-            if (!g_fake.active || !eq(v, g_fake.file)) {
+            // A new track, or the same one opened again (a new cover file).
+            if (!g_fake.active || !eq(v, g_fake.file) || !eq(cover, g_fake.cover)) {
                 lock(&g_fake.lock);
                 fmt(g_fake.file, sizeof(g_fake.file), "%s", v);
                 statusField(text, "title", g_fake.name, sizeof(g_fake.name));
@@ -439,10 +443,12 @@ static void fakeRefresh(void) {
                 g_fake.artOff = toU64(v);
                 statusField(text, "art_len", v, sizeof(v));
                 g_fake.artLen = toU64(v);
+                fmt(g_fake.cover, sizeof(g_fake.cover), "%s", cover);
                 unlock(&g_fake.lock);
                 owe(EV_TRACK_INFO);
-                say("fake: track \"%s\" by \"%s\" (%s), cover %lu bytes at %lu", g_fake.name,
-                    g_fake.artist, g_fake.file, g_fake.artLen, g_fake.artOff);
+                say("fake: track \"%s\" by \"%s\" (%s), cover %lu bytes at %lu, %s", g_fake.name,
+                    g_fake.artist, g_fake.file, g_fake.artLen, g_fake.artOff,
+                    g_fake.cover[0] ? g_fake.cover : "no cover file");
             }
             if (!g_fake.active) {
                 owe(EV_CORE_READY);
@@ -551,7 +557,15 @@ static void fakeApply(Frame* f) {
         putStr(p, TI_TRACK, 341, g_fake.name);
         putStr(p, TI_ALBUM, 341, g_fake.album);
         putStr(p, TI_ARTIST, 341, g_fake.artist);
-        if (g_fake.artLen) {
+        if (g_fake.cover[0]) {
+            // The cover as a file of its own (our player writes it): the
+            // Music section's panel loads a picture by its address alone.
+            char cov[200];
+            fmt(cov, sizeof(cov), "file://%s", g_fake.cover);
+            putStr(p, TI_COVER, 1048, cov);
+            put64At(p, TI_COVER_OFF, 0);
+            put64At(p, TI_COVER_OFF + 8, g_fake.artLen);
+        } else if (g_fake.artLen) {
             putStr(p, TI_COVER, 1048, uri);
             put64At(p, TI_COVER_OFF, g_fake.artOff);
             put64At(p, TI_COVER_OFF + 8, g_fake.artLen);
