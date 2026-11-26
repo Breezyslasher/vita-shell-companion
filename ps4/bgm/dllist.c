@@ -95,6 +95,7 @@ static struct {
         volatile int failed;         // the service failed it: to be replaced (1.02)
         uint32_t tries;              // replaced so far
         volatile int movedOut;       // finished, and left out of a section 3 answer since (1.14)
+        volatile int shownIn;        // the section (5, 9) it has been put in an answer of (1.16)
     } e[DLL_MAX];
     struct {
         int32_t task;
@@ -348,7 +349,12 @@ void dlListQueryHook(Frame* f) {
                     for (int k = 0; k < count && k < DLL_MAX; k++) {
                         const int i = g_dll.e[k].item;
                         (void)i;
-                        if (g_dll.e[k].task == id && id > 0 && dllSection(k) != 3) {
+                        // Only once the list has had it in its new section's
+                        // answer (1.16): 1.15's left section 3 at 55.4 s, the
+                        // list asked for section 9 at 79.9 s, and between
+                        // them they were in neither, gone from the screen.
+                        if (g_dll.e[k].task == id && id > 0 && dllSection(k) != 3 &&
+                            g_dll.e[k].shownIn == dllSection(k)) {
                             out = 1;
                             if (!g_dll.e[k].movedOut) {
                                 g_dll.e[k].movedOut = 1;
@@ -379,7 +385,8 @@ void dlListQueryHook(Frame* f) {
                         memcpy(&id, res + j * 8, 4);
                         if (id == g_dll.e[k].task) there = 1;
                     }
-                    if (!there) add[n++] = g_dll.e[k].task;
+                    if (there) g_dll.e[k].shownIn = want;
+                    else add[n++] = g_dll.e[k].task;
                 }
                 if (n && cnt + n <= max && hookReadable(res, (size_t)(cnt + n) * 8) == (size_t)(cnt + n) * 8 &&
                     (hookProt(res) & 2) && (hookProt(res + (cnt + n) * 8 - 1) & 2)) {
@@ -387,6 +394,11 @@ void dlListQueryHook(Frame* f) {
                     for (uint32_t j = 0; j < n; j++) {
                         memcpy((uint8_t*)res + j * 8, &add[j], 4);
                         memset((uint8_t*)res + j * 8 + 4, 0, 4);  // its param, written below
+                        for (int k = 0; k < count && k < DLL_MAX; k++)
+                            if (g_dll.e[k].task == add[j] && !g_dll.e[k].shownIn) {
+                                g_dll.e[k].shownIn = want;
+                                logLine("dllist: task %d put in section %d", add[j], want);
+                            }
                     }
                     cnt += n;
                     *(uint32_t*)(uintptr_t)f->gpr[3] = cnt;
@@ -632,6 +644,7 @@ static int32_t dllRegister(int i) {
     char icon[96] = "";
     if (g_dls.app[0]) fmt(icon, sizeof(icon), "/user/appmeta/%s/icon0.png", g_dls.app);
     p.iconPath = icon[0] && sysExists(icon) ? icon : "";
+    if (i == 0 || !p.iconPath[0]) logLine("dllist: icon %s", p.iconPath[0] ? p.iconPath : "none");
     p.playgoScenarioId = "0";
     p.option = 0x10000;
     p.packageType = "";
@@ -742,6 +755,7 @@ static void dlListBegin(void) {
         g_dll.e[k].failed = 0;
         g_dll.e[k].tries = 0;
         g_dll.e[k].movedOut = 0;
+        g_dll.e[k].shownIn = 0;
         g_dll.e[k].lastParam = 0;
         g_dll.e[k].task = task;
         __atomic_store_n(&g_dll.count, k + 1, __ATOMIC_RELEASE);

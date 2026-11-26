@@ -207,6 +207,11 @@ service's are, not the managed wrappers 0.85 hooked.
   - *After the list*: entries removed 30 min after it ends (`dl-list-keep`
     keeps them till the next list), so a reboot without the module doesn't
     leave paused tasks showing.
+- **1.15 on the PS4:** the app's icon showed. Finished songs left section
+  3 at 55.4 s, but the list asked for section 9 only at 79.9 s (they were
+  there, first): in between they were in neither, gone from the screen.
+  1.16 keeps a finished (or failed) one in section 3, answering going with
+  every byte, until it has been in an answer of its new section.
 
 ### One module, and the cleanup (0.95)
 
