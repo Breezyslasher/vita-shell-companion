@@ -40,7 +40,7 @@ cp "$SRC/sce_sys/icon0.png" "$PKG/sce_sys/"
 cp "$SRC/sce_sys/about/right.sprx" "$PKG/sce_sys/about/"
 cp "$SRC/sce_module/libc.prx" "$SRC/sce_module/libSceFios2.prx" "$PKG/sce_module/"
 # The module, in the package too: a place the system may let it load from.
-cp "$OUT/sc_bgm.prx" "$PKG/"
+cp "$OUT/sc_bgm.prx" "$OUT/sc_bgm_b.prx" "$OUT/sc_bgm_c.prx" "$PKG/"
 
 cd "$PKG"
 SFO=sce_sys/param.sfo
@@ -57,7 +57,7 @@ SFO=sce_sys/param.sfo
 "$BIN/PkgTool.Core" sfo_setentry $SFO VERSION --type Utf8 --maxsize 8 --value "$VERSION"
 # The package's project (.gp4), as create-gp4 makes it; written here, as
 # the CI's image has no create-gp4.
-FILES="eboot.bin sc_bgm.prx sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx sce_module/libc.prx sce_module/libSceFios2.prx"
+FILES="eboot.bin sc_bgm.prx sc_bgm_b.prx sc_bgm_c.prx sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx sce_module/libc.prx sce_module/libSceFios2.prx"
 {
     echo '<?xml version="1.0"?>'
     echo '<psproject xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" fmt="gp4" version="1000">'

@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.4"
+#define APP_VERSION "0.5"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -309,11 +309,6 @@ static void readStatus(void) {
 
 // ---- loading the module into the shell ----
 
-// Copies the module to path: 0, or -1.
-static int putModule(const char* path) {
-    return writeFile(path, g_prxStart, (size_t)(g_prxEnd - g_prxStart));
-}
-
 // GoldHEN's PROCESS_PRX_LOAD into SceShellUI, the path as the shell sees
 // it: 1 if it loaded.
 static int shellLoad(const char* path) {
@@ -341,29 +336,66 @@ static int selfLoad(const char* path) {
     return rc == 0;
 }
 
-// Tries the shell with each of this app's package folders (pfsmnt's
-// SCMP00001-app0...), where the package carries sc_bgm.prx: 1 if it loaded.
-static int fromPackage(void) {
-    DIR* d = opendir("/mnt/sandbox/pfsmnt");
-    if (!d) {
-        say("No /mnt/sandbox/pfsmnt");
-        return 0;
-    }
-    int ok = 0;
-    struct dirent* e;
-    while (!ok && (e = readdir(d))) {
-        if (strncmp(e->d_name, "SCMP00001", 9)) continue;
+#define PKG_DIR "/mnt/sandbox/pfsmnt/SCMP00001-app0"
+#define SHELL_SANDBOX "/mnt/sandbox/NPXS20001_000"
+
+// The three builds of the module in the package (ps4/bgm/build.sh), and
+// the first that loads into this app, or -1.
+static const char* const g_builds[3] = {"sc_bgm.prx", "sc_bgm_b.prx", "sc_bgm_c.prx"};
+static int g_build = -1;
+
+static void findBuild(void) {
+    if (g_build >= 0) return;
+    for (int i = 0; i < 3; i++) {
         char path[160];
-        snprintf(path, sizeof(path), "/mnt/sandbox/pfsmnt/%s/sc_bgm.prx", e->d_name);
-        if (access(path, F_OK) != 0) {
-            say("Not there: %s", path);
-            continue;
+        snprintf(path, sizeof(path), PKG_DIR "/%s", g_builds[i]);
+        if (selfLoad(path)) {
+            g_build = i;
+            say("Build %s loads", g_builds[i]);
+            return;
         }
-        selfLoad(path);
-        ok = shellLoad(path);
+    }
+    say("No build of the module loads into this app");
+}
+
+// What the shell's sandbox holds, two levels down: where it might load from.
+static void listShellSandbox(void) {
+    static int done;
+    if (done || !g_log) return;
+    done = 1;
+    DIR* d = opendir(SHELL_SANDBOX);
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        fprintf(g_log, "  shell sandbox: /%s\n", e->d_name);
+        char sub[200];
+        snprintf(sub, sizeof(sub), SHELL_SANDBOX "/%s", e->d_name);
+        DIR* d2 = opendir(sub);
+        if (!d2) continue;
+        struct dirent* e2;
+        int n = 0;
+        while ((e2 = readdir(d2)) && n < 40) {
+            if (e2->d_name[0] == '.') continue;
+            fprintf(g_log, "    /%s/%s\n", e->d_name, e2->d_name);
+            n++;
+        }
+        closedir(d2);
     }
     closedir(d);
-    return ok;
+    fflush(g_log);
+}
+
+// Copies the package's build of the module to dest: 0, or -1.
+static int copyBuild(const char* dest) {
+    char src[160];
+    snprintf(src, sizeof(src), PKG_DIR "/%s", g_builds[g_build]);
+    FILE* f = fopen(src, "rb");
+    if (!f) return -1;
+    static uint8_t buf[512 * 1024];
+    const size_t n = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    return n ? writeFile(dest, buf, n) : -1;
 }
 
 // Starts the player inside this app, the way a module is meant to be
@@ -373,8 +405,10 @@ static int fromPackage(void) {
 static int g_inApp;
 static int startInApp(void) {
     if (g_inApp) return 1;
-    static const char* const paths[2] = {"/mnt/sandbox/pfsmnt/SCMP00001-app0/sc_bgm.prx",
-                                          "/app0/sc_bgm.prx"};
+    if (g_build < 0) return 0;
+    char paths[2][160];
+    snprintf(paths[0], sizeof(paths[0]), PKG_DIR "/%s", g_builds[g_build]);
+    snprintf(paths[1], sizeof(paths[1]), "/app0/%s", g_builds[g_build]);
     for (int i = 0; i < 2; i++) {
         int res = 0;
         const int h = sceKernelLoadStartModule(paths[i], 0, NULL, 0, NULL, &res);
@@ -401,30 +435,28 @@ static void loadPlayer(void) {
         return;
     }
     say("-- loading, app " APP_VERSION " --");
-    // Controls: a system library the shell has, by path and by name; and an
-    // OpenOrbis module from this package, into this app.
-    shellLoad("/system/common/lib/libSceAudioOut.sprx");
-    shellLoad("libSceAudioOut.sprx");
-    selfLoad("/mnt/sandbox/pfsmnt/SCMP00001-app0/sce_module/libSceFios2.prx");
-
-    if (fromPackage()) {
+    findBuild();
+    listShellSandbox();
+    if (g_build < 0) return;
+    // Into the shell: the package's copy, a copy in the shell's sandbox (as
+    // /sc_bgm.prx, and by name), /user/data. By name worked for its own
+    // libSceAudioOut.sprx, its full /system path did not.
+    char path[160];
+    snprintf(path, sizeof(path), PKG_DIR "/%s", g_builds[g_build]);
+    if (shellLoad(path)) {
         g_loadedFrom = 4;
         return;
     }
-    if (putModule(SC_BGM_PRX) != 0) {
-        say("Could not write %s (is the app jailbroken?)", SC_BGM_PRX);
+    if (copyBuild(SHELL_SANDBOX "/sc_bgm.prx") == 0 &&
+        (shellLoad("/sc_bgm.prx") || shellLoad("sc_bgm.prx"))) {
+        g_loadedFrom = 3;
         return;
     }
-    selfLoad(SC_BGM_PRX);
-    if (shellLoad("/user" SC_BGM_PRX)) {
+    if (copyBuild(SC_BGM_PRX) == 0 && shellLoad("/user" SC_BGM_PRX)) {
         g_loadedFrom = 1;
         return;
     }
-    if (putModule("/system_tmp/sc_bgm.prx") == 0 && shellLoad("/system_tmp/sc_bgm.prx")) {
-        g_loadedFrom = 2;
-        return;
-    }
-    say("The shell would not load it from any path: send app.log");
+    say("The shell would not load it: send app.log");
     startInApp();
 }
 

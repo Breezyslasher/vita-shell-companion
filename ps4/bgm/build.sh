@@ -25,6 +25,27 @@ ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init \
 CREATE_FSELF=${CREATE_FSELF:-$OUT/create-fself}
 "$CREATE_FSELF" -in="$OUT/sc_bgm.elf" -out="$OUT/sc_bgm.oelf" \
     --lib="$OUT/sc_bgm.prx" --paid 0x3800000000000011
+# Two other builds, for the test app to try, as a PS4 (GoldHEN 2.4b18.6,
+# 11.50) refused sc_bgm.prx as not executable (ENOEXEC) where it loaded
+# OpenOrbis's own libSceFios2.prx:
+# b: the same ELF, made a .prx with the toolchain's own create-fself, which
+#    OpenOrbis's modules are made with, if it has one;
+# c: built without -fvisibility=hidden, every global exported, as GoldHEN's
+#    plugins are, with that create-fself too.
+SDK_FSELF=$OO/bin/linux/create-fself
+[ -x "$SDK_FSELF" ] || SDK_FSELF=$CREATE_FSELF
+"$SDK_FSELF" -in="$OUT/sc_bgm.elf" -out="$OUT/sc_bgm_b.oelf" \
+    --lib="$OUT/sc_bgm_b.prx" --paid 0x3800000000000011
+CFLAGS_C=$(echo "$CFLAGS" | sed 's/-fvisibility=hidden//')
+for f in "$RT/prx_crt.c" "$RT/sys.c" "$SRC/bgm.c"; do
+    clang $CFLAGS_C $WARN -DSC_PRX -c "$f" -o "$OUT/c_$(basename "$f" .c).o"
+done
+clang $CFLAGS_C -w -DSC_PRX -c "$SRC/mp3.c" -o "$OUT/c_mp3.o"
+ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init \
+    -o "$OUT/sc_bgm_c.elf" "$OUT/c_prx_crt.o" "$OUT/c_sys.o" "$OUT/c_bgm.o" "$OUT/c_mp3.o" \
+    -L"$OO/lib" -lkernel
+"$SDK_FSELF" -in="$OUT/sc_bgm_c.elf" -out="$OUT/sc_bgm_c.oelf" \
+    --lib="$OUT/sc_bgm_c.prx" --paid 0x3800000000000011
 # The loader: a raw payload, the module inside it.
 clang $CFLAGS $WARN -c "$RT/sys.c" -o "$OUT/bgm_load_sys.o"
 clang $CFLAGS $WARN "-DSC_PRX_PATH=\"$OUT/sc_bgm.prx\"" -c "$SRC/load.c" -o "$OUT/bgm_load.o"
@@ -36,4 +57,4 @@ if objdump -h "$OUT/sc_bgm_raw.elf" | grep -q '\.rela\.dyn'; then
 fi
 objcopy --set-section-flags .bss=alloc,load,contents -O binary -R .rela.dyn \
     "$OUT/sc_bgm_raw.elf" "$OUT/sc_bgm.bin"
-ls -l "$OUT/sc_bgm.prx" "$OUT/sc_bgm.bin"
+ls -l "$OUT"/sc_bgm*.prx "$OUT/sc_bgm.bin"
