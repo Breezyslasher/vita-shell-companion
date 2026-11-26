@@ -2730,7 +2730,27 @@ void mcwPre(Frame* f) {
                 hookCallback(h, i, f->gpr[i]);
 }
 
+#ifdef SC_COMPANION
+// The player's, in the same module (ps4/bgm/dllist.c, 0.96): the download
+// service's progress call, answered for a download list's placeholders.
+void dlListHook(Frame* f);
+
+// A native function hooked for the player, under the install lock.
+int mcwHookNative(Hook* h, void* fn, const char** why) {
+    lock(&g_installLock);
+    const int rc = hookInstall(h, fn, why);
+    unlock(&g_installLock);
+    return rc;
+}
+#endif
+
 void mcwPost(Frame* f) {
+#ifdef SC_COMPANION
+    if (f->hook->json == 18) {
+        dlListHook(f);
+        return;
+    }
+#endif
     if (f->hook->json) {
         if (!g_quiet || f->hook->json == 2 || f->hook->json == 6 || f->hook->json == 7 ||
             f->hook->json == 8 || f->hook->json == 9 || f->hook->json == 10 ||

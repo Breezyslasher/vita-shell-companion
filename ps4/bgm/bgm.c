@@ -1738,6 +1738,9 @@ static void queueInsert(int at, int lib) {
 // Packages through the PS4's own download service, and self-update (0.89).
 #include "pkg.c"
 
+// A download list's files in Notifications > Downloads (0.96).
+#include "dllist.c"
+
 static uint64_t g_lastStatus;
 
 static void writeStatus(void) {

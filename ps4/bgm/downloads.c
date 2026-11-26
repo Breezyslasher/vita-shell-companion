@@ -399,6 +399,8 @@ static void dlNotify(const char* f, ...) {
 }
 
 static int pkgItem(int i);  // pkg.c (0.89)
+static void dlListBegin(void);  // dllist.c (0.96)
+static void dlListEnd(void);
 
 static void dlItem(int i) {
     __typeof__(g_dls.item[0])* it = &g_dls.item[i];
@@ -465,6 +467,7 @@ static void* dlMain(void* arg) {
         dlStatus();
         // The app goes as it hands them over: a moment for it to close its files.
         sysSleepMs(2000);
+        dlListBegin();  // its files in Notifications > Downloads
         logLine("downloads: %d item(s)", g_dls.count);
         dlNotify("Downloading %d item%s in the background", g_dls.count, g_dls.count == 1 ? "" : "s");
         int done = 0, failed = 0;
@@ -489,6 +492,7 @@ static void* dlMain(void* arg) {
             if (failed) dlNotify("Downloads: %d done, %d failed", done, failed);
             else dlNotify("Downloads done (%d)", done);
         }
+        dlListEnd();
     }
     return NULL;
 }

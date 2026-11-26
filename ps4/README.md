@@ -23,6 +23,31 @@ Its files are in `/user/data/ShellCompanion/ps4/` (the same folder as
 `/user/data/GoldHEN/plugins/sc_bgm.prx` and loaded with GoldHEN's
 `PROCESS_PRX_LOAD` (system call 500, command 6).
 
+### A list's files in Notifications > Downloads (0.96, an experiment)
+
+The download service takes packages only (0.92-0.94: a media file is
+listed, then fails with `0x80990033` as soon as it is started, without an
+HTTP request). `ps4/bgm/dllist.c` registers each `url` and `pages` item of
+a download list as a placeholder task and **never starts it**, so the
+service leaves it alone. Our downloader fetches the file. The service's
+native progress functions (`sceBgftServiceDownloadGetProgress` and the
+`Int` one, in libSceBgft) are hooked inside the shell (hook kind 18,
+answered by `dlListHook`): for a placeholder they answer with the item's
+bytes, size, time left and no error. These are native hooks, as the music
+service's are, not the managed wrappers 0.85 hooked.
+
+- The placeholders are removed 10 s after the list ends, when the app
+  takes the list back, and at the next list for any a crash left
+  (`dl-list-tasks.txt`), with `sceBgftServiceIntDownloadUnregisterTask`
+  (else `sceBgftServiceDownloadStopTask`).
+- **Not known yet:** whether a task never started is listed; which
+  native call the list makes; what the state bits mean. While going, the
+  answer is `0x30a`, the probe's task just after starting. The first
+  answers for every other task, the PS4's own downloads included, are
+  logged as `dllist:` lines in bgm.log, to learn a real download's bits.
+  `dl-list-bits.txt` (`going=`, `waiting=`, `done=`) sets them without a
+  rebuild; `dl-nolist` turns the placeholders off.
+
 ### One module, and the cleanup (0.95)
 
 - **One module, `sc_companion.prx`:** `ps4/companion.c` starts the player
