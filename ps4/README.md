@@ -183,6 +183,13 @@ service's are, not the managed wrappers 0.85 hooked.
   Stop/Download, every byte, preparing 0). Ours stayed in section 3 when
   finished. 1.13 moves them: out of section 3's results, into the top of
   section 9's (within the array's 960), answering `0x308`/`0x80c3`.
+- **1.13 on the PS4:** waiting songs read "Queued for downloading." A
+  finished one read "Cannot download" until the list was opened again:
+  the list asked for section 3 again only now and then (35.5, 41.7 s), so
+  its row kept the going state it had read while the progress already
+  answered finished. 1.14 answers a finished one as going with every byte
+  there (0 s left) until it has been left out of a section 3 answer, then
+  as finished.
 
 ### One module, and the cleanup (0.95)
 

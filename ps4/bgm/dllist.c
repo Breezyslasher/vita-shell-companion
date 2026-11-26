@@ -91,6 +91,7 @@ static struct {
         uint64_t lastParam;          // its param in the last query logged (0.99)
         volatile int failed;         // the service failed it: to be replaced (1.02)
         uint32_t tries;              // replaced so far
+        volatile int movedOut;       // finished, and left out of a section 3 answer since (1.14)
     } e[DLL_MAX];
     struct {
         int32_t task;
@@ -107,10 +108,17 @@ static void dllFill(int k, BgftProgress* pr) {
     const int i = g_dll.e[k].item;
     if (i < 0 || i >= g_dls.count) return;
     __typeof__(g_dls.item[0])* it = &g_dls.item[i];
-    const int st = it->state;
-    const uint64_t bytes = it->bytes;
+    // Finished, but the list has not asked for section 3 since (1.14): its
+    // row there still has the going state it read, and finished answers
+    // under it read "Cannot download" (1.13) until the list was opened
+    // again. So it answers going, every byte there, until it has been left
+    // out of a section 3 answer (and put in section 9's).
+    int st = it->state;
+    const int moved = g_dll.e[k].movedOut;
+    if (st == DLS_DONE && !moved) st = DLS_GOING;
+    const uint64_t bytes = it->state == DLS_DONE && !moved ? (it->bytes ? it->bytes : it->size) : it->bytes;
     uint64_t size = it->size;
-    if (st == DLS_DONE) size = bytes ? bytes : size;
+    if (it->state == DLS_DONE) size = bytes ? bytes : size;
     if (!size) size = bytes + 1;  // not known yet: some way to go
     if (st == DLS_GOING && !g_dll.e[k].t0) {
         g_dll.e[k].t0 = sysNowUs();
@@ -125,6 +133,7 @@ static void dllFill(int k, BgftProgress* pr) {
             rest = (uint32_t)(left * (us / 1000u) / came / 1000u);
         }
     }
+    if (it->state == DLS_DONE) rest = 0;
     pr->errorResult = 0;
     // The low 10 bits only (1.03): the rest is not the state, and the
     // service's own (varying) bits stay.
@@ -306,8 +315,13 @@ void dlListQueryHook(Frame* f) {
                     int out = 0;
                     for (int k = 0; k < count && k < DLL_MAX; k++) {
                         const int i = g_dll.e[k].item;
-                        if (g_dll.e[k].task == id && id > 0 && i >= 0 && i < g_dls.count && g_dls.item[i].state == DLS_DONE)
+                        if (g_dll.e[k].task == id && id > 0 && i >= 0 && i < g_dls.count && g_dls.item[i].state == DLS_DONE) {
                             out = 1;
+                            if (!g_dll.e[k].movedOut) {
+                                g_dll.e[k].movedOut = 1;
+                                logLine("dllist: task %d finished: out of section 3, into section 9", id);
+                            }
+                        }
                     }
                     if (!out) {
                         if (w != j) memmove((uint8_t*)res + w * 8, res + j * 8, 8);
@@ -648,6 +662,7 @@ static void dlListBegin(void) {
         g_dll.e[k].logged = 0;
         g_dll.e[k].failed = 0;
         g_dll.e[k].tries = 0;
+        g_dll.e[k].movedOut = 0;
         g_dll.e[k].lastParam = 0;
         g_dll.e[k].task = task;
         __atomic_store_n(&g_dll.count, k + 1, __ATOMIC_RELEASE);
