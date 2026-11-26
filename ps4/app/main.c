@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.44"
+#define APP_VERSION "0.45"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -875,9 +875,12 @@ static void writeEbgm(void) {
         "{\"spotify\":{\"subscriptionType\":\"PREMIUM\",\"legalCountry\":\"US\"}}\n";
     writeFile(SC_BGM_DIR "/ebgm/me_partner_profile.json", profile, sizeof(profile) - 1);
     // The shell reads views[], each view's "name" (the section's title) and
-    // its "lists" (0.42's key log); a list's own keys are the next to learn.
+    // its "lists" (0.42's key log), each list's image_url, name and total
+    // (0.43's); and accounts_linked, which missing, had a playlist chosen open
+    // psnsint:psmusicshare, Spotify's linking page (0.44's).
     static const char views[] =
-        "{\"upgrade_scopes_required\":false,\"views\":[{\"name\":\"Shell Companion\","
+        "{\"upgrade_scopes_required\":false,\"accounts_linked\":true,"
+        "\"views\":[{\"name\":\"Shell Companion\","
         "\"section_title\":\"Shell Companion\",\"lists\":[" PLAYLIST_GUESS "]}]}\n";
     writeFile(SC_BGM_DIR "/ebgm/recommended_views.json", views, sizeof(views) - 1);
     // The playlist's picture: this app's icon. The shell adds &w=..&h=.. to

@@ -355,6 +355,14 @@ app is there and recent enough,
 shell's `app.exe`, is hooked through Mono like `JsonObject`'s and answered
 true while `ebgm/` is there; `get_AppVer`, the version it found, is logged.
 
+### Choosing the playlist (0.44)
+
+`IsValidAppVer` was hooked through Mono (the shell's own answer 0, ours 1);
+`get_AppVer` was too short to hook. Choosing our playlist opened
+`psnsint:psmusicshare`, Spotify's linking page, as the views had no
+`accounts_linked` (the shell asked for it on the views' root). 0.45's views
+have `"accounts_linked": true`.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
