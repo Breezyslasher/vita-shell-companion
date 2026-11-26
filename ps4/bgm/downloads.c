@@ -57,6 +57,7 @@ static struct {
 static uint8_t g_dlBuf[64 * 1024];
 
 static void dllRepair(void);  // dllist.c (1.02)
+static void dlListLeftovers(void);  // dllist.c (1.04)
 
 // %XX back to its byte.
 static void dlDecode(char* s) {
@@ -455,6 +456,7 @@ static void dlItem(int i) {
 
 static void* dlMain(void* arg) {
     (void)arg;
+    dlListLeftovers();
     for (;;) {
         while (!g_dls.start) sysSleepMs(200);
         g_dls.start = 0;

@@ -114,6 +114,15 @@ service's are, not the managed wrappers 0.85 hooked.
   made ours games (subtype 6) with no game to show. 1.03 keeps them
   Package: going `0x30a`/`0x82c1`, waiting `0x301`/`0x1c1`, done
   `0x313`/`0x103c1` (bits/param), and keeps the service's bits above 10.
+- **1.03 on the PS4:** no "Cannot download"; the bar stayed at 0% though
+  every field we answer was right, and the entries went 10 s after the
+  list ended. The managed TaskProgress ends with `percentTotal` (a float)
+  after `localCopyPercent`, which would be at 0x40 in the native answer,
+  past what we write. 1.04 writes it for ours only once two real finished
+  tasks' answers have had 100.0 there (so nothing is written past a
+  shorter answer), and logs 0x38-0x47 of the others'. Finished
+  placeholders now stay, as the PS4's own do: removed when the app takes
+  the list back, at the next list, or at the module's start after a boot.
 
 ### One module, and the cleanup (0.95)
 

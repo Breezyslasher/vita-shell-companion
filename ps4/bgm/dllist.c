@@ -45,6 +45,8 @@ static struct {
     uint32_t paramGoing, paramWaiting, paramDone;  // the task query's param answered for ours (1.01)
     int haveGoing, haveWaiting, haveDone;
     volatile int count;
+    volatile int pctOk;  // a float percent at 0x40 seen in real tasks' answers (1.04)
+    int32_t pctSeen;     // the first real task it was seen in
     struct {
         volatile int32_t task;
         int item;
@@ -116,6 +118,13 @@ void dlListHook(Frame* f) {
         if (err && !g_dll.e[k].failed) g_dll.e[k].failed = 1;  // replaced by dllRepair (1.02)
         const int rc = (int)(int32_t)f->retRax;
         dllFill(k, pr);
+        // TaskProgress's last field, percentTotal (a float after
+        // localCopyPercent, 0x40), once real tasks have shown it is there.
+        if (g_dll.pctOk && hookReadable(pr, 0x44) == 0x44) {
+            float pct = pr->lengthTotal ? (float)((double)pr->transferredTotal * 100.0 / (double)pr->lengthTotal) : 0.0f;
+            if (pct > 100.0f) pct = 100.0f;
+            memcpy((uint8_t*)pr + 0x40, &pct, 4);
+        }
         f->retRax = 0;
         // Whenever the service's bits or ours change (0.99), and every 200th.
         const uint32_t seen = g_dll.e[k].logged++;
@@ -130,7 +139,23 @@ void dlListHook(Frame* f) {
                     scePthreadGetthreadid());
         return;
     }
-    // Another task: a real download's answers, the first few, to learn from.
+    // Another task. A finished one whose answer has 100.0 (a float) at
+    // 0x40 says TaskProgress's percentTotal is there (1.04: 1.03's bar
+    // stayed at 0%, everything before it answered): seen in two tasks,
+    // ours get it too. Nothing written past 0x40 before that.
+    if (!g_dll.pctOk && f->retRax == 0 && pr->lengthTotal && pr->transferredTotal == pr->lengthTotal &&
+        hookReadable(pr, 0x44) == 0x44) {
+        uint32_t v;
+        memcpy(&v, (const uint8_t*)pr + 0x40, 4);
+        if (v == 0x42C80000u) {
+            if (!g_dll.pctSeen) {
+                g_dll.pctSeen = task;
+            } else if (g_dll.pctSeen != task) {
+                g_dll.pctOk = 1;
+                logLine("dllist: percentTotal at 0x40 (100.0 in tasks %d and %d): answered for ours", g_dll.pctSeen, task);
+            }
+        }
+    }
     int o = 0;
     while (o < g_dll.others && g_dll.other[o].task != task) o++;
     if (o == g_dll.others) {
@@ -150,12 +175,14 @@ void dlListHook(Frame* f) {
     ot->bits = pr->bits;
     ot->transferred = pr->transferred;
     ot->lastUs = now;
+    uint32_t tail[4] = {0, 0, 0, 0};  // 0x38-0x47: preparing, local copy, then what follows
+    if (hookReadable(pr, 0x48) == 0x48) memcpy(tail, (const uint8_t*)pr + 0x38, 16);
     logLine("dllist: %s(%d) = 0x%08X: bits 0x%x, error 0x%08X, %lu of %lu (total %lu of %lu), %u of %u, %u s left "
-            "(total %u)  [call %u, thread %d]",
+            "(total %u), 0x38: %x %x %x %x  [call %u, thread %d]",
             f->hook->name, task, (unsigned)f->retRax, pr->bits, (unsigned)pr->errorResult,
             (unsigned long)pr->transferred, (unsigned long)pr->length, (unsigned long)pr->transferredTotal,
-            (unsigned long)pr->lengthTotal, pr->numIndex, pr->numTotal, pr->restSec, pr->restSecTotal, n,
-            scePthreadGetthreadid());
+            (unsigned long)pr->lengthTotal, pr->numIndex, pr->numTotal, pr->restSec, pr->restSecTotal, tail[0], tail[1],
+            tail[2], tail[3], n, scePthreadGetthreadid());
 }
 
 // After one of the service's task queries (0.98), logged only: its results
@@ -389,9 +416,11 @@ static void dllRepair(void) {
     if (changed) dllSave();
 }
 
+static void dllRemoveAll(void);
+
 // A list beginning: a placeholder for each of its url and pages items.
 static void dlListBegin(void) {
-    g_dll.count = 0;
+    dllRemoveAll();  // the last list's, shown finished till now
     if (sysExists(SC_BGM_DIR "/dl-nolist") || !dllSetup()) return;
     char text[256];
     // What ours answer (1.03), from the shell's own declarations
@@ -441,12 +470,25 @@ static void dlListBegin(void) {
 
 // A list ended: its placeholders shown whole for 10 s (unless another list
 // or the app comes first), then removed.
-static void dlListEnd(void) {
-    if (!g_dll.count) return;
-    for (int s = 0; s < 100 && !g_dls.start && !g_dls.takeBack; s++) sysSleepMs(100);
+static void dllRemoveAll(void) {
     const int n = g_dll.count;
+    if (!n) return;
     __atomic_store_n(&g_dll.count, 0, __ATOMIC_RELEASE);
     sysSleepMs(50);  // a call answering one of them, done
     for (int k = 0; k < n; k++) dllUnregister(g_dll.e[k].task);
     sysUnlink(DLL_TASKS);
+}
+
+// A list ended. Its placeholders stay, shown finished, as the PS4's own
+// downloads do (1.04: 1.03 removed them 10 s after, and the entries went):
+// removed when the app takes the list back, when the next list begins, and
+// at the next boot's first start of the module (dlListLeftovers).
+static void dlListEnd(void) {
+    if (g_dls.takeBack) dllRemoveAll();
+}
+
+// At the module's start: any placeholders left from an earlier boot (or a
+// crash), removed. Only when there are some: nothing is hooked otherwise.
+static void dlListLeftovers(void) {
+    if (sysExists(DLL_TASKS)) dllSetup();
 }
