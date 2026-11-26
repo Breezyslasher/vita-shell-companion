@@ -35,6 +35,24 @@ int scePthreadGetthreadid(void);
 
 typedef int (*FnBgftUnregister)(int32_t);
 
+// Trying "finished" answers side by side (1.07): with dl-list-try in the
+// player's folder, item i is answered, once done, with candidate i % 6, its
+// letter added to its title, so one look at the list shows what each reads
+// as. 1.05's Complete/Complete read "waiting"; 1.06's Stop/Download with
+// every byte, as a finished game answers, read nothing (a game's is
+// "Installed", from the game being there).
+static const struct {
+    char letter;
+    uint32_t bits, param;  // progress bits (low 10), query param
+} g_dllTry[6] = {
+    {'A', 0x310, 0x100c1},   // Stop, Complete
+    {'B', 0x313, 0x1103c1},  // Complete, Complete, and bit 20, as installed patches (0x110381)
+    {'C', 0x313, 0x103c3},   // Complete, Complete, type 3 as finished games' (0x...63)
+    {'D', 0x308, 0x80c1},    // Stop, Download, type 1
+    {'E', 0x30c, 0xc2c1},    // Run, Install
+    {'F', 0x311, 0x101c1},   // Ready, Complete
+};
+
 static struct {
     int tried, hooked;
     Hook hooks[2];
@@ -44,6 +62,7 @@ static struct {
     uint32_t bitsGoing, bitsWaiting, bitsDone;
     uint32_t paramGoing, paramWaiting, paramDone;  // the task query's param answered for ours (1.01)
     int haveGoing, haveWaiting, haveDone;
+    int trying;  // dl-list-try (1.07)
     volatile int count;
     volatile int pctOk;  // a float percent at 0x40 seen in real tasks' answers (1.04)
     int32_t pctSeen;     // the first real task it was seen in
@@ -95,6 +114,7 @@ static void dllFill(int k, BgftProgress* pr) {
     // service's own (varying) bits stay.
     const uint32_t keep = pr->bits & ~0x3FFu;
     if (st == DLS_GOING && g_dll.haveGoing) pr->bits = keep | (g_dll.bitsGoing & 0x3FFu);
+    else if (st == DLS_DONE && g_dll.trying) pr->bits = keep | g_dllTry[i % 6].bits;
     else if (st == DLS_DONE && g_dll.haveDone) pr->bits = keep | (g_dll.bitsDone & 0x3FFu);
     else if (st != DLS_GOING && st != DLS_DONE && g_dll.haveWaiting) pr->bits = keep | (g_dll.bitsWaiting & 0x3FFu);
     pr->length = pr->lengthTotal = size;
@@ -228,7 +248,8 @@ void dlListQueryHook(Frame* f) {
                     if (g_dll.e[k].task != id || id <= 0) continue;
                     const int i = g_dll.e[k].item;
                     const int st = i >= 0 && i < g_dls.count ? g_dls.item[i].state : DLS_WAITING;
-                    const uint32_t prm = st == DLS_DONE    ? g_dll.paramDone
+                    const uint32_t prm = st == DLS_DONE && g_dll.trying ? g_dllTry[i % 6].param
+                                       : st == DLS_DONE    ? g_dll.paramDone
                                        : st == DLS_GOING ? g_dll.paramGoing
                                                          : g_dll.paramWaiting;
                     memcpy((uint8_t*)res + j * 8 + 4, &prm, 4);
@@ -368,7 +389,10 @@ static int32_t dllRegister(int i) {
     p.entitlementType = 5;
     p.id = id;
     p.contentUrl = it->arg[0];
-    p.contentName = it->title[0] ? it->title : it->id;
+    char name[160];
+    if (g_dll.trying) fmt(name, sizeof(name), "[%c] %s", g_dllTry[i % 6].letter, it->title[0] ? it->title : it->id);
+    else fmt(name, sizeof(name), "%s", it->title[0] ? it->title : it->id);
+    p.contentName = name;
     p.iconPath = "";
     p.playgoScenarioId = "0";
     p.option = 0x10000;
@@ -439,6 +463,8 @@ static void dlListBegin(void) {
     // 1.01 answered a game's (0x10008261, subtype 6), and the list, finding
     // no game for it, said "Cannot download". Ours stay Package (12).
     g_dll.haveGoing = g_dll.haveWaiting = g_dll.haveDone = 1;
+    g_dll.trying = sysExists(SC_BGM_DIR "/dl-list-try");
+    if (g_dll.trying) logLine("dllist: trying finished answers (dl-list-try): item i gets [A-F][i %% 6]");
     g_dll.bitsGoing = 0x30a;    // Package, Run, Download
     g_dll.bitsWaiting = 0x301;  // Package, Ready, Standby
     // Done as the PS4's own finished downloads are (1.06: 1.05's finished

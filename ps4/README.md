@@ -137,6 +137,12 @@ service's are, not the managed wrappers 0.85 hooked.
   own finished downloads answer (package 1099 installed: `...88`,
   `0x10008063`, Stop/Download with every byte). 1.06 answers finished
   ones so (`0x308`, `0x80c3`, Package).
+- **1.06 on the PS4:** the package read "Installed." with its icon. The
+  finished songs read nothing (a finished game's Stop/Download is
+  "Installed" because the game is there); Notifications' summary still
+  counted them "Waiting: 2". 1.07: with `dl-list-try`, item i is answered,
+  once done, with one of six candidates (`g_dllTry`), its letter in its
+  title, to see them side by side.
 
 ### One module, and the cleanup (0.95)
 
