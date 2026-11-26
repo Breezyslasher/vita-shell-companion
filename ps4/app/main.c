@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.28"
+#define APP_VERSION "0.29"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -92,6 +92,7 @@ int scePadReadState(int handle, OrbisPadData* data);
 #define ORBIS_VIDEO_OUT_FLIP_VSYNC 1
 #define ORBIS_PAD_BUTTON_OPTIONS 0x0008
 #define ORBIS_PAD_BUTTON_UP 0x0010
+#define ORBIS_PAD_BUTTON_DOWN 0x0040
 #define ORBIS_PAD_BUTTON_RIGHT 0x0020
 #define ORBIS_PAD_BUTTON_LEFT 0x0080
 #define ORBIS_PAD_BUTTON_L2 0x0100
@@ -552,6 +553,120 @@ static void loadPlayer(void) {
     startInApp();
 }
 
+// ---- the shell's own code, for its music calls' structures ----
+//
+// The quick menu's Music section is the shell's (C#, .NET assemblies). The
+// code that reads sceMusicCoreServerGetPlayStatus's and GetTrackInfo's
+// answers is in them, with each structure's layout, so they are copied to
+// /data/ShellCompanion/ps4/shell/ for FTP: every .dll whose name has one of
+// g_wanted in it, and a list of every file seen (its size and first bytes:
+// "MZ" is a plain .NET assembly).
+
+#define DUMP_DIR SC_BGM_DIR "/shell"
+static const char* const g_dumpDirs[] = {
+    "/system/vsh/app/NPXS20001/psm/Application",
+    "/system/vsh/app/NPXS20001",
+    "/system/common/lib",
+    "/system/priv/lib",
+    "/system_ex/app/NPXS20117",
+    "/system_ex/app/NPXS20117/sce_sys",
+    "/system/vsh/app/NPXS20117",
+    "/system/vsh/app/NPXS20117/sce_sys",
+};
+static const char* const g_wanted[] = {"Music", "ShellUI", "QuickMenu", "Spotify", "Bgm",
+                                       "param.sfo"};
+
+static int hasPart(const char* s, const char* part) {
+    const size_t n = strlen(part);
+    for (; *s; s++)
+        if (strncasecmp(s, part, n) == 0) return 1;
+    return 0;
+}
+
+static int wantedFile(const char* name) {
+    const size_t n = strlen(name);
+    const int dll = n > 4 && strcasecmp(name + n - 4, ".dll") == 0;
+    for (size_t i = 0; i < sizeof(g_wanted) / sizeof(g_wanted[0]); i++)
+        if (hasPart(name, g_wanted[i])) return dll || strcasecmp(name, "param.sfo") == 0;
+    return 0;
+}
+
+// Copies src to dst: bytes, or -1.
+static long copyWhole(const char* src, const char* dst) {
+    FILE* in = fopen(src, "rb");
+    if (!in) return -1;
+    FILE* out = fopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    static uint8_t buf[256 * 1024];
+    long total = 0;
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            total = -1;
+            break;
+        }
+        total += (long)n;
+    }
+    fclose(in);
+    fclose(out);
+    return total;
+}
+
+static void dumpShellCode(void) {
+    mkdir(DUMP_DIR, 0777);
+    FILE* list = fopen(DUMP_DIR "/list.txt", "w");
+    int copied = 0, seen = 0;
+    for (size_t d = 0; d < sizeof(g_dumpDirs) / sizeof(g_dumpDirs[0]); d++) {
+        DIR* dir = opendir(g_dumpDirs[d]);
+        if (!dir) {
+            if (list) fprintf(list, "%s: cannot open\n", g_dumpDirs[d]);
+            continue;
+        }
+        if (list) fprintf(list, "%s:\n", g_dumpDirs[d]);
+        struct dirent* e;
+        while ((e = readdir(dir))) {
+            if (e->d_name[0] == '.') continue;
+            char path[400];
+            snprintf(path, sizeof(path), "%s/%s", g_dumpDirs[d], e->d_name);
+            struct stat st;
+            const int isFile = stat(path, &st) == 0 && S_ISREG(st.st_mode);
+            unsigned char head[4] = {0};
+            if (isFile) {
+                FILE* f = fopen(path, "rb");
+                if (f) {
+                    if (fread(head, 1, 4, f) != 4) memset(head, 0, 4);
+                    fclose(f);
+                }
+            }
+            seen++;
+            if (list)
+                fprintf(list, "  %-60s %10lld  %02X %02X %02X %02X%s\n", e->d_name,
+                        isFile ? (long long)st.st_size : -1LL, head[0], head[1], head[2], head[3],
+                        isFile ? "" : "  (folder)");
+            if (!isFile || !wantedFile(e->d_name)) continue;
+            // NPXS20117's param.sfo by the folder's name, as there may be two.
+            char dst[400];
+            const char* slash = strrchr(g_dumpDirs[d], '/');
+            if (strcasecmp(e->d_name, "param.sfo") == 0)
+                snprintf(dst, sizeof(dst), DUMP_DIR "/%s-%s-param.sfo",
+                         strstr(g_dumpDirs[d], "system_ex") ? "ex" : "sys",
+                         slash ? slash + 1 : "x");
+            else
+                snprintf(dst, sizeof(dst), DUMP_DIR "/%s", e->d_name);
+            const long n = copyWhole(path, dst);
+            say("copied %s: %ld bytes", path, n);
+            if (n > 0) copied++;
+        }
+        closedir(dir);
+    }
+    if (list) fclose(list);
+    say("Shell code: %d files copied of %d seen; FTP /data/ShellCompanion/ps4/shell/", copied,
+        seen);
+}
+
 // ---- the screen: two frame buffers, drawn by the CPU ----
 
 #define W 1920
@@ -707,6 +822,8 @@ static void draw(void) {
     text(x, y, FG, "R2     try the PS4's own music service in this app (quick menu test)");
     y += LINE;
     text(x, y, FG, "UP     music watch in the shell: logs the quick menu's music calls");
+    y += LINE;
+    text(x, y, FG, "DOWN   copy the shell's music code to /data/ShellCompanion/ps4/shell");
     y += LINE;
     text(x, y, DIM, "Leave with the PS button: the music should keep playing.");
     y += LINE * 2;
@@ -996,6 +1113,7 @@ int main(void) {
                 shellLoad("/user/data/GoldHEN/plugins/sc_mps.prx"))
                 say("Music service probe in the shell: open the quick menu when it says so");
         }
+        if (down & ORBIS_PAD_BUTTON_DOWN) dumpShellCode();
         if (down & ORBIS_PAD_BUTTON_UP) {
             // The music watch (ps4/mcw): hooks the shell's calls to the music
             // server, passes each on unchanged, and logs it to mcw.log. Once

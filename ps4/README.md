@@ -149,6 +149,22 @@ With only our own player running, the Quick Menu's music widget polls:
 memory other threads change. From 0.28 a getter's answer is only the rows
 the call itself wrote, and it's logged at most 5 times a second.
 
+### The USB Music Player is there
+
+On that PS4 the quick menu lists **USB Music Player** among the running
+apps; it's a system app (`NPXS20117` in GetPlayStatus's answer, it seems).
+With no core playing, the Music section shows only Spotify's "Sign in to
+PlayStation Network". So: play music from a USB drive in the USB Music
+Player with the watch loaded, and the log has a real core's answers.
+
+### The shell's own code (test app, DOWN)
+
+DOWN copies to `/data/ShellCompanion/ps4/shell/` every `.dll` with Music,
+ShellUI, QuickMenu, Spotify or Bgm in its name from the shell's folders and
+`/system/common/lib`, any `NPXS20117` `param.sfo`, and `list.txt`: every file
+seen, its size and its first bytes (`4D 5A`, "MZ", is a plain .NET
+assembly, which a decompiler reads with its structures' layouts).
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our
