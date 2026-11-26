@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.57"
+#define APP_VERSION "0.58"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -879,12 +879,21 @@ static void writeEbgm(void) {
     writeFile(SC_BGM_DIR "/ebgm/me_partner_profile.json", profile, sizeof(profile) - 1);
     // The shell reads views[], each view's "name" (the section's title) and
     // its "lists" (0.42's key log), each list's image_url, name and total
-    // (0.43's); and accounts_linked, which missing, had a playlist chosen open
-    // psnsint:psmusicshare, Spotify's linking page (0.44's).
+    // (0.43's); and accounts_linked (0.44's). The tile loads image_url +
+    // "&w=192&h=192" (0.57: a file:// address with that as a name stayed
+    // blank): five playlists, each its picture a way of its own, to see
+    // which is shown.
+#define PL(name, url)                                                                          \
+    "{\"name\":\"" name "\",\"uri\":\"spotify:user:shellcompanion:playlist:queue\","            \
+    "\"type\":\"playlist\",\"image_url\":\"" url "\",\"total\":2}"
+#define EBGM_URL "file:///user/data/ShellCompanion/ps4/ebgm/"
     static const char views[] =
         "{\"upgrade_scopes_required\":false,\"accounts_linked\":true,"
-        "\"views\":[{\"name\":\"Shell Companion\","
-        "\"section_title\":\"Shell Companion\",\"lists\":[" PLAYLIST_GUESS "]}]}\n";
+        "\"views\":[{\"name\":\"Shell Companion\",\"lists\":["
+        PL("A query", EBGM_URL "a.jpg?x=1") "," PL("B fragment", EBGM_URL "b.jpg#") ","
+        PL("C name", EBGM_URL "c") "," PL("D name.jpg", EBGM_URL "d.jpg") ","
+        PL("E path", "/user/data/ShellCompanion/ps4/ebgm/e.jpg?")
+        "]}]}\n";
     writeFile(SC_BGM_DIR "/ebgm/recommended_views.json", views, sizeof(views) - 1);
     // A track chosen reads its id and token (0.55: id missing; the login's
     // userName and oauth, it seems).
@@ -912,9 +921,15 @@ static void writeEbgm(void) {
     // The playlist's picture: this app's icon.
     copyFromPackage("sce_sys/icon0.png", SC_BGM_DIR "/ebgm/playlist.png");
     // The tile asks for image_url + "&w=192&h=192" (PlayListPanelItem.
-    // UpdatePlayList: string.Format("&w={0}&h={0}", 192f)): with a file://
-    // address, no ? in it, that is the file's name.
-    copyFromPackage("sce_sys/icon0.png", SC_BGM_DIR "/ebgm/playlist&w=192&h=192");
+    // UpdatePlayList: string.Format("&w={0}&h={0}", 192f)). The five tests'
+    // pictures, JPEG, as each would be looked for.
+    static const char* const pics[] = {"a.jpg", "b.jpg", "c&w=192&h=192", "d.jpg&w=192&h=192",
+                                       "e.jpg", "playlist&w=192&h=192"};
+    for (size_t i = 0; i < sizeof(pics) / sizeof(pics[0]); i++) {
+        char dest[160];
+        snprintf(dest, sizeof(dest), SC_BGM_DIR "/ebgm/%s", pics[i]);
+        copyFromPackage("playlist.jpg", dest);
+    }
 }
 
 // ---- the app ----

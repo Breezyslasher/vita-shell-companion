@@ -512,6 +512,17 @@ With a `file://` address and no `?` that is a file's name: from 0.57
 `image_url` is `file:///user/data/ShellCompanion/ps4/ebgm/playlist` and the
 picture is also written as `ebgm/playlist&w=192&h=192`.
 
+### The tile's picture, five ways (0.58)
+
+0.57's `file://…/ebgm/playlist` with `playlist&w=192&h=192` (a PNG) stayed
+blank. The tile's `ImageOptions` set `ImageFormat` 4, `Dxt5`: the texture it
+decodes into, not the file's type. 0.58 packs a 192-square JPEG
+(`ps4/app/playlist.jpg`, the icon) and gives five playlists, each its
+picture a way of its own: A `file://…/a.jpg?x=1` (the loader dropping the
+query), B `file://…/b.jpg#` (the fragment), C `file://…/c` (the name
+`c&w=192&h=192`), D `file://…/d.jpg` (the name `d.jpg&w=192&h=192`), E
+`/user/data/…/e.jpg?` (a path, no scheme).
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
