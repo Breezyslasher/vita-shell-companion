@@ -15,18 +15,89 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
-
-#include <orbis/Pad.h>
-#include <orbis/UserService.h>
-#include <orbis/VideoOut.h>
-#include <orbis/libkernel.h>
 
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
 #define APP_VERSION "0.1"
+
+// ---- the system's functions, declared here ----
+// Not from OpenOrbis's orbis/ headers, which differ between its versions
+// (the CI image's would not compile): only what is used, as the system has it.
+
+typedef void* OrbisKernelEqueue;
+typedef struct {
+    uint64_t ident;
+    int16_t filter;
+    uint16_t flags;
+    uint32_t fflags;
+    int64_t data;
+    void* udata;
+} OrbisKernelEvent;
+typedef struct {
+    uint64_t count, processTime, tsc;
+    int64_t flipArg;
+    uint64_t submitTsc, reserved0;
+    int32_t gpuPending, flipPending, currentBuffer;
+    uint32_t reserved1;
+} OrbisVideoOutFlipStatus;
+typedef struct {
+    uint8_t bytes[64];
+} __attribute__((aligned(8))) OrbisVideoOutBufferAttribute;
+typedef struct {
+    uint32_t buttons;  // the rest is sticks, touch and motion, unused here
+    uint8_t rest[252];
+} __attribute__((aligned(16))) OrbisPadData;
+typedef struct {
+    int32_t type, reqId, priority, msgId, targetId, userId, unk1, unk2, appId, errorNum, unk3;
+    uint8_t useIconImageUri;
+    char message[1024];
+    char iconUri[1024];
+    char unk[1024];
+} OrbisNotificationRequest;
+
+int sceKernelSendNotificationRequest(int device, OrbisNotificationRequest* req, size_t size,
+                                     int blocking);
+int sceKernelUsleep(unsigned int us);
+int sceKernelCreateEqueue(OrbisKernelEqueue* eq, const char* name);
+int sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev, int num, int* out,
+                        uint32_t* timeout);
+size_t sceKernelGetDirectMemorySize(void);
+int sceKernelAllocateDirectMemory(off_t start, off_t end, size_t len, size_t align, int type,
+                                  off_t* out);
+int sceKernelMapDirectMemory(void** addr, size_t len, int prot, int flags, off_t off,
+                             size_t align);
+int sceVideoOutOpen(int user, int bus, int index, const void* param);
+int sceVideoOutAddFlipEvent(OrbisKernelEqueue eq, int handle, void* udata);
+void sceVideoOutSetBufferAttribute(void* attr, unsigned pixelFormat, unsigned tiling,
+                                   unsigned aspect, unsigned width, unsigned height,
+                                   unsigned pitch);
+int sceVideoOutRegisterBuffers(int handle, int start, void* const* addrs, int num,
+                               const OrbisVideoOutBufferAttribute* attr);
+int sceVideoOutSetFlipRate(int handle, int rate);
+int sceVideoOutSubmitFlip(int handle, int buffer, unsigned mode, int64_t arg);
+int sceVideoOutGetFlipStatus(int handle, OrbisVideoOutFlipStatus* status);
+int sceUserServiceInitialize(const void* params);
+int sceUserServiceGetInitialUser(int* user);
+int scePadInit(void);
+int scePadOpen(int user, int type, int index, const void* param);
+int scePadReadState(int handle, OrbisPadData* data);
+
+#define ORBIS_VIDEO_USER_MAIN 0xFF
+#define ORBIS_VIDEO_OUT_BUS_MAIN 0
+#define ORBIS_VIDEO_OUT_FLIP_VSYNC 1
+#define ORBIS_PAD_BUTTON_OPTIONS 0x0008
+#define ORBIS_PAD_BUTTON_RIGHT 0x0020
+#define ORBIS_PAD_BUTTON_LEFT 0x0080
+#define ORBIS_PAD_BUTTON_L1 0x0400
+#define ORBIS_PAD_BUTTON_R1 0x0800
+#define ORBIS_PAD_BUTTON_TRIANGLE 0x1000
+#define ORBIS_PAD_BUTTON_CROSS 0x4000
+#define ORBIS_PAD_BUTTON_SQUARE 0x8000
 
 // ---- the module, built into the app ----
 
@@ -439,9 +510,8 @@ int main(void) {
         for (;;) sceKernelUsleep(1000000);
     }
 
-    OrbisUserServiceInitializeParams param;
-    param.priority = ORBIS_KERNEL_PRIO_FIFO_LOWEST;
-    sceUserServiceInitialize(&param);
+    const int32_t userParams[1] = {700};  // its thread priority, the default
+    sceUserServiceInitialize(userParams);
     int user = 0;
     sceUserServiceGetInitialUser(&user);
     scePadInit();
