@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.21"
+#define APP_VERSION "0.22"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -94,6 +94,7 @@ int scePadReadState(int handle, OrbisPadData* data);
 #define ORBIS_PAD_BUTTON_RIGHT 0x0020
 #define ORBIS_PAD_BUTTON_LEFT 0x0080
 #define ORBIS_PAD_BUTTON_L2 0x0100
+#define ORBIS_PAD_BUTTON_R2 0x0200
 #define ORBIS_PAD_BUTTON_L1 0x0400
 #define ORBIS_PAD_BUTTON_R1 0x0800
 #define ORBIS_PAD_BUTTON_TRIANGLE 0x1000
@@ -129,6 +130,9 @@ __attribute__((noinline)) static long sysCall(long num, long a, long b, long c) 
     return rax;
 }
 
+int sceKernelDlsym(int handle, const char* symbol, void** addr);
+int scePthreadCreate(void* thread, const void* attr, void* (*fn)(void*), void* arg,
+                     const char* name);
 int sceKernelLoadStartModule(const char* path, size_t args, const void* argp, uint32_t flags,
                              const void* opt, int* res);
 
@@ -694,7 +698,9 @@ static void draw(void) {
     y += LINE;
     text(x, y, FG, "OPTIONS  write a test tone into music/ again");
     y += LINE;
-    text(x, y, FG, "L2     try the PS4's own music service (quick menu test)");
+    text(x, y, FG, "L2     music service probe in the shell (reads it, calls nothing)");
+    y += LINE;
+    text(x, y, FG, "R2     try the PS4's own music service in this app (quick menu test)");
     y += LINE;
     text(x, y, DIM, "Leave with the PS button: the music should keep playing.");
     y += LINE * 2;
@@ -707,6 +713,162 @@ static void draw(void) {
 }
 
 // ---- the app ----
+
+// ---- the system music service, in this app's own process ----
+//
+// Inside the shell its Initialize crashed SceShellUI (0.20): the service is
+// a client of the system's music server (SceMusicCoreServer, NPXS21007),
+// and seems meant for an app or a game, as the Vita's music player is the
+// shell's own. So here it runs in this app, which is such a process: a
+// crash closes only the app. Every call is logged before it is made, and a
+// watchdog logs every 2 s the one still running. R2 starts it.
+
+typedef int32_t (*MpsInit)(void);
+typedef int32_t (*MpsInitPool)(size_t size, void* pool);
+typedef int32_t (*MpsSetList)(int32_t player, const void* tracks, uint32_t count);
+typedef int32_t (*MpsPlay)(int32_t player, uint32_t track, int64_t startS, int32_t flags);
+typedef int32_t (*MpsVoid)(void);
+typedef int32_t (*MpsStatus)(void* status);
+
+static const char* volatile g_mpsStep = "starting";
+static volatile int g_mpsDone, g_mpsRunning;
+
+static void mpsLog(const char* f, ...) __attribute__((format(printf, 1, 2)));
+static void mpsLog(const char* f, ...) {
+    char line[256];
+    va_list ap;
+    va_start(ap, f);
+    vsnprintf(line, sizeof(line), f, ap);
+    va_end(ap);
+    if (g_log) {
+        fprintf(g_log, "%llu [mps] %s\n", (unsigned long long)nowMs(), line);
+        fflush(g_log);
+    }
+}
+
+static void mpsStep(const char* what) {
+    g_mpsStep = what;
+    mpsLog("calling %s", what);
+}
+
+static void* mpsWatch(void* arg) {
+    (void)arg;
+    while (!g_mpsDone) {
+        sceKernelUsleep(2000000);
+        if (!g_mpsDone) mpsLog("  ... still in %s", g_mpsStep);
+    }
+    return NULL;
+}
+
+static void* mpsSym(int lib, const char* name) {
+    void* p = NULL;
+    const int rc = sceKernelDlsym(lib, name, &p);
+    mpsLog("  %s: %p (0x%08X)", name, p, (unsigned)rc);
+    return rc == 0 ? p : NULL;
+}
+
+static void* mpsProbe(void* arg) {
+    (void)arg;
+    static uint64_t watcher;
+    scePthreadCreate(&watcher, NULL, mpsWatch, NULL, "ScMpsWatch");
+    int res = 0;
+    mpsStep("load libSceMusicPlayerService");
+    int lib = sceKernelLoadStartModule("libSceMusicPlayerService.sprx", 0, NULL, 0, NULL, &res);
+    mpsLog("by name: 0x%08X", (unsigned)lib);
+    if (lib < 0) {
+        lib = sceKernelLoadStartModule("/system/common/lib/libSceMusicPlayerService.sprx", 0,
+                                       NULL, 0, NULL, &res);
+        mpsLog("by /system path: 0x%08X", (unsigned)lib);
+    }
+    if (lib < 0) {
+        say("Music service: its library would not load (0x%08X)", (unsigned)lib);
+        g_mpsDone = 1;
+        g_mpsRunning = 0;
+        return NULL;
+    }
+    MpsInit init = (MpsInit)mpsSym(lib, "sceMusicPlayerServiceInitialize");
+    MpsInitPool init3 = (MpsInitPool)mpsSym(lib, "sceMusicPlayerServiceInitialize3");
+    MpsSetList setList = (MpsSetList)mpsSym(lib, "sceMusicPlayerServiceSetTrackList");
+    MpsPlay play = (MpsPlay)mpsSym(lib, "sceMusicPlayerServicePlay");
+    MpsStatus ext = (MpsStatus)mpsSym(lib, "sceMusicPlayerServiceGetPlayStatusExtension");
+
+    // Initialize takes no arguments (read from the library, 0.21).
+    int32_t rc = -1;
+    if (init) {
+        mpsStep("Initialize()");
+        rc = init();
+        mpsLog("Initialize: 0x%08X", (unsigned)rc);
+    }
+    if (rc < 0 && init3) {
+        static void* pool;
+        if (!pool && posix_memalign(&pool, 0x4000, 4u << 20) != 0) pool = NULL;
+        if (pool) {
+            mpsStep("Initialize3(4 MB pool)");
+            rc = init3(4u << 20, pool);
+            mpsLog("Initialize3: 0x%08X", (unsigned)rc);
+        }
+    }
+    if (rc < 0 && (uint32_t)rc != 0x812F0002u) {
+        say("Music service: it would not initialise (0x%08X)", (unsigned)rc);
+        g_mpsDone = 1;
+        g_mpsRunning = 0;
+        return NULL;
+    }
+    say("Music service initialised in this app (0x%08X)", (unsigned)rc);
+
+    // The track: yoursong.mp3, else the test tone, as a path.
+    const char* path = SC_BGM_MUSIC "/" YOUR_SONG;
+    if (access(path, R_OK) != 0) path = SC_BGM_MUSIC "/test-tone.wav";
+    static uint8_t entries[0xC2F * 2];
+    memset(entries, 0, sizeof(entries));
+    strncpy((char*)entries, path, 0xC2E);
+    strncpy((char*)entries + 0xC2F, path, 0xC2E);
+    if (setList) {
+        mpsStep("SetTrackList(0, 2 entries of 0xC2F)");
+        rc = setList(0, entries, 2);
+        mpsLog("SetTrackList: 0x%08X", (unsigned)rc);
+    }
+    if (play && rc >= 0) {
+        mpsStep("Play(0, 0, 0, 0)");
+        rc = play(0, 0, 0, 0);
+        mpsLog("Play: 0x%08X", (unsigned)rc);
+    }
+    struct {
+        uint64_t size;
+        uint32_t errorCode, playState;
+        uint64_t totalS, currentS;
+        uint32_t list, track, playIndex, count, volume, repeat, shuffle, noNext, noPrev, loading;
+    } st;
+    for (int i = 0; i < 40 && ext; i++) {
+        sceKernelUsleep(1000000);
+        memset(&st, 0, sizeof(st));
+        st.size = sizeof(st);
+        mpsStep("GetPlayStatusExtension");
+        const int32_t r = ext(&st);
+        mpsLog("  %2d s: 0x%08X state %u, %llu/%llu s, track %u of %u, loading %u", i,
+               (unsigned)r, st.playState, (unsigned long long)st.currentS,
+               (unsigned long long)st.totalS, st.track, st.count, st.loading);
+    }
+    mpsLog("done");
+    say("Music service test done: open the quick menu, then send app.log");
+    g_mpsDone = 1;
+    g_mpsRunning = 0;
+    return NULL;
+}
+
+static void startMusicService(void) {
+    if (g_mpsRunning) return;
+    g_mpsRunning = 1;
+    g_mpsDone = 0;
+    sendCommand("stop\n");  // our shell player quiet, so only the service is heard
+    static uint64_t thread;
+    if (scePthreadCreate(&thread, NULL, mpsProbe, NULL, "ScMps") != 0) {
+        g_mpsRunning = 0;
+        say("Music service: its thread would not start");
+    } else {
+        say("Music service test in this app: watch, then hold PS for the quick menu");
+    }
+}
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -784,6 +946,7 @@ int main(void) {
             sendCommand("reload\nplay\n");
             say("Port type %d: restarting the queue", g_portType);
         }
+        if (down & ORBIS_PAD_BUTTON_R2) startMusicService();
         if (down & ORBIS_PAD_BUTTON_L2) {
             // The music service probe (ps4/mps), into the shell: our player
             // stopped first, so that only the service is heard.
