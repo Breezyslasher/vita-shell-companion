@@ -23,6 +23,29 @@ Its files are in `/user/data/ShellCompanion/ps4/` (the same folder as
 `/user/data/GoldHEN/plugins/sc_bgm.prx` and loaded with GoldHEN's
 `PROCESS_PRX_LOAD` (system call 500, command 6).
 
+### One module, and the cleanup (0.95)
+
+- **One module, `sc_companion.prx`:** `ps4/companion.c` starts the player
+  (`bgmStart`) and the music watch (`mcwStart`). `ps4/bgm/build.sh` builds
+  it from `bgm.c`, `mcw.c`, `hook.c`, `hde64.c` and `mp3.c`. The client
+  library loads it when neither half answers, and asks for a restart when
+  only one does (an older pair of modules from earlier in the boot).
+- **Debugging aids only with `SC_DEBUG=1`:** the code dump, the assembly
+  carver, the download service's logging hooks and the media experiment.
+- **The watch logs each call only with `mcw-verbose`** (before, always
+  unless `mcw.quiet`).
+- **Gone:** the music service probe (`ps4/mps`), the raw loader
+  (`ps4/bgm/load.c`, `raw.x`), the early probes (`ps4/probe/*_probe.c` and
+  their build), the test package's extra modules (`recipe/`, `control/`)
+  and playlist picture.
+- **The test app:** the old ways of loading, the shell code dump, the music
+  service test, the audio port switch (`port.txt` is removed; the player
+  falls back to type 0) and the experiment's button are gone.
+- **CI's PS4 job** builds the module and the test app only.
+
+The notes below record what each version found, and name files that have
+since gone.
+
 ### Trying it with the test app (easiest)
 
 The test app needs no BinLoader. Install

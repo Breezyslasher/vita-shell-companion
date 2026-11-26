@@ -1,7 +1,7 @@
 /**
  * Shell Companion's PS4 client: what an app (an OpenOrbis homebrew, with
- * GoldHEN) links to hand its music to the shell. The player (sc_bgm.prx) and
- * the music watch (sc_mcw.prx) are loaded into SceShellUI; the player plays
+ * GoldHEN) links to hand its music to the shell. The player and the music
+ * watch (one module, sc_companion.prx) are loaded into SceShellUI; the player plays
  * the app's queue, local files or streams by URL, after the app has closed,
  * and the quick menu's Music section shows it, as the Vita client
  * (vita/client) does for the Vita's shell. ps4/README.md, "Client library".
@@ -41,11 +41,11 @@ extern "C" {
 // missing.
 int scInit(const char* titleId, const char* name);
 
-// The player and the music watch in SceShellUI: each loaded unless it is
-// there already (its heartbeat less than 3 s old; a module loads once a
-// boot, and a second copy would hook the shell twice). The modules are taken
-// from the app's package (sc_bgm.prx and sc_mcw.prx at its root), else from
-// /data/GoldHEN/plugins/, copied there and loaded with GoldHEN's
+// The player and the music watch in SceShellUI: Shell Companion's module,
+// sc_companion.prx, loaded unless it is there already (their heartbeats less
+// than 3 s old; a module loads once a boot, and a second copy would play and
+// hook the shell twice). It is taken from the app's package (at its root),
+// else from /data/GoldHEN/plugins/, copied there and loaded with GoldHEN's
 // PROCESS_PRX_LOAD. Jailbreaks the app first (GoldHEN) if /data cannot be
 // written. 0 when both run; else -1, what happened in what, for a log.
 int scOpen(char* what, size_t size);

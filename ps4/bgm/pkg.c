@@ -414,6 +414,7 @@ static int pkgItem(int i) {
     return rc == 0 ? GET_DONE : rc == 1 ? GET_STOPPED : GET_RETRY;
 }
 
+#ifdef SC_DEBUG  // the experiment: SC_DEBUG builds only (0.95)
 // ── An experiment: media through the service (0.90) ─────────────────────────
 //
 // The service has task subtypes for photos, music and video besides
@@ -748,3 +749,4 @@ static void probeStart(void) {
     running = 1;
     if (threadStart(probeMain, NULL, "ScBgmProbe") < 0) running = 0;
 }
+#endif  // SC_DEBUG

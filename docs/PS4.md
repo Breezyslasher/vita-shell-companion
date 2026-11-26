@@ -50,9 +50,9 @@ editing the queue. It's the PS4 counterpart of the Vita plugin; the
 - A PS4 with **GoldHEN** (tested: 2.4b18 on 11.50).
 - The app is an OpenOrbis homebrew. It must be able to use GoldHEN's
   jailbreak (`scOpen` calls it if `/data` can't be written).
-- The app's package carries **`sc_bgm.prx`** (the player) and
-  **`sc_mcw.prx`** (the music watch) at its root. `ps4/app/build.sh` builds
-  both and shows how they go in a package.
+- The app's package carries **`sc_companion.prx`** (the player and the
+  music watch, one module) at its root. `ps4/bgm/build.sh` builds it, and
+  `ps4/app/build.sh` shows how it goes in a package.
 
 ## Using it in an app
 
@@ -92,7 +92,7 @@ scMusicPlay();
 | Call | What it does |
 |---|---|
 | `scInit(titleId, name)` | Once, first. |
-| `scOpen(what, size)` | Loads the player and the watch into SceShellUI, each only if its heartbeat is over 3 s old (a module loads once a boot; a second copy would hook the shell twice). The modules are copied from the package to `/data/GoldHEN/plugins/` and loaded with GoldHEN's `PROCESS_PRX_LOAD`. 0 when both run. |
+| `scOpen(what, size)` | Loads `sc_companion.prx` into SceShellUI unless the player and the watch answer already (a module loads once a boot; a second copy would play and hook the shell twice). It is copied from the package to `/data/GoldHEN/plugins/` and loaded with GoldHEN's `PROCESS_PRX_LOAD`. 0 when both run. |
 | `scPlayerRunning()`, `scWatchRunning()` | 1 if that module answers. |
 | `scWriteQueue(&queue, tracks, count)` | The queue, up to 10,000 tracks, and where to begin. |
 | `scMusicPlay()` | The shell loads the queue and plays it. |
@@ -210,10 +210,10 @@ Switches (an empty file of that name in the folder):
 
 | File | |
 |---|---|
+| `mcw-verbose` | log every call the music watch sees (mcw.log grows fast) |
 | `mcw-norowart` | no covers beside tracks |
 | `mcw-noqueuekeys` | no □/△ in track lists |
 | `https-noverify` | streams and downloads accept any HTTPS certificate |
-| `mcw-bgftlog`, `mcw-bgftprogress` | log the Downloads list's calls (testing only: crashed the shell with a download going) |
 
 ## Limits
 
@@ -243,6 +243,13 @@ CI as a package:
   `test-downloads.txt`, a `.pkg` among them going to the PS4's service).
 - **L3** installs the package named in `test-update.txt` as a self-update,
   then closes the app.
+- **□ ⏯, △ stop, L1/R1 previous/next, R3** the quick menu's answers on or
+  off, **OPTIONS** writes the test tone again.
+
+`SC_DEBUG=1 sh ps4/bgm/build.sh` builds the debugging aids in: the shell
+code dump, the assembly carver (`mcw.carve`), logging the Downloads list's
+calls (`mcw-bgftlog`, `mcw-bgftprogress`; these crashed the shell with a
+download going) and the media experiment (`bgft_probe`).
 
 Restart the PS4 after installing a new version: the modules load once a
 boot.

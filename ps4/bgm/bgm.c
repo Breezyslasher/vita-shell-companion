@@ -1,6 +1,7 @@
 /**
- * Background music for the PS4: a module GoldHEN loads into SceShellUI
- * (load.c asks it to), which plays a queue of MP3 and WAV files on the
+ * Background music for the PS4: the player half of Shell Companion's module
+ * (sc_companion.prx, with the music watch, ps4/mcw), loaded into SceShellUI
+ * by the client library (ps4/client), which plays a queue of MP3 and WAV files on the
  * shell's own audio output, so that it goes on while games run, as the Vita
  * plugin's queue plays on through SceShell's music service.
  *
@@ -11,7 +12,8 @@
  *               .mp3 and .wav in music/, by name
  *   cmd         commands, one a line, read and removed: play, pause, toggle, next,
  *               prev, stop, reload, quit
- *   port.txt    the audio port type, if not MAIN (0): 1 BGM, 14, ...
+ *   port.txt    the audio port type, if not MAIN (0); one that fails falls
+ *               back to 0, the only one that works in the shell
  *   status.txt  written each second: state, track, position, and a
  *               heartbeat that tells the loader a player is running
  *
@@ -1872,9 +1874,11 @@ static void runCommand(const char* text, int n) {
         int lib = 0;
         for (int i = save ? 10 : 12; i < n && text[i] >= '0' && text[i] <= '9'; i++) lib = lib * 10 + (text[i] - '0');
         plusPressed(save, lib);
+#ifdef SC_DEBUG
     } else if (IS("bgft_probe")) {
         // An experiment (0.90): media through the PS4's download service.
         probeStart();
+#endif
     } else if (IS("update_start")) {
         // An app's own update, once it has gone (the client library's
         // scUpdateInstallPkg, 0.89): pkg.c.
@@ -2113,11 +2117,18 @@ static void* begin(void* arg) {
     return player(arg);
 }
 
+// The player's start: its thread (the one module, sc_companion.prx, calls
+// it with the watch's, ps4/companion.c).
+void bgmStart(void) {
+    const int rc = threadStart(begin, NULL, "ScBgm");
+    if (rc < 0) notify("Background music: its thread would not start (0x%08X)", (unsigned)rc);
+}
+
+#ifndef SC_COMPANION
 __attribute__((visibility("default"))) int module_start(size_t args, const void* argp) {
     (void)args;
     (void)argp;
-    const int rc = threadStart(begin, NULL, "ScBgm");
-    if (rc < 0) notify("Background music: its thread would not start (0x%08X)", (unsigned)rc);
+    bgmStart();
     return 0;
 }
 
@@ -2126,3 +2137,4 @@ __attribute__((visibility("default"))) int module_stop(size_t args, const void* 
     (void)argp;
     return 0;
 }
+#endif

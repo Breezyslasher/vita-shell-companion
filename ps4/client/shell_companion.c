@@ -267,16 +267,27 @@ int scOpen(char* what, size_t size) {
     }
     writeEbgm();
     writeUser();
+    // One module, the player and the watch both (sc_companion.prx, 0.95):
+    // loaded when neither answers.
+    const int player = scPlayerRunning(), watch = scWatchRunning();
+    if (player && watch) {
+        note(what, size, "Shell Companion was there.");
+        return 0;
+    }
+    if (player || watch) {
+        // One of them only: an older Shell Companion (two modules) loaded
+        // earlier this boot; a new one now would play or hook twice.
+        note(what, size, "An older Shell Companion is running (%s only): restart the PS4.",
+             player ? "the player" : "the music watch");
+        return -1;
+    }
     int rc = 0;
-    if (scPlayerRunning()) {
-        note(what, size, "The player was there.");
-    } else if (loadModule("sc_bgm.prx", what, size) != 0 || !waitFor(scPlayerRunning, 3000)) {
+    if (loadModule("sc_companion.prx", what, size) != 0) return -1;
+    if (!waitFor(scPlayerRunning, 3000)) {
         note(what, size, "The player does not answer.");
         rc = -1;
     }
-    if (scWatchRunning()) {
-        note(what, size, "The music watch was there.");
-    } else if (loadModule("sc_mcw.prx", what, size) != 0 || !waitFor(scWatchRunning, 5000)) {
+    if (!waitFor(scWatchRunning, 5000)) {
         note(what, size, "The music watch does not answer (the Music section will not show the queue).");
         rc = -1;
     }

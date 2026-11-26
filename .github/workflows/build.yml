@@ -44,8 +44,8 @@ jobs:
             LICENSE
             NOTICE.txt
 
-  ps4-probes:
-    name: PS4 probes
+  ps4:
+    name: PS4 module and test app
     runs-on: ubuntu-latest
     container:
       image: openorbisofficial/toolchain:latest
@@ -75,19 +75,17 @@ jobs:
           tar -xzf "$RUNNER_TEMP/oo-goldhen.tar.gz" -C "$RUNNER_TEMP/oo-goldhen"
           rm "$RUNNER_TEMP/oo-goldhen.tar.gz"
           ls "$RUNNER_TEMP/oo-goldhen/OpenOrbis/PS4Toolchain/bin/linux"
-      - name: Build
-        run: sh ps4/probe/build.sh
-      - name: Build background music and the test app (GoldHEN's toolchain)
+      - name: Build the module and the test app (GoldHEN's toolchain)
         run: |
           export OO_PS4_TOOLCHAIN="$RUNNER_TEMP/oo-goldhen/OpenOrbis/PS4Toolchain"
           export CREATE_FSELF="$OO_PS4_TOOLCHAIN/bin/linux/create-fself"
           sh ps4/app/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: ps4-probes-${{ github.run_number }}
+          name: ps4-${{ github.run_number }}
           path: |
             build-ps4/*.pkg
-            build-ps4/*.bin
             build-ps4/*.prx
+            docs/PS4.md
             ps4/README.md
             NOTICE.txt

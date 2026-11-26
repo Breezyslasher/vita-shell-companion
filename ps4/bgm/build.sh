@@ -1,78 +1,51 @@
 #!/bin/sh
-# Builds the PS4 background music: sc_bgm.prx, the module that plays inside
-# SceShellUI, and sc_bgm.bin, the raw payload for GoldHEN's BinLoader that
-# has it loaded. With the OpenOrbis toolchain (OO_PS4_TOOLCHAIN) and
-# create-fself (ps4/probe/get_create_fself.sh), from the repository's root:
+# Builds Shell Companion's PS4 module, sc_companion.prx: the player (ps4/bgm)
+# and the music watch (ps4/mcw) in one module, loaded into SceShellUI once a
+# boot by the client library (ps4/client). With the OpenOrbis toolchain
+# (OO_PS4_TOOLCHAIN) and create-fself (ps4/probe/get_create_fself.sh), from
+# the repository's root:
 #
 #   docker run --rm --user 0 -v "$PWD":/src -w /src openorbisofficial/toolchain:latest sh ps4/bgm/build.sh
+#
+# A .prx, which the system's loader relocates, inside the shell. With unwind
+# tables, as OpenOrbis builds everything: without them the module had no
+# PT_GNU_EH_FRAME, and the PS4 refused it as not executable (ENOEXEC). Its
+# LOAD segments on 16 KB pages, as GoldHEN's own plugins.
+#
+# SC_DEBUG=1 builds the debugging aids in too (ps4/README.md, "Debugging").
 set -eu
 OO=${OO_PS4_TOOLCHAIN:?OO_PS4_TOOLCHAIN is not set}
 SRC=$(dirname "$0")
 RT=$SRC/../probe
 OUT=${OUT:-build-ps4}
 mkdir -p "$OUT"
+DEBUG=""
+[ "${SC_DEBUG:-0}" = 1 ] && DEBUG="-DSC_DEBUG"
 CFLAGS="--target=x86_64-pc-freebsd12-elf -fPIC -fvisibility=hidden -ffreestanding -fno-builtin
-        -fno-stack-protector -fno-jump-tables -O2 -isystem $OO/include"
+        -fno-stack-protector -fno-jump-tables -O2 -isystem $OO/include -DSC_PRX -DSC_COMPANION $DEBUG"
 WARN="-Wall -Wextra -Werror"
-# The module: a .prx, which the system's loader relocates, inside the shell.
-# With unwind tables, as OpenOrbis builds everything: without them the
-# module had no PT_GNU_EH_FRAME, and the PS4 refused it as not executable
-# (ENOEXEC) where it loaded OpenOrbis's own modules.
 MODFLAGS="-funwind-tables -fasynchronous-unwind-tables"
-clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$RT/prx_crt.c" -o "$OUT/bgm_crt.o"
-clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$RT/sys.c" -o "$OUT/bgm_sys.o"
-clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$SRC/bgm.c" -o "$OUT/bgm.o"
-clang $CFLAGS $MODFLAGS -w -DSC_PRX -c "$SRC/mp3.c" -o "$OUT/bgm_mp3.o"  # minimp3, as it is
-# 16 KB pages (-z max-page-size, common-page-size), as both projects that
-# load a module into SceShellUI link theirs (j117mw3/ps4-hen-rest, with
-# lld 18 too, and Zenalios/ps4-thumbgrid-ime): lld's default, 4 KB, left
-# the read-only segment at 0x9510, and the PS4 refused the module
-# (ENOEXEC) where it loaded OpenOrbis's own.
+clang $CFLAGS $MODFLAGS $WARN -c "$RT/prx_crt.c" -o "$OUT/sc_crt.o"
+clang $CFLAGS $MODFLAGS $WARN -c "$RT/sys.c" -o "$OUT/sc_sys.o"
+clang $CFLAGS $MODFLAGS $WARN -c "$SRC/../companion.c" -o "$OUT/sc_companion.o"
+clang $CFLAGS $MODFLAGS $WARN -c "$SRC/bgm.c" -o "$OUT/bgm.o"
+clang $CFLAGS $MODFLAGS -w -c "$SRC/mp3.c" -o "$OUT/bgm_mp3.o"  # minimp3, as it is
+clang $CFLAGS $MODFLAGS $WARN -c "$SRC/../mcw/mcw.c" -o "$OUT/mcw.o"
+clang $CFLAGS $MODFLAGS $WARN -c "$SRC/../mcw/hook.c" -o "$OUT/mcw_hook.o"
+clang $CFLAGS $MODFLAGS -w -c "$SRC/../mcw/hde64.c" -o "$OUT/mcw_hde64.o"
 PAGES="-z max-page-size=0x4000 -z common-page-size=0x4000"
 ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init $PAGES \
-    -o "$OUT/sc_bgm.elf" "$OUT/bgm_crt.o" "$OUT/bgm_sys.o" "$OUT/bgm.o" "$OUT/bgm_mp3.o" \
-    -L"$OO/lib" -lkernel -lSceAudioOut
+    -o "$OUT/sc_companion.elf" "$OUT/sc_crt.o" "$OUT/sc_sys.o" "$OUT/sc_companion.o" "$OUT/bgm.o" \
+    "$OUT/bgm_mp3.o" "$OUT/mcw.o" "$OUT/mcw_hook.o" "$OUT/mcw_hde64.o" -L"$OO/lib" -lkernel -lSceAudioOut
 CREATE_FSELF=${CREATE_FSELF:-$OUT/create-fself}
-"$CREATE_FSELF" -in="$OUT/sc_bgm.elf" -out="$OUT/sc_bgm.oelf" \
-    --lib="$OUT/sc_bgm.prx" --paid 0x3800000000000011
-# The music service probe (ps4/mps/mps.c): a second module for the shell,
-# built the same way.
-clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$SRC/../mps/mps.c" -o "$OUT/mps.o"
-ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init $PAGES \
-    -o "$OUT/sc_mps.elf" "$OUT/bgm_crt.o" "$OUT/bgm_sys.o" "$OUT/mps.o" -L"$OO/lib" -lkernel
-"$CREATE_FSELF" -in="$OUT/sc_mps.elf" -out="$OUT/sc_mps.oelf" \
-    --lib="$OUT/sc_mps.prx" --paid 0x3800000000000011
-# The music watch (ps4/mcw): a third module for the shell, which hooks the
-# shell's calls to the music server and logs them. HDE64 as it is.
-clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$SRC/../mcw/mcw.c" -o "$OUT/mcw.o"
-clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$SRC/../mcw/hook.c" -o "$OUT/mcw_hook.o"
-clang $CFLAGS $MODFLAGS -w -DSC_PRX -c "$SRC/../mcw/hde64.c" -o "$OUT/mcw_hde64.o"
-ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init $PAGES \
-    -o "$OUT/sc_mcw.elf" "$OUT/bgm_crt.o" "$OUT/bgm_sys.o" "$OUT/mcw.o" "$OUT/mcw_hook.o" \
-    "$OUT/mcw_hde64.o" -L"$OO/lib" -lkernel
-"$CREATE_FSELF" -in="$OUT/sc_mcw.elf" -out="$OUT/sc_mcw.oelf" \
-    --lib="$OUT/sc_mcw.prx" --paid 0x3800000000000011
-# The loader: a raw payload, the module inside it.
-clang $CFLAGS $WARN -c "$RT/sys.c" -o "$OUT/bgm_load_sys.o"
-clang $CFLAGS $WARN "-DSC_PRX_PATH=\"$OUT/sc_bgm.prx\"" -c "$SRC/load.c" -o "$OUT/bgm_load.o"
-ld.lld -m elf_x86_64 -pie --script "$RT/raw.x" -e _start \
-    -o "$OUT/sc_bgm_raw.elf" "$OUT/bgm_load_sys.o" "$OUT/bgm_load.o"
-if objdump -h "$OUT/sc_bgm_raw.elf" | grep -q '\.rela\.dyn'; then
-    echo "bgm: the raw payload has relocations: a pointer kept in data" >&2
+"$CREATE_FSELF" -in="$OUT/sc_companion.elf" -out="$OUT/sc_companion.oelf" \
+    --lib="$OUT/sc_companion.prx" --paid 0x3800000000000011
+if ! objdump -p "$OUT/sc_companion.elf" | grep -q EH_FRAME; then
+    echo "sc_companion.elf has no PT_GNU_EH_FRAME" >&2
     exit 1
 fi
-objcopy --set-section-flags .bss=alloc,load,contents -O binary -R .rela.dyn \
-    "$OUT/sc_bgm_raw.elf" "$OUT/sc_bgm.bin"
-for e in sc_bgm sc_mps sc_mcw; do
-    if ! objdump -p "$OUT/$e.elf" | grep -q EH_FRAME; then  # GNU objdump: the image's readelf prints nothing
-        echo "bgm: $e.elf has no PT_GNU_EH_FRAME" >&2
-        exit 1
-    fi
-    # Every LOAD segment aligned to 16 KB pages (where the segments start
-    # is link.x's, as in the projects above).
-    if objdump -p "$OUT/$e.elf" | grep LOAD | grep -qv 'align 2\*\*14'; then
-        echo "bgm: $e.elf has a LOAD segment not aligned to 16 KB" >&2
-        exit 1
-    fi
-done
-ls -l "$OUT"/sc_bgm*.prx "$OUT/sc_bgm.bin"
+if objdump -p "$OUT/sc_companion.elf" | grep LOAD | grep -qv 'align 2\*\*14'; then
+    echo "sc_companion.elf has a LOAD segment not aligned to 16 KB" >&2
+    exit 1
+fi
+ls -l "$OUT/sc_companion.prx"

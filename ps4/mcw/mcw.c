@@ -2251,6 +2251,7 @@ static struct {
     FnMonoFieldName className;
 } g_dump;
 
+#ifdef SC_DEBUG  // the code dump (0.49): SC_DEBUG builds only (0.95)
 static int dumpPut(int fd, const char* f, ...) __attribute__((format(printf, 2, 3)));
 static int dumpPut(int fd, const char* f, ...) {
     char line[700];
@@ -2462,6 +2463,8 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
     notify("Music watch: the Music section's code is in ShellCompanion/ps4/code");
 }
 
+#endif  // SC_DEBUG
+
 static void monoHooks(void) {
     g_forceApp = sysExists(EBGM_DIR);
     int mono = -1;
@@ -2609,7 +2612,11 @@ static void monoHooks(void) {
     // download going, Notifications > Downloads crashed the shell under
     // 0.85's hooks. mcw-bgftlog for all but DownloadGetProgress, which
     // aligns its stack for AVX; mcw-bgftprogress for that one too.
+#ifdef SC_DEBUG
     const int bgftLogOn = sysExists(SC_BGM_DIR "/mcw-bgftlog") || sysExists(SC_BGM_DIR "/mcw-bgftprogress");
+#else
+    const int bgftLogOn = 0;  // SC_DEBUG builds only (0.95)
+#endif
     const int bgftProgressOn = sysExists(SC_BGM_DIR "/mcw-bgftprogress");
     say("bgft: logging %s", bgftProgressOn ? "on, DownloadGetProgress too" : bgftLogOn ? "on, not DownloadGetProgress"
                                                                                        : "off (mcw-bgftlog, mcw-bgftprogress)");
@@ -2665,7 +2672,11 @@ static void monoHooks(void) {
         drain();
     }
     drain();
+#ifdef SC_DEBUG
     codeDump(domain, imageLoaded, classFromName, compile);
+#else
+    (void)compile;
+#endif
     drain();
     if (detach) ((FnMonoDetach)detach)(thread);
     say("mono: this thread detached; IsValidAppVer %s", g_forceApp ? "answered true (ebgm/ is there)" : "only logged");
@@ -2791,6 +2802,7 @@ void mcwPost(Frame* f) {
     }
 }
 
+#ifdef SC_DEBUG  // the assemblies carved from memory (mcw.carve): SC_DEBUG builds only (0.95)
 // ── The shell's .NET assemblies, from its memory ─────────────────────────────
 //
 // On disk they are signed executables (.dll.sprx, encrypted); the shell runs
@@ -2978,6 +2990,8 @@ static void carve(void) {
     drain();
 }
 
+#endif  // SC_DEBUG
+
 // ── Finding the functions ────────────────────────────────────────────────────
 
 static int contains(const char* s, const char* part) {
@@ -3160,6 +3174,7 @@ static void* watchMain(void* arg) {
     char fw[64];
     firmware(fw, sizeof(fw));
     say("music watch: inside the shell, firmware %s", fw);
+    g_quiet = !sysExists(SC_BGM_DIR "/mcw-verbose");
     drain();
     if (sysExists(SC_BGM_DIR "/mcw.off")) {
         say("mcw.off is there: nothing hooked");
@@ -3211,11 +3226,15 @@ static void* watchMain(void* arg) {
         }
         if (now - lastSummary >= 10000000u) {
             lastSummary = now;
-            g_quiet = sysExists(SC_BGM_DIR "/mcw.quiet");
+            // Each call logged only with mcw-verbose (0.95: always unless
+            // mcw.quiet before; mcw.log grew by megabytes).
+            g_quiet = !sysExists(SC_BGM_DIR "/mcw-verbose");
+#ifdef SC_DEBUG
             if (sysExists(SC_BGM_DIR "/mcw.carve")) {
                 sysUnlink(SC_BGM_DIR "/mcw.carve");
                 carve();
             }
+#endif
             if (!g_quiet) {
                 char line[512];
                 int n = 0;
@@ -3234,10 +3253,16 @@ static void* watchMain(void* arg) {
     return NULL;
 }
 
+// The watch's start: its thread (ps4/companion.c).
+void mcwStart(void) {
+    threadStart(watchMain, NULL, "ScMcw");
+}
+
+#ifndef SC_COMPANION
 __attribute__((visibility("default"))) int module_start(size_t args, const void* argp) {
     (void)args;
     (void)argp;
-    threadStart(watchMain, NULL, "ScMcw");
+    mcwStart();
     return 0;
 }
 
@@ -3246,3 +3271,4 @@ __attribute__((visibility("default"))) int module_stop(size_t args, const void* 
     (void)argp;
     return 0;
 }
+#endif

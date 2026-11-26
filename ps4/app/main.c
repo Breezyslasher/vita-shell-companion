@@ -24,7 +24,7 @@
 #include "../client/shell_companion.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.94"
+#define APP_VERSION "0.95"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -107,19 +107,6 @@ int scePadReadState(int handle, OrbisPadData* data);
 #define ORBIS_PAD_BUTTON_CROSS 0x4000
 #define ORBIS_PAD_BUTTON_SQUARE 0x8000
 
-// ---- the module, built into the app ----
-
-__asm__(".section .rodata\n"
-        ".balign 16\n"
-        ".global g_prxStart\n"
-        "g_prxStart:\n"
-        ".incbin \"" SC_PRX_PATH "\"\n"
-        ".global g_prxEnd\n"
-        "g_prxEnd:\n"
-        ".text\n");
-extern const uint8_t g_prxStart[];
-extern const uint8_t g_prxEnd[];
-
 // ---- system calls: GoldHEN's (500) and the clock the module uses ----
 
 // The fourth argument (r10) is 0, as sys_dynlib_load_prx takes four:
@@ -161,12 +148,6 @@ struct JailbreakBackup {
     void* prison;
     void *cdir, *jdir, *rdir;
 };  // the SDK's jailbreak_backup
-
-struct ProcPrxLoad {
-    char processName[32];
-    char prxPath[100];
-    uint64_t res;
-} __attribute__((packed));  // the SDK's proc_prx_load
 
 // ---- the log, and the message shown at the bottom ----
 
@@ -449,297 +430,19 @@ static void readStatus(void) {
 
 // ---- loading the module into the shell ----
 
-// GoldHEN's PROCESS_PRX_LOAD into SceShellUI, the path as the shell sees
-// it: 1 if it loaded.
-static int processLoad(const char* process, const char* path) {
-    static struct ProcPrxLoad args;
-    memset(&args, 0, sizeof(args));
-    strncpy(args.processName, process, sizeof(args.processName) - 1);
-    strncpy(args.prxPath, path, sizeof(args.prxPath) - 1);
-    args.res = ~0ULL;  // as ps4-hen-rest sets it
-    const long rc = sysCall(500, 6 /* PROCESS_PRX_LOAD */, (long)&args, 0);
-    const int ok = rc == 0 && (int32_t)args.res >= 0;
-    say("%s load %s: 0x%lX, result 0x%lX%s", process, path, (unsigned long)rc,
-        (unsigned long)args.res, ok ? " - loaded" : "");
-    return ok;
-}
-
-static int shellLoad(const char* path) {
-    return processLoad("SceShellUI", path);
-}
-
-static int g_loadedFrom = -1;
-
-// Loads path into this app, not started (sys_dynlib_load_prx), and
-// unloads it: logged.
-static int selfLoad(const char* path) {
-    int handle = 0;
-    const long rc = sysCall(594, (long)path, 0, (long)&handle);
-    say("Load into this app (not started) %s: 0x%lX, handle 0x%X", path, (unsigned long)rc,
-        handle);
-    if (rc == 0 && handle > 0) sysCall(595 /* sys_dynlib_unload_prx */, handle, 0, 0);
-    return rc == 0;
-}
-
 #ifndef SC_TITLE_ID
 #define SC_TITLE_ID "SCMP00001"
 #endif
-#define PKG_DIR "/mnt/sandbox/pfsmnt/" SC_TITLE_ID "-app0"
-#define SHELL_SANDBOX "/mnt/sandbox/NPXS20001_000"
 
-// The module in the package (ps4/bgm/build.sh), and whether it loads into
-// this app: 0, or -1.
-static const char* const g_builds[1] = {"sc_bgm.prx"};
-static int g_build = -1;
-
-__attribute__((unused)) static void findBuild(void) {
-    if (g_build >= 0) return;
-    for (int i = 0; i < 1; i++) {
-        char path[160];
-        snprintf(path, sizeof(path), PKG_DIR "/%s", g_builds[i]);
-        if (selfLoad(path)) {
-            g_build = i;
-            say("Build %s loads", g_builds[i]);
-            return;
-        }
-    }
-    say("No build of the module loads into this app");
-}
-
-// What the shell's sandbox holds, two levels down: where it might load from.
-__attribute__((unused)) static void listShellSandbox(void) {
-    static int done;
-    if (done || !g_log) return;
-    done = 1;
-    DIR* d = opendir(SHELL_SANDBOX);
-    if (!d) return;
-    struct dirent* e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        fprintf(g_log, "  shell sandbox: /%s\n", e->d_name);
-        char sub[200];
-        snprintf(sub, sizeof(sub), SHELL_SANDBOX "/%s", e->d_name);
-        DIR* d2 = opendir(sub);
-        if (!d2) continue;
-        struct dirent* e2;
-        int n = 0;
-        while ((e2 = readdir(d2)) && n < 40) {
-            if (e2->d_name[0] == '.') continue;
-            fprintf(g_log, "    /%s/%s\n", e->d_name, e2->d_name);
-            n++;
-        }
-        closedir(d2);
-    }
-    closedir(d);
-    fflush(g_log);
-}
-
-// Copies a file of the package to dest: 0, or -1.
-static int copyFromPackage(const char* name, const char* dest) {
-    char src[160];
-    snprintf(src, sizeof(src), PKG_DIR "/%s", name);
-    FILE* f = fopen(src, "rb");
-    if (!f) return -1;
-    static uint8_t buf[512 * 1024];
-    const size_t n = fread(buf, 1, sizeof(buf), f);
-    fclose(f);
-    return n ? writeFile(dest, buf, n) : -1;
-}
-
-// The places to ask the shell for a module from, as the projects that do
-// it keep theirs: Zenalios/ps4-thumbgrid-ime asks for /user/data/... and
-// /data/...; j117mw3/ps4-hen-rest copies its module into the shell's
-// sandbox under Temp/. name is copied to each first. 1 if one loaded.
-static int intoShell(const char* name) {
-    char data[160], temp[200], inShell[160];
-    snprintf(data, sizeof(data), SC_BGM_DIR "/%s", name);
-    if (copyFromPackage(name, data) == 0) {
-        char user[180];
-        snprintf(user, sizeof(user), "/user%s", data);
-        if (shellLoad(user) || shellLoad(data)) return 1;
-    }
-    mkdir(SHELL_SANDBOX "/Temp/ShellCompanion", 0777);
-    snprintf(temp, sizeof(temp), SHELL_SANDBOX "/Temp/ShellCompanion/%s", name);
-    snprintf(inShell, sizeof(inShell), "/Temp/ShellCompanion/%s", name);
-    if (copyFromPackage(name, temp) == 0 && (shellLoad(inShell) || shellLoad(temp))) return 1;
-    char pkg[160];
-    snprintf(pkg, sizeof(pkg), PKG_DIR "/%s", name);
-    return shellLoad(pkg);
-}
-
-// Starts the player inside this app, the way a module is meant to be
-// started (sceKernelLoadStartModule), when the shell will not have it: it
-// plays while the app is open, which shows whether the module and its
-// audio work at all. 1 if it started.
-static int g_inApp;
-static int startInApp(void) {
-    if (g_inApp) return 1;
-    if (g_build < 0) g_build = 0;  // its only build: tried anyway
-    char paths[2][160];
-    snprintf(paths[0], sizeof(paths[0]), PKG_DIR "/%s", g_builds[g_build]);
-    snprintf(paths[1], sizeof(paths[1]), "/app0/%s", g_builds[g_build]);
-    for (int i = 0; i < 2; i++) {
-        int res = 0;
-        const int h = sceKernelLoadStartModule(paths[i], 0, NULL, 0, NULL, &res);
-        say("Start in this app %s: 0x%08X, module_start 0x%X", paths[i], (unsigned)h, res);
-        if (h >= 0) {
-            g_inApp = 1;
-            say("Playing inside this app (not the shell): stops when the app closes");
-            return 1;
-        }
-    }
-    return 0;
-}
-
-// The first runs on a PS4 (11.50, GoldHEN) had the shell answer ENOENT
-// (0x80020002) for /data/... and EACCES (0x8002000D) for /user/data/...,
-// /system_tmp and its own sandbox, and this app EACCES (-13) loading it
-// from /data itself. So: a system module first, which the shell has, to
-// see that the call can work at all; then the copy in this app's package,
-// a place modules are allowed to come from; then the rest.
+// Shell Companion's module (sc_companion.prx, the player and the music
+// watch) into SceShellUI through the client library, unless it is there,
+// then the queue played.
 static void loadPlayer(void) {
     say("-- loading, app " APP_VERSION " --");
-    // The client library (ps4/client, 0.81): the player and the music watch
-    // loaded unless running, then the queue played.
     char what[512];
     const int rc = scOpen(what, sizeof(what));
     say("scOpen: %d: %s", rc, what);
-    if (scPlayerRunning()) {
-        g_loadedFrom = 5;
-        scMusicPlay();
-        return;
-    }
-    say("The client library could not load the player: the app's own ways next");
-    // Where the shell took it on a PS4 (GoldHEN 2.4b18.12, 11.50), once the
-    // file was 0777: /user/data/GoldHEN/plugins/ (ps4-thumbgrid-ime's list).
-    mkdir("/user/data/GoldHEN", 0777);
-    mkdir("/user/data/GoldHEN/plugins", 0777);
-    if (copyFromPackage("sc_bgm.prx", "/user/data/GoldHEN/plugins/sc_bgm.prx") == 0 &&
-        shellLoad("/user/data/GoldHEN/plugins/sc_bgm.prx")) {
-        g_loadedFrom = 5;
-        say("The player is in the shell: it plays on when this app closes");
-        return;
-    }
-    if (intoShell("sc_bgm.prx")) {
-        g_loadedFrom = 1;
-        return;
-    }
-    say("The shell would not load it: send app.log");
-    startInApp();
-}
-
-// ---- the shell's own code, for its music calls' structures ----
-//
-// The quick menu's Music section is the shell's (C#, .NET assemblies). The
-// code that reads sceMusicCoreServerGetPlayStatus's and GetTrackInfo's
-// answers is in them, with each structure's layout, so they are copied to
-// /data/ShellCompanion/ps4/shell/ for FTP: every .dll whose name has one of
-// g_wanted in it, and a list of every file seen (its size and first bytes:
-// "MZ" is a plain .NET assembly).
-
-#define DUMP_DIR SC_BGM_DIR "/shell"
-static const char* const g_dumpDirs[] = {
-    "/system/vsh/app/NPXS20001/psm/Application",
-    "/system/vsh/app/NPXS20001",
-    "/system/common/lib",
-    "/system/priv/lib",
-    "/system_ex/app/NPXS20117",
-    "/system_ex/app/NPXS20117/sce_sys",
-    "/system/vsh/app/NPXS20117",
-    "/system/vsh/app/NPXS20117/sce_sys",
-};
-static const char* const g_wanted[] = {"Music", "ShellUI", "QuickMenu", "Spotify", "Bgm",
-                                       "param.sfo"};
-
-static int hasPart(const char* s, const char* part) {
-    const size_t n = strlen(part);
-    for (; *s; s++)
-        if (strncasecmp(s, part, n) == 0) return 1;
-    return 0;
-}
-
-static int wantedFile(const char* name) {
-    const size_t n = strlen(name);
-    const int dll = n > 4 && strcasecmp(name + n - 4, ".dll") == 0;
-    for (size_t i = 0; i < sizeof(g_wanted) / sizeof(g_wanted[0]); i++)
-        if (hasPart(name, g_wanted[i])) return dll || strcasecmp(name, "param.sfo") == 0;
-    return 0;
-}
-
-// Copies src to dst: bytes, or -1.
-static long copyWhole(const char* src, const char* dst) {
-    FILE* in = fopen(src, "rb");
-    if (!in) return -1;
-    FILE* out = fopen(dst, "wb");
-    if (!out) {
-        fclose(in);
-        return -1;
-    }
-    static uint8_t buf[256 * 1024];
-    long total = 0;
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
-            total = -1;
-            break;
-        }
-        total += (long)n;
-    }
-    fclose(in);
-    fclose(out);
-    return total;
-}
-
-static void dumpShellCode(void) {
-    mkdir(DUMP_DIR, 0777);
-    FILE* list = fopen(DUMP_DIR "/list.txt", "w");
-    int copied = 0, seen = 0;
-    for (size_t d = 0; d < sizeof(g_dumpDirs) / sizeof(g_dumpDirs[0]); d++) {
-        DIR* dir = opendir(g_dumpDirs[d]);
-        if (!dir) {
-            if (list) fprintf(list, "%s: cannot open\n", g_dumpDirs[d]);
-            continue;
-        }
-        if (list) fprintf(list, "%s:\n", g_dumpDirs[d]);
-        struct dirent* e;
-        while ((e = readdir(dir))) {
-            if (e->d_name[0] == '.') continue;
-            char path[400];
-            snprintf(path, sizeof(path), "%s/%s", g_dumpDirs[d], e->d_name);
-            struct stat st;
-            const int isFile = stat(path, &st) == 0 && S_ISREG(st.st_mode);
-            unsigned char head[4] = {0};
-            if (isFile) {
-                FILE* f = fopen(path, "rb");
-                if (f) {
-                    if (fread(head, 1, 4, f) != 4) memset(head, 0, 4);
-                    fclose(f);
-                }
-            }
-            seen++;
-            if (list)
-                fprintf(list, "  %-60s %10lld  %02X %02X %02X %02X%s\n", e->d_name,
-                        isFile ? (long long)st.st_size : -1LL, head[0], head[1], head[2], head[3],
-                        isFile ? "" : "  (folder)");
-            if (!isFile || !wantedFile(e->d_name)) continue;
-            // NPXS20117's param.sfo by the folder's name, as there may be two.
-            char dst[400];
-            const char* slash = strrchr(g_dumpDirs[d], '/');
-            if (strcasecmp(e->d_name, "param.sfo") == 0)
-                snprintf(dst, sizeof(dst), DUMP_DIR "/%s-%s-param.sfo",
-                         strstr(g_dumpDirs[d], "system_ex") ? "ex" : "sys",
-                         slash ? slash + 1 : "x");
-            else
-                snprintf(dst, sizeof(dst), DUMP_DIR "/%s", e->d_name);
-            const long n = copyWhole(path, dst);
-            say("copied %s: %ld bytes", path, n);
-            if (n > 0) copied++;
-        }
-        closedir(dir);
-    }
-    if (list) fclose(list);
-    say("Shell code: %d files copied of %d seen; FTP /data/ShellCompanion/ps4/shell/", copied,
-        seen);
+    if (scPlayerRunning()) scMusicPlay();
 }
 
 // ---- the screen: two frame buffers, drawn by the CPU ----
@@ -857,8 +560,6 @@ static void readLogTail(void) {
     }
 }
 
-static int g_portType;
-
 // Whether mcw-fake.txt says off: the watch answers the quick menu for our
 // player otherwise.
 static int fakeOff(void) {
@@ -877,8 +578,7 @@ static void draw(void) {
     text(x, y, ACCENT, "Shell Companion - PS4 background music test " APP_VERSION);
     y += LINE * 2;
     if (g_status.running) {
-        textf(x, y, GOOD, "Player: running %s (%s)", g_inApp ? "INSIDE THIS APP" : "in the shell",
-              g_status.state);
+        textf(x, y, GOOD, "Player: running in the shell (%s)", g_status.state);
         y += LINE;
         textf(x, y, FG, "Track %d of %d   %u:%02u", g_status.count ? g_status.index + 1 : 0,
               g_status.count, g_status.posMs / 60000, g_status.posMs / 1000 % 60);
@@ -890,7 +590,7 @@ static void draw(void) {
         y += LINE * 2;
     }
     y += LINE;
-    textf(x, y, DIM, "Audio port type: %d   Tracks in music/: from %s", g_portType, SC_BGM_MUSIC);
+    textf(x, y, DIM, "Tracks: %s, yoursong.mp3, streams.txt", SC_BGM_MUSIC);
     y += LINE * 2;
 
     text(x, y, FG, "X      load the player / play");
@@ -899,8 +599,6 @@ static void draw(void) {
     y += LINE;
     text(x, y, FG, "R1     next track          L1 previous track");
     y += LINE;
-    text(x, y, FG, "LEFT / RIGHT  audio port type, then restart the queue");
-    y += LINE;
     text(x, y, FG, "OPTIONS  write a test tone into music/ again");
     y += LINE;
     text(x, y, FG, "L2     background downloads test: 3 songs to ShellCompanion/ps4/downloads");
@@ -908,12 +606,7 @@ static void draw(void) {
     text(x, y, FG, "R2     take the downloads back (stops them), their status in app.log");
     y += LINE;
     text(x, y, FG, "L3     self-update from test-update.txt (a .pkg path or URL), then close");
-    y += LINE;
-    text(x, y, FG, "TOUCH  test: an MP3 through the PS4's download service (bgm.log)");
-    y += LINE;
-    text(x, y, FG, "UP     music watch in the shell: logs the quick menu's music calls");
-    y += LINE;
-    text(x, y, FG, "DOWN   copy the shell's .NET code to ShellCompanion/ps4/shell (UP first)");
+
     y += LINE;
     textf(x, y, FG, "R3     quick menu answers for our player (mcw-fake.txt): %s",
           fakeOff() ? "off" : "ON");
@@ -928,227 +621,11 @@ static void draw(void) {
     for (int i = 0; i < 12 && y < H - LINE; i++, y += LINE - 6) text(x, y, DIM, g_logTail[i]);
 }
 
-// ---- the Music section's answers (the music watch's ebgm/, an experiment) ----
-//
-// Guesses at PSN's /v1/ebgm/ answers, written each time the app starts
-// unless ebgm/keep is there (then they are yours to change). The profile was
-// taken (0.39); the views (the Music section's sections and playlists) are a
-// first guess, each playlist under several names, as the shell's own strings
-// give only views, section_title and image_url.
-
-
-static void writeEbgm(void) {
-    mkdir(SC_BGM_DIR "/ebgm", 0777);
-    if (access(SC_BGM_DIR "/ebgm/keep", F_OK) == 0) return;
-    // The shell reads it as {"spotify": {...}} (0.42's key log).
-    static const char profile[] =
-        "{\"spotify\":{\"subscriptionType\":\"PREMIUM\",\"legalCountry\":\"US\"}}\n";
-    writeFile(SC_BGM_DIR "/ebgm/me_partner_profile.json", profile, sizeof(profile) - 1);
-    // The sections, their playlists and tracks, and the covers: written
-    // by our player from its queue (ps4/bgm, writeLibrary) from 0.60.
-    // A track chosen reads its id and token (0.55: id missing; the login's
-    // userName and oauth, it seems).
-    // The Spotify session link a playlist's track list asks for
-    // (socialnetwork's /sp/sessionlink; the shell's strings near it: token,
-    // track, track_uri, context_uri, track_index, start_view): a first guess.
-    static const char session[] =
-        "{\"id\":\"shellcompanion\",\"token\":\"shellcompanion\","
-        "\"access_token\":\"shellcompanion\",\"expires_in\":3600}\n";
-    writeFile(SC_BGM_DIR "/ebgm/sp_sessionlink.json", session, sizeof(session) - 1);
-}
-
 // ---- the app ----
 
 // What GoldHEN's jailbreak replaced (the SDK's jailbreak_backup), to put
 // back: the music service refuses a jailbroken app, it seems.
 static struct JailbreakBackup g_jb;
-
-// ---- the system music service, in this app's own process ----
-//
-// Inside the shell its Initialize crashed SceShellUI (0.20): the service is
-// a client of the system's music server (SceMusicCoreServer, NPXS21007),
-// and seems meant for an app or a game, as the Vita's music player is the
-// shell's own. So here it runs in this app, which is such a process: a
-// crash closes only the app. Every call is logged before it is made, and a
-// watchdog logs every 2 s the one still running. R2 starts it.
-
-typedef int32_t (*MpsInit)(void);
-typedef int32_t (*MpsInitPool)(size_t size, void* pool);
-typedef int32_t (*MpsSetList)(int32_t player, const void* tracks, uint32_t count);
-typedef int32_t (*MpsPlay)(int32_t player, uint32_t track, int64_t startS, int32_t flags);
-typedef int32_t (*MpsVoid)(void);
-typedef int32_t (*MpsStatus)(void* status);
-
-static const char* volatile g_mpsStep = "starting";
-static volatile int g_mpsDone, g_mpsRunning;
-
-static void mpsLog(const char* f, ...) __attribute__((format(printf, 1, 2)));
-static void mpsLog(const char* f, ...) {
-    char line[256];
-    va_list ap;
-    va_start(ap, f);
-    vsnprintf(line, sizeof(line), f, ap);
-    va_end(ap);
-    if (g_log) {
-        fprintf(g_log, "%llu [mps] %s\n", (unsigned long long)nowMs(), line);
-        fflush(g_log);
-    }
-}
-
-static void mpsStep(const char* what) {
-    g_mpsStep = what;
-    mpsLog("calling %s", what);
-}
-
-static void* mpsWatch(void* arg) {
-    (void)arg;
-    while (!g_mpsDone) {
-        sceKernelUsleep(2000000);
-        if (!g_mpsDone) mpsLog("  ... still in %s", g_mpsStep);
-    }
-    return NULL;
-}
-
-static void* mpsSym(int lib, const char* name) {
-    void* p = NULL;
-    const int rc = sceKernelDlsym(lib, name, &p);
-    mpsLog("  %s: %p (0x%08X)", name, p, (unsigned)rc);
-    return rc == 0 ? p : NULL;
-}
-
-static void* mpsProbe(void* arg) {
-    (void)arg;
-    static uint64_t watcher;
-    scePthreadCreate(&watcher, NULL, mpsWatch, NULL, "ScMpsWatch");
-    int res = 0;
-    // 0.24: as installed (UNJAILBREAK) Initialize answered 0x812F0003,
-    // ERROR_FATAL, where jailbroken it was 0x812F0107, PROHIBITED; but the
-    // module had been loaded jailbroken. Everything now runs as installed,
-    // the module's load too.
-    mpsStep("GoldHEN UNJAILBREAK (the app as it was installed)");
-    const long un = sysCall(500, 3 /* UNJAILBREAK */, (long)&g_jb, 0);
-    mpsLog("UNJAILBREAK: 0x%lX", (unsigned long)un);
-    // The system's own music player switch, and whether BGM plays
-    // (SystemService.h, OpenOrbis: their arguments are not known, the
-    // second is given a zeroed buffer).
-    static uint8_t bgm[16];
-    mpsStep("sceSystemServiceIsBgmPlaying");
-    mpsLog("IsBgmPlaying: 0x%08X, %u", (unsigned)sceSystemServiceIsBgmPlaying(bgm), bgm[0]);
-    mpsStep("sceSystemServiceReenableMusicPlayer");
-    mpsLog("ReenableMusicPlayer: 0x%08X", (unsigned)sceSystemServiceReenableMusicPlayer());
-    // As a game loads it: through the system's module loader, which links
-    // what it needs (0.22, loaded as a file by sceKernelLoadStartModule,
-    // died in Initialize() at once, as if a call it makes went nowhere).
-    mpsStep("sceSysmoduleLoadModule(0xDD, the music player service)");
-    const int sm = sceSysmoduleLoadModule(0xDD);
-    mpsLog("sceSysmoduleLoadModule(0xDD): 0x%08X", (unsigned)sm);
-    mpsStep("its handle");
-    int lib = sceKernelLoadStartModule("libSceMusicPlayerService.sprx", 0, NULL, 0, NULL, &res);
-    mpsLog("by name: 0x%08X", (unsigned)lib);
-    if (lib < 0) {
-        lib = sceKernelLoadStartModule("/system/common/lib/libSceMusicPlayerService.sprx", 0,
-                                       NULL, 0, NULL, &res);
-        mpsLog("by /system path: 0x%08X", (unsigned)lib);
-    }
-    if (lib < 0) {
-        say("Music service: its library would not load (0x%08X)", (unsigned)lib);
-        g_mpsDone = 1;
-        g_mpsRunning = 0;
-        return NULL;
-    }
-    MpsInit init = (MpsInit)mpsSym(lib, "sceMusicPlayerServiceInitialize");
-    MpsInitPool init3 = (MpsInitPool)mpsSym(lib, "sceMusicPlayerServiceInitialize3");
-    MpsSetList setList = (MpsSetList)mpsSym(lib, "sceMusicPlayerServiceSetTrackList");
-    MpsPlay play = (MpsPlay)mpsSym(lib, "sceMusicPlayerServicePlay");
-    MpsStatus ext = (MpsStatus)mpsSym(lib, "sceMusicPlayerServiceGetPlayStatusExtension");
-
-    // 0.23: Initialize and Initialize3 answered 0x812F0107,
-    // SCE_MUSIC_PLAYER_SERVICE_ERROR_PROHIBITED ("Using MusicPlayerService
-    // is prohibited", psdevwiki). The jailbreak replaced this app's user,
-    // program authority and capabilities; GoldHEN puts them back with its
-    // UNJAILBREAK (command 3) and the backup its JAILBREAK filled in. The
-    // log stays open, its file already open.
-
-    // Initialize takes no arguments (read from the library, 0.21).
-    int32_t rc = -1;
-    if (init) {
-        mpsStep("Initialize()");
-        rc = init();
-        mpsLog("Initialize: 0x%08X", (unsigned)rc);
-    }
-    if (rc < 0 && init3) {
-        static void* pool;
-        if (!pool && posix_memalign(&pool, 0x4000, 4u << 20) != 0) pool = NULL;
-        if (pool) {
-            mpsStep("Initialize3(4 MB pool)");
-            rc = init3(4u << 20, pool);
-            mpsLog("Initialize3: 0x%08X", (unsigned)rc);
-        }
-    }
-    if (rc < 0 && (uint32_t)rc != 0x812F0002u) {
-        mpsLog("JAILBREAK again: 0x%lX", (unsigned long)sysCall(500, 2, (long)&g_jb, 0));
-        say("Music service: it would not initialise (0x%08X)", (unsigned)rc);
-        g_mpsDone = 1;
-        g_mpsRunning = 0;
-        return NULL;
-    }
-    say("Music service initialised in this app (0x%08X)", (unsigned)rc);
-
-    // The track: yoursong.mp3, else the test tone, as a path.
-    const char* path = SC_BGM_MUSIC "/" YOUR_SONG;
-    if (access(path, R_OK) != 0) path = SC_BGM_MUSIC "/test-tone.wav";
-    static uint8_t entries[0xC2F * 2];
-    memset(entries, 0, sizeof(entries));
-    strncpy((char*)entries, path, 0xC2E);
-    strncpy((char*)entries + 0xC2F, path, 0xC2E);
-    if (setList) {
-        mpsStep("SetTrackList(0, 2 entries of 0xC2F)");
-        rc = setList(0, entries, 2);
-        mpsLog("SetTrackList: 0x%08X", (unsigned)rc);
-    }
-    if (play && rc >= 0) {
-        mpsStep("Play(0, 0, 0, 0)");
-        rc = play(0, 0, 0, 0);
-        mpsLog("Play: 0x%08X", (unsigned)rc);
-    }
-    struct {
-        uint64_t size;
-        uint32_t errorCode, playState;
-        uint64_t totalS, currentS;
-        uint32_t list, track, playIndex, count, volume, repeat, shuffle, noNext, noPrev, loading;
-    } st;
-    for (int i = 0; i < 40 && ext; i++) {
-        sceKernelUsleep(1000000);
-        memset(&st, 0, sizeof(st));
-        st.size = sizeof(st);
-        mpsStep("GetPlayStatusExtension");
-        const int32_t r = ext(&st);
-        mpsLog("  %2d s: 0x%08X state %u, %llu/%llu s, track %u of %u, loading %u", i,
-               (unsigned)r, st.playState, (unsigned long long)st.currentS,
-               (unsigned long long)st.totalS, st.track, st.count, st.loading);
-    }
-    mpsLog("done");
-    mpsStep("GoldHEN JAILBREAK again");
-    mpsLog("JAILBREAK: 0x%lX", (unsigned long)sysCall(500, 2, (long)&g_jb, 0));
-    say("Music service test done: open the quick menu, then send app.log");
-    g_mpsDone = 1;
-    g_mpsRunning = 0;
-    return NULL;
-}
-
-__attribute__((unused)) static void startMusicService(void) {
-    if (g_mpsRunning) return;
-    g_mpsRunning = 1;
-    g_mpsDone = 0;
-    sendCommand("stop\n");  // our shell player quiet, so only the service is heard
-    static uint64_t thread;
-    if (scePthreadCreate(&thread, NULL, mpsProbe, NULL, "ScMps") != 0) {
-        g_mpsRunning = 0;
-        say("Music service: its thread would not start");
-    } else {
-        say("Music service test in this app: watch, then hold PS for the quick menu");
-    }
-}
 
 // Background downloads (0.82), through the client library: three test
 // songs and three pages, into /data/ShellCompanion/ps4/downloads/. Its
@@ -1218,8 +695,9 @@ int main(void) {
         if (scReadUpdateResult(&result, why, sizeof(why)) == 0) say("Last self-update: %d, %s", result, why);
     }
 
-    char portText[16];
-    if (readFile(SC_BGM_PORT, portText, sizeof(portText)) > 0) g_portType = atoi(portText);
+    // The audio port type the old test app's LEFT/RIGHT chose: gone, only
+    // type 0 works in the shell (0.95).
+    unlink(SC_BGM_PORT);
 
     const int yourSong = useYourSong();
     if (!yourSong && !countMusic() && access(STREAMS, R_OK) != 0) {
@@ -1241,10 +719,6 @@ int main(void) {
     scePadInit();
     const int pad = scePadOpen(user, 0, 0, NULL);
     if (pad < 0) say("No controller (0x%08X)", (unsigned)pad);
-
-    // The Music section's first answer for the music watch (ps4/mcw, ebgm/):
-    // written once, then left for you to change.
-    writeEbgm();
 
     // Load it at once: the main thing the app is for.
     loadPlayer();
@@ -1269,22 +743,6 @@ int main(void) {
         if (down & ORBIS_PAD_BUTTON_TRIANGLE) sendCommand("stop\n");
         if (down & ORBIS_PAD_BUTTON_R1) sendCommand("next\n");
         if (down & ORBIS_PAD_BUTTON_L1) sendCommand("prev\n");
-        if (down & (ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT)) {
-            // MAIN 0, BGM 1, VOICE 2: heard on a PS4 (11.50) from the player
-            // in this app; 3 (PERSONAL), 14 and 127 (AUX) were not.
-            static const int types[] = {0, 1, 2};
-            const int nTypes = (int)(sizeof(types) / sizeof(types[0]));
-            int at = 0;
-            for (int i = 0; i < nTypes; i++)
-                if (types[i] == g_portType) at = i;
-            at = (at + ((down & ORBIS_PAD_BUTTON_RIGHT) ? 1 : nTypes - 1)) % nTypes;
-            g_portType = types[at];
-            char t[16];
-            snprintf(t, sizeof(t), "%d\n", g_portType);
-            writeFile(SC_BGM_PORT, t, strlen(t));
-            sendCommand("reload\nplay\n");
-            say("Port type %d: restarting the queue", g_portType);
-        }
         // Background downloads (0.82; the music service probes these
         // buttons had are gone): L2 hands over a test list, R2 takes it back.
         if (down & ORBIS_PAD_BUTTON_L2) testDownloads();
@@ -1298,14 +756,6 @@ int main(void) {
             for (uint32_t i = 0; i < n; i++)
                 say("  %s: %s, %llu of %llu bytes%s", st[i].id, st[i].state, (unsigned long long)st[i].bytes,
                     (unsigned long long)st[i].size, "");
-        }
-        if (down & ORBIS_PAD_BUTTON_TOUCH_PAD) {
-            // An experiment (0.90): an MP3 (bgft-probe.txt's URL, else a test
-            // one) through the PS4's download service; bgm.log says what came of it.
-            char what[512];
-            scOpen(what, sizeof(what));
-            say("Download service test: %d, see bgm.log (probe:) and Notifications > Downloads",
-                scCommand("bgft_probe\n"));
         }
         if (down & ORBIS_PAD_BUTTON_L3) {
             // Self-update (0.89): test-update.txt's first line, a package's
@@ -1340,24 +790,6 @@ int main(void) {
                 writeFile(SC_BGM_DIR "/mcw-fake.txt", "CUSA01780\n", 10);
                 say("Quick menu answers: on, as Spotify (CUSA01780): the Music section too");
             }
-        }
-        if (down & ORBIS_PAD_BUTTON_DOWN) {
-            // On disk the shell's code is encrypted (0.29's list): the watch,
-            // inside the shell, copies its .NET assemblies from memory
-            // instead, within 10 s of mcw.carve appearing.
-            dumpShellCode();
-            writeFile(SC_BGM_DIR "/mcw.carve", "1", 1);
-            say("Asked the music watch (UP first) for the shell's code: in 10-60 s, see mcw.log");
-        }
-        if (down & ORBIS_PAD_BUTTON_UP) {
-            // The music watch (ps4/mcw): hooks the shell's calls to the music
-            // server, passes each on unchanged, and logs it to mcw.log. Once
-            // in the shell it stays until the PS4 restarts.
-            // Through the client library (0.81), which loads it only if it
-            // is not there yet: a second copy would hook the shell twice.
-            char what[512];
-            const int rc = scOpen(what, sizeof(what));
-            say("scOpen: %d: %s", rc, what);
         }
         if (down & ORBIS_PAD_BUTTON_OPTIONS) {
             say("test-tone.wav written (%d)", writeTestTone());

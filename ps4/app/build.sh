@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the PS4 test app, Shell Companion BGM Test, as a .pkg to install
 # with GoldHEN's Package Installer (or Debug Settings). It carries
-# sc_bgm.prx, so ps4/bgm/build.sh runs first. With the OpenOrbis toolchain
+# sc_companion.prx (the player and the music watch), so ps4/bgm/build.sh runs first. With the OpenOrbis toolchain
 # (OO_PS4_TOOLCHAIN) and create-fself (ps4/probe/get_create_fself.sh), from
 # the repository's root:
 #
@@ -28,7 +28,7 @@ BIN=$OO/bin/linux
 OUT="$OUT" sh "$SRC/../bgm/build.sh"
 
 clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -Wall -Wextra -Werror \
-    -isysroot "$OO" -isystem "$OO/include" "-DSC_PRX_PATH=\"$OUT/sc_bgm.prx\"" "-DSC_TITLE_ID=\"$TITLE_ID\"" \
+    -isysroot "$OO" -isystem "$OO/include" "-DSC_TITLE_ID=\"$TITLE_ID\"" \
     -c "$SRC/main.c" -o "$OUT/app.o"
 # The client library (ps4/client), as an app links it.
 clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -Wall -Wextra -Werror \
@@ -45,15 +45,8 @@ CREATE_FSELF=${CREATE_FSELF:-$OUT/create-fself}
 cp "$SRC/sce_sys/icon0.png" "$PKG/sce_sys/"
 cp "$SRC/sce_sys/about/right.sprx" "$PKG/sce_sys/about/"
 cp "$SRC/sce_module/libc.prx" "$SRC/sce_module/libSceFios2.prx" "$PKG/sce_module/"
-# The module, in the package too: a place the system may let it load from.
-cp "$OUT/sc_bgm.prx" "$OUT/sc_mps.prx" "$OUT/sc_mcw.prx" "$PKG/"
-# A playlist picture for the Music section, as JPEG (its icon, 192 square).
-cp "$SRC/playlist.jpg" "$PKG/"
-# A test module built as ps4-hen-rest builds its shell module (recipe/).
-CREATE_FSELF="$CREATE_FSELF" sh "$SRC/recipe/build.sh" "$OUT/recipe"
-cp "$OUT/recipe/hello.prx" "$PKG/"
-# GoldHEN's own plugin, as a control (control/README.md).
-cp "$SRC/control/no_share_watermark.prx" "$PKG/"
+# The module, at the package's root, where the client library takes it from.
+cp "$OUT/sc_companion.prx" "$PKG/"
 
 cd "$PKG"
 SFO=sce_sys/param.sfo
@@ -70,7 +63,7 @@ SFO=sce_sys/param.sfo
 "$BIN/PkgTool.Core" sfo_setentry $SFO VERSION --type Utf8 --maxsize 8 --value "$VERSION"
 # The package's project (.gp4), as create-gp4 makes it; written here, as
 # the CI's image has no create-gp4.
-FILES="eboot.bin sc_bgm.prx sc_mps.prx sc_mcw.prx playlist.jpg hello.prx no_share_watermark.prx sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx sce_module/libc.prx sce_module/libSceFios2.prx"
+FILES="eboot.bin sc_companion.prx sce_sys/param.sfo sce_sys/icon0.png sce_sys/about/right.sprx sce_module/libc.prx sce_module/libSceFios2.prx"
 {
     echo '<?xml version="1.0"?>'
     echo '<psproject xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" fmt="gp4" version="1000">'
