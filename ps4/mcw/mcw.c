@@ -1145,6 +1145,7 @@ typedef void* (*FnMonoUnbox)(void*);
 typedef uint32_t (*FnMonoWeak)(void*, int);
 typedef void* (*FnMonoTarget)(uint32_t);
 typedef void* (*FnMonoVirtual)(void*, void*);
+typedef int (*FnMonoOffset)(void*);
 static struct {
     int ready;
     void* domain;
@@ -1156,6 +1157,9 @@ static struct {
     FnMonoTarget target;
     FnMonoVirtual virt;
     void *imageBox, *ctor, *loadAsync;          // ImageBox
+    void *scaleType, *getImage;                  // ImageBox
+    void *options, *optCtor, *optConvert;        // ImageOptions
+    void *fFormat, *fResize, *fUpdated;          // its fields (0.63)
     void *setX, *setY, *setW, *setH, *getX, *setVisible;  // UINode
     void* appendChild;                           // Widget
     void* jsonItem;                              // JsonObject.get_Item
@@ -1187,6 +1191,35 @@ static void* rowCall(void* method, void* obj, void** args) {
 static void rowFloat(void* method, void* obj, float v) {
     void* args[1] = {&v};
     rowCall(method, obj, args);
+}
+
+// Load options as the shell's own cover box makes them (MusicPlayerPanel.
+// CoverArtLoadAsync): decoded to a Dxt5 texture by the GPU, resized to the
+// box. 0.62 loaded with none, and showed nothing.
+static void* rowOptions(void) {
+    if (!g_row.options) return NULL;
+    void* o = g_row.objectNew(g_row.domain, g_row.options);
+    if (!o) return NULL;
+    rowCall(g_row.optCtor, o, NULL);
+    if (g_row.optConvert) {
+        int conv = 4;  // ImageConvertOption.DXTCompressByGPU
+        void* args[1] = {&conv};
+        rowCall(g_row.optConvert, o, args);
+    }
+    // Nullable<T> as Mono lays it out: the value, then has_value.
+    if (g_row.fFormat) {
+        uint32_t fmt_[2] = {4, 1};  // ImageFormat.Dxt5
+        g_mono.set(o, g_row.fFormat, fmt_);
+    }
+    if (g_row.fResize) {
+        int32_t size[3] = {64, 64, 1};
+        g_mono.set(o, g_row.fResize, size);
+    }
+    if (g_row.fUpdated) {
+        uint8_t yes = 1;
+        g_mono.set(o, g_row.fUpdated, &yes);
+    }
+    return o;
 }
 
 static void rowShow(void* img, int on) {
@@ -1260,6 +1293,11 @@ static void rowArt(Frame* f) {
         rowFloat(g_row.setY, img, 10.0f);
         rowFloat(g_row.setW, img, 64.0f);
         rowFloat(g_row.setH, img, 64.0f);
+        if (g_row.scaleType) {
+            int st = 2;  // ImageScaleType.AspectInside
+            void* sargs[1] = {&st};
+            rowCall(g_row.scaleType, img, sargs);
+        }
         void* args[1] = {img};
         rowCall(g_row.appendChild, row, args);
         e = free_;
@@ -1277,7 +1315,7 @@ static void rowArt(Frame* f) {
         if (g_rows[e].idx != idx) {
             char url[160];
             fmt(url, sizeof(url), "file://%s", path);
-            void* args[1] = {g_row.stringNew(g_row.domain, url)};
+            void* args[3] = {g_row.stringNew(g_row.domain, url), NULL, rowOptions()};
             rowCall(g_row.loadAsync, img, args);
             g_rows[e].idx = idx;
         }
@@ -1291,7 +1329,11 @@ static void rowArt(Frame* f) {
         g_rows[e].shifted = 0;
     }
     if (g_rowSaid < 30) {
-        say("rowart: row %p, track %d: %s", row, idx, has ? "its cover" : "none");
+        // Whether the picture loaded so far (it loads in the background: a
+        // row shown again says what came of its earlier load).
+        void* asset = g_row.getImage ? rowCall(g_row.getImage, img, NULL) : NULL;
+        say("rowart: row %p, track %d: %s; its picture %s", row, idx, has ? "its cover" : "none",
+            asset ? "loaded" : "not (yet) loaded");
         g_rowSaid++;
     }
 }
@@ -1326,7 +1368,28 @@ static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* class
     g_row.imageBox = box;
     if (box) {
         g_row.ctor = m(box, ".ctor", 0);
-        g_row.loadAsync = m(box, "LoadAsync", 1);
+        g_row.loadAsync = m(box, "LoadAsync", 3);
+        g_row.scaleType = m(box, "set_ImageScaleType", 1);
+        g_row.getImage = m(box, "get_Image", 0);
+    }
+    void* opts = pui ? cls(pui, "Sce.PlayStation.PUI", "ImageOptions") : NULL;
+    FnMonoOffset offset = NULL;
+    if (!sceKernelDlsym((int)(intptr_t)mono, "mono_field_get_offset", &p)) offset = (FnMonoOffset)p;
+    if (opts && offset && g_mono.set) {
+        g_row.optCtor = m(opts, ".ctor", 0);
+        g_row.optConvert = m(opts, "set_ConvertOption", 1);
+        void* ff = g_mono.fieldByName(opts, "format");
+        void* fr = g_mono.fieldByName(opts, "resize");
+        void* fu = g_mono.fieldByName(opts, "isUpdatedOptions");
+        // Only where the shell's own code writes them (0x5c, 0x68, 0x74),
+        // offsets counted from the object's start, its header included.
+        const int of = ff ? offset(ff) : -1, or_ = fr ? offset(fr) : -1, ou = fu ? offset(fu) : -1;
+        say("rowart: ImageOptions %p: format at 0x%x, resize at 0x%x, isUpdatedOptions at 0x%x", opts,
+            of, or_, ou);
+        if (of == 0x5c) g_row.fFormat = ff;
+        if (or_ == 0x68) g_row.fResize = fr;
+        if (ou == 0x74) g_row.fUpdated = fu;
+        if (g_row.optCtor) g_row.options = opts;
     }
     if (node) {
         g_row.setX = m(node, "set_X", 1);

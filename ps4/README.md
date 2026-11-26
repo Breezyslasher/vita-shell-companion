@@ -663,6 +663,13 @@ reuses rows as it scrolls, so each row is tracked by a weak GC handle. Look
 for `rowart:` lines in mcw.log. `mcw-norowart` in the player's folder turns
 it off.
 
+0.62 loaded the picture with no options and showed nothing, though its labels
+moved. 0.63 loads it the way the shell's own cover box does
+(`MusicPlayerPanel.CoverArtLoadAsync`), with `ImageOptions`: Format Dxt5,
+ConvertOption DXTCompressByGPU, Resize 64×64, and the box's ImageScaleType
+set to AspectInside. Each `rowart:` line now also says whether the box's
+`Image` has loaded.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our
