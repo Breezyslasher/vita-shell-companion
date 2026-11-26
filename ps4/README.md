@@ -500,6 +500,18 @@ when not 0. 0.56: `id` in `sp_sessionlink.json` (the login's user name, it
 seems; `token` its OAuth), `PlaySpotifyUri`'s result logged, and the music
 server's controller classes dumped too (`code/methods3.map`, `code3.bin`).
 
+### It plays (0.56), and the playlist's picture (0.57)
+
+With `id` in the session link, choosing a track or Play All worked on a PS4:
+`PlaySpotifyUri` returned 0, `PlaySpUri` came with the track's index (0, 1,
+0), and our player played it; the player panel showed its cover. The
+playlist's tile showed no picture: it loads `image_url` +
+`string.Format("&w={0}&h={0}", 192f)` with `ImageBox.LoadAsync` (0.51's dump,
+`PlayListPanelItem.UpdatePlayList`; 192 read from the float in its code).
+With a `file://` address and no `?` that is a file's name: from 0.57
+`image_url` is `file:///user/data/ShellCompanion/ps4/ebgm/playlist` and the
+picture is also written as `ebgm/playlist&w=192&h=192`.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.56"
+#define APP_VERSION "0.57"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -866,7 +866,7 @@ static void draw(void) {
     "\"name\":\"Shell Companion queue\",\"title\":\"Shell Companion queue\","               \
     "\"uri\":\"spotify:user:shellcompanion:playlist:queue\",\"id\":\"queue\","               \
     "\"type\":\"playlist\",\"description\":\"Music on this PS4\","                            \
-    "\"image_url\":\"file:///user/data/ShellCompanion/ps4/ebgm/playlist.png?v=1\","              \
+    "\"image_url\":\"file:///user/data/ShellCompanion/ps4/ebgm/playlist\","                     \
     "\"images\":[],\"total\":2,\"track_count\":2,\"tracks\":{\"total\":2}"
 #define PLAYLIST_GUESS "{" PLAYLIST_FIELDS "}"
 
@@ -902,16 +902,19 @@ static void writeEbgm(void) {
     "{\"name\":\"" title "\",\"title\":\"" title "\",\"uri\":\"" uri "\",\"id\":\"" n "\","          \
     "\"artists\":[{\"name\":\"" artist "\"}],\"artist\":\"" artist "\","                           \
     "\"album\":{\"name\":\"Shell Companion\"},\"explicit\":false,\"is_playable\":true,"           \
-    "\"duration_ms\":" ms ",\"image_url\":\"file:///user/data/ShellCompanion/ps4/ebgm/playlist.png?v=1\"}"
+    "\"duration_ms\":" ms ",\"image_url\":\"file:///user/data/ShellCompanion/ps4/ebgm/playlist\"}"
     static const char tracks[] =
         "{\"total\":2,\"offset\":0,\"limit\":15,\"track_list\":["
         TRACK_GUESS("0", "Your song", "Shell Companion", "spotify:track:shellcompanion0", "281000") ","
         TRACK_GUESS("1", "Test tone", "Shell Companion", "spotify:track:shellcompanion1", "60000")
         "]}\n";
     writeFile(SC_BGM_DIR "/ebgm/playlist_tracks.json", tracks, sizeof(tracks) - 1);
-    // The playlist's picture: this app's icon. The shell adds &w=..&h=.. to
-    // image_url (its strings), hence the ? in it.
+    // The playlist's picture: this app's icon.
     copyFromPackage("sce_sys/icon0.png", SC_BGM_DIR "/ebgm/playlist.png");
+    // The tile asks for image_url + "&w=192&h=192" (PlayListPanelItem.
+    // UpdatePlayList: string.Format("&w={0}&h={0}", 192f)): with a file://
+    // address, no ? in it, that is the file's name.
+    copyFromPackage("sce_sys/icon0.png", SC_BGM_DIR "/ebgm/playlist&w=192&h=192");
 }
 
 // ---- the app ----
