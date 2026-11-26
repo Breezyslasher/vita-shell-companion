@@ -28,6 +28,43 @@ int sceKernelLoadStartModule(const char* path, size_t args, const void* argp, ui
 int sceKernelDlsym(int handle, const char* symbol, void** addr);
 const char* sceKernelGetFsSandboxRandomWord(void);
 typedef int32_t (*FnSysmoduleLoad)(uint32_t id);
+typedef struct {
+    void* address;
+    uint32_t size;
+    int32_t prot;
+} SegmentInfo;
+typedef struct {
+    size_t size;
+    char name[256];
+    SegmentInfo segment[4];
+    uint32_t segmentCount;
+    uint8_t fingerprint[20];
+} ModuleInfo;  // OpenOrbis's OrbisKernelModuleInfo
+int sceKernelGetModuleInfo(uint32_t handle, ModuleInfo* info);
+
+// The library's code and data as loaded, each readable segment to
+// mps-seg<n>.bin, for its functions' real arguments to be read from it:
+// 0.20 crashed, or froze, the shell in Initialize(pool), shadPS4's guess.
+static void dumpModule(int lib) {
+    static ModuleInfo info;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    const int rc = sceKernelGetModuleInfo((uint32_t)lib, &info);
+    info.name[255] = 0;
+    logLine("module info 0x%08X: %s, %u segment(s)", (unsigned)rc, info.name, info.segmentCount);
+    for (uint32_t i = 0; i < info.segmentCount && i < 4; i++) {
+        const SegmentInfo* seg = &info.segment[i];
+        logLine("  segment %u: %p, 0x%X bytes, prot 0x%X", i, seg->address, seg->size,
+                (unsigned)seg->prot);
+        if (!(seg->prot & 1) || !seg->address || seg->size > (8u << 20)) continue;
+        char path[128];
+        fmt(path, sizeof(path), SC_BGM_DIR "/mps-seg%u.bin", i);
+        const int fd = sysOpen(path, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+        const int wrote = fd >= 0 ? sysWrite(fd, seg->address, seg->size) : fd;
+        if (fd >= 0) sysClose(fd);
+        logLine("    -> %s: %d bytes", path, wrote);
+    }
+}
 
 // A system library loaded by its path in this sandbox: SceShellUI's has no
 // /system, its libraries are under /<random word>/common/lib (as
@@ -213,6 +250,13 @@ static void* probe(void* arg) {
     g_current = (FnStatus)sym(lib, "sceMusicPlayerServiceGetCurrentPlayStatus");
     g_ext = (FnStatus)sym(lib, "sceMusicPlayerServiceGetPlayStatusExtension");
 
+    dumpModule(lib);
+    if (!sysExists(SC_BGM_DIR "/mps.call")) {
+        logLine("music service probe: dumped, nothing called (mps.call is not there)");
+        notify("Music service probe: done; send mps.log and the mps-seg files");
+        g_done = 1;
+        return NULL;
+    }
     void* pool = sysMap(POOL);
     logLine("pool: %p, %u bytes", pool, POOL);
     int32_t rc = -1;
