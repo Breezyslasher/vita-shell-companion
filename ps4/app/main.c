@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.55"
+#define APP_VERSION "0.56"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -886,12 +886,14 @@ static void writeEbgm(void) {
         "\"views\":[{\"name\":\"Shell Companion\","
         "\"section_title\":\"Shell Companion\",\"lists\":[" PLAYLIST_GUESS "]}]}\n";
     writeFile(SC_BGM_DIR "/ebgm/recommended_views.json", views, sizeof(views) - 1);
+    // A track chosen reads its id and token (0.55: id missing; the login's
+    // userName and oauth, it seems).
     // The Spotify session link a playlist's track list asks for
     // (socialnetwork's /sp/sessionlink; the shell's strings near it: token,
     // track, track_uri, context_uri, track_index, start_view): a first guess.
     static const char session[] =
-        "{\"token\":\"shellcompanion\",\"access_token\":\"shellcompanion\","
-        "\"expires_in\":3600}\n";
+        "{\"id\":\"shellcompanion\",\"token\":\"shellcompanion\","
+        "\"access_token\":\"shellcompanion\",\"expires_in\":3600}\n";
     writeFile(SC_BGM_DIR "/ebgm/sp_sessionlink.json", session, sizeof(session) - 1);
     // A playlist's tracks (/v1/ebgm/playlist/tracks?uri=...&offset=0&limit=15,
     // 0.53: any playlist's, the file without the query): a first guess, the

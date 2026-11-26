@@ -489,6 +489,17 @@ queue, playing) and `shuffle=1` if asked, and the shell is given track info
 changed, a Spotify message (4, param 200, `MESSAGE_LOGIN_SUCCESS`) and play
 status changed.
 
+### Choosing a track: CE-41495-3 (0.55)
+
+Choosing a track or Play All showed "An error has occurred. (CE-41495-3)",
+with no `PlaySpUri` or `LaunchSpCore` reached. The press read the
+playlist's `type` and `uri` and the session link's `id` (missing) and
+`token`, and its task (`TrackListMenuPanel/<>c__DisplayClass21_0:<OnItemSelected>b__0`)
+asks `MusicCoreServerController.PlaySpotifyUri(info)` and shows its error
+when not 0. 0.56: `id` in `sp_sessionlink.json` (the login's user name, it
+seems; `token` its OAuth), `PlaySpotifyUri`'s result logged, and the music
+server's controller classes dumped too (`code/methods3.map`, `code3.bin`).
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

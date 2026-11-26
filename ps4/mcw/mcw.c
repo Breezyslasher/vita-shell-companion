@@ -893,7 +893,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 10
+#define MONO_HOOKS 11
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -1025,6 +1025,10 @@ static void monoLog(Frame* f) {
         if (f->seq <= 40)
             say("mono: IsInstalled(\"%s\") = %d%s  [#%u, thread %d]", title, was,
                 ours ? ", answered 1" : "", f->seq, scePthreadGetthreadid());
+    } else if (h->json == 7) {
+        // An int returned: 0, or the error the shell shows.
+        say("mono: %s(%lx) = 0x%X  [#%u, thread %d]", h->name, f->gpr[1], (uint32_t)f->retRax,
+            f->seq, scePthreadGetthreadid());
     } else if (h->json == 5) {
         if (f->seq <= 50)
             say("mono: %s: %d (0x%X), 0x%X  [#%u, thread %d]", h->name, (int32_t)f->gpr[1],
@@ -1106,8 +1110,8 @@ static uint64_t followStub(uint64_t t) {
 }
 
 static void codeDump(void* domain, void* imageLoaded, void* classFromName, void* compile) {
-    if (sysExists(CODE_DIR "/methods2.map")) {
-        say("code: code/methods2.map is there already: not again");
+    if (sysExists(CODE_DIR "/methods3.map")) {
+        say("code: code/methods3.map is there already: not again");
         return;
     }
     if (!g_dump.methods || !g_dump.fullName || !g_dump.jitFind || !g_dump.jitStart ||
@@ -1142,8 +1146,8 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
         skips[n > 0 ? n : 0] = 0;
         sysClose(fd);
     }
-    const int map = sysOpen(CODE_DIR "/methods2.map.new", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
-    const int bin = sysOpen(CODE_DIR "/code2.bin", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    const int map = sysOpen(CODE_DIR "/methods3.map.new", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    const int bin = sysOpen(CODE_DIR "/code3.bin", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
     if (map < 0 || bin < 0) return;
     static const char* const want[][2] = {
         {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicPanel"},
@@ -1159,6 +1163,10 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
         {"Sce.Vsh.ShellUI.QuickMenu", "UserContext"},
         {"Sce.Vsh.ShellUI.QuickMenu", "AppBrowseItemData"},
         {"Sce.Vsh.ShellUI.QuickMenu", "DirectPlayback"},
+        // What a track chosen asks (0.56): PlaySpotifyUri, and what it checks.
+        {"Sce.Vsh.ShellUI.MusicCoreServer", "MusicCoreServerController"},
+        {"Sce.Vsh.ShellUI.MusicCoreServer", "MusicCoreServerControllerImpl"},
+        {"Sce.Vsh.ShellUI.MusicCoreServer", "MusicCoreServerControllerStorage"},
     };
     void* image = ((FnMonoName)imageLoaded)("app");
     uint64_t at = 0;
@@ -1274,8 +1282,8 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
     sysClose(bin);
     sysClose(map);
     sysUnlink(CODE_DIR "/dumping");
-    sysRename(CODE_DIR "/methods2.map.new", CODE_DIR "/methods2.map");
-    say("code: %d methods, %lu bytes, %d calls named: code/methods2.map and code/code2.bin",
+    sysRename(CODE_DIR "/methods3.map.new", CODE_DIR "/methods3.map");
+    say("code: %d methods, %lu bytes, %d calls named: code/methods3.map and code/code3.bin",
         methods, at, calls);
     notify("Music watch: the Music section's code is in ShellCompanion/ps4/code");
 }
@@ -1363,6 +1371,10 @@ static void monoHooks(void) {
         // answered true for CUSA01780 while ebgm/ is there.
         {"app", "Sce.Vsh.ShellUI.AppSystem", "ApplicationMonitor/Util/AppInfo", "IsInstalled", 1, 6,
          "AppInfo.IsInstalled"},
+        // A track chosen: the press's task asks this, then shows an error
+        // dialog if it is not 0 (0.55: an error, no PlaySpUri reached).
+        {"app", "Sce.Vsh.ShellUI.MusicCoreServer", "MusicCoreServerController", "PlaySpotifyUri", 1,
+         7, "MusicCoreServerController.PlaySpotifyUri"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
@@ -1455,7 +1467,7 @@ void mcwPre(Frame* f) {
 
 void mcwPost(Frame* f) {
     if (f->hook->json) {
-        if (!g_quiet || f->hook->json == 2 || f->hook->json == 6) monoLog(f);
+        if (!g_quiet || f->hook->json == 2 || f->hook->json == 6 || f->hook->json == 7) monoLog(f);
         return;
     }
     fakeApply(f);
