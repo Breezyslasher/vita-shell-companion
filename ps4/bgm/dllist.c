@@ -441,10 +441,13 @@ static void dlListBegin(void) {
     g_dll.haveGoing = g_dll.haveWaiting = g_dll.haveDone = 1;
     g_dll.bitsGoing = 0x30a;    // Package, Run, Download
     g_dll.bitsWaiting = 0x301;  // Package, Ready, Standby
-    g_dll.bitsDone = 0x313;     // Package, Complete, Complete
+    // Done as the PS4's own finished downloads are (1.06: 1.05's finished
+    // ones, Complete/Complete, read "waiting"; package 1099, installed,
+    // answered ...88 / 0x10008063: Stop, Download, every byte there).
+    g_dll.bitsDone = 0x308;     // Package, Stop, Download (with every byte)
     g_dll.paramGoing = 0x82c1;   // Download, Package, Run, Download
     g_dll.paramWaiting = 0x1c1;  // Download, Package, Ready, Standby (as registered)
-    g_dll.paramDone = 0x103c1;   // Download, Package, Complete, Complete
+    g_dll.paramDone = 0x80c3;    // as 0x10008063 (a finished game), Package
     if (readText(SC_BGM_DIR "/dl-list-bits.txt", text, sizeof(text)) > 0) {
         if (dllHex(text, "going", &g_dll.bitsGoing)) g_dll.haveGoing = 1;
         dllHex(text, "waiting", &g_dll.bitsWaiting);

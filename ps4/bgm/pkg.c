@@ -203,10 +203,10 @@ static int pkgHeadUrl(const char* url, const char* extra, PkgHead* out) {
 // The package (a URL, or a path on the console) registered with the
 // service and started: its task id, or a negative code.
 // The form of a path on the console the service is given: 0 the system's
-// (/data/...), 1 the shell's own (/user/data/...). 1.04's package, given as
-// /data/..., was taken, then failed 2 s later with 0x80990004; pkgItem then
-// tries the other form, and keeps it for the rest of the boot.
-static int g_pkgUserPaths;
+// (/data/...), 1 the shell's own (/user/data/...). As /data/..., 1.04's and
+// 1.05's package was taken, then failed 2 s later with 0x80990004; as
+// /user/data/... it installed (1.05). pkgItem tries /data/... if that fails.
+static int g_pkgUserPaths = 1;  // 1.05: /data/... failed 0x80990004, /user/data/... installed
 
 static int32_t pkgRegister(const char* where, const char* extra, const char* name) {
     if (!bgftSetup()) return -1;
@@ -428,20 +428,19 @@ static int pkgItem(int i) {
     it->task = task;
     dlStatus();
     int rc = pkgFollow(task, &it->bytes, &it->size, &g_dls.takeBack);
-    if (rc == (int)0x80990004 && where[0] == '/' && !g_pkgUserPaths) {
+    if (rc == (int)0x80990004 && where[0] == '/' && g_pkgUserPaths) {
         // Failed as it began (1.04): the path's other form, once. The failed
         // task goes first, or the content id is taken (0x80990086).
         typedef int (*FnTaskId)(int32_t);
         FnTaskId unregister = (FnTaskId)anySym(libLoad("libSceBgft.sprx"), "sceBgftServiceIntDownloadUnregisterTask");
-        logLine("pkg: task %d failed 0x80990004: removed 0x%08X; trying the path as /user/data/...", task,
+        logLine("pkg: task %d failed 0x80990004: removed 0x%08X; trying the path as /data/...", task,
                 (unsigned)(unregister ? unregister(task) : -1));
-        g_pkgUserPaths = 1;
+        g_pkgUserPaths = 0;
         const int32_t again = pkgRegister(where, it->arg[1], it->title);
         if (again < 0) return again == (int32_t)0x80990088 ? GET_DONE : GET_RETRY;
         it->task = again;
         dlStatus();
         rc = pkgFollow(again, &it->bytes, &it->size, &g_dls.takeBack);
-        if (rc) g_pkgUserPaths = 0;  // no better: back to the system's form
     }
     return rc == 0 ? GET_DONE : rc == 1 ? GET_STOPPED : GET_RETRY;
 }

@@ -130,6 +130,13 @@ service's are, not the managed wrappers 0.85 hooked.
   first) was taken (task 1093, param `0x10000161`), then failed 2 s later,
   `0x80990004`, param `0x14008061` (the error bit, 26, as decoded); given
   as `/data/...`. 1.05 removes it and tries `/user/data/...` once.
+- **1.05 on the PS4:** the percent moved (preparingPercent). The package
+  failed as `/data/...` again and installed as `/user/data/...` (task
+  1098, 99.8 MB): that is now the first form, `/data/...` the retry.
+  Finished songs read "waiting": Complete/Complete is not how the PS4's
+  own finished downloads answer (package 1099 installed: `...88`,
+  `0x10008063`, Stop/Download with every byte). 1.06 answers finished
+  ones so (`0x308`, `0x80c3`, Package).
 
 ### One module, and the cleanup (0.95)
 
