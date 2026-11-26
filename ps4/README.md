@@ -337,6 +337,12 @@ service's are, not the managed wrappers 0.85 hooked.
   there (0x80990019; the new ones numbered from 1102).
 - **1.30:** a task info answer of 0x80990019 for one of ours counts as
   deleted too; a removal answered 0x80990019 is not tried again.
+- **1.31:** with the items in Notifications > Downloads (song rows, or
+  packages), the start, percent and per-item notifications are left out:
+  the rows show the same, kept up to date, and those never changed once
+  shown. The summary at the end stays ("Downloads done", or how many
+  failed). Without the rows (`dl-nolist`, or the hooks not in), all as
+  before.
 
 ### One module, and the cleanup (0.95)
 

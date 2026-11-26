@@ -75,6 +75,7 @@ static void dllRepair(void);  // dllist.c (1.02)
 static void dlListLeftovers(void);  // dllist.c (1.04)
 static void dlListIdle(void);        // dllist.c (1.15)
 static void dlListForget(void);      // dllist.c (1.29)
+static int dlListShown(void);        // dllist.c (1.31)
 
 // %XX back to its byte.
 static void dlDecode(char* s) {
@@ -163,6 +164,14 @@ static int dlRead(void) {
 }
 
 static void dlNotify(const char* f, ...);
+// The start, progress and per-item notifications only while the items
+// aren't in Notifications > Downloads (1.31): there they have rows of their
+// own, kept up to date, and these never change once shown. The summary at
+// the end stays.
+#define dlNotifyUnlisted(...)                \
+    do {                                     \
+        if (!dlListShown()) dlNotify(__VA_ARGS__); \
+    } while (0)
 
 // The whole list's progress, 0-1000: by bytes where every size is known,
 // else by items (the item being fetched by its own bytes if its size is).
@@ -196,9 +205,9 @@ static void dlProgress(void) {
     g_dls.lastNotice = sysNowUs();
     const int c = g_dls.current;
     if (g_dls.count > 1 && c >= 0 && c < g_dls.count)
-        dlNotify("Downloading: %d%% (%d of %d)\n%s", pm / 10, c + 1, g_dls.count, g_dls.item[c].title);
+        dlNotifyUnlisted("Downloading: %d%% (%d of %d)\n%s", pm / 10, c + 1, g_dls.count, g_dls.item[c].title);
     else if (c >= 0 && c < g_dls.count)
-        dlNotify("Downloading: %d%%\n%s", pm / 10, g_dls.item[c].title);
+        dlNotifyUnlisted("Downloading: %d%%\n%s", pm / 10, g_dls.item[c].title);
 }
 
 static void dlStatus(void) {
@@ -534,7 +543,7 @@ static void* dlMain(void* arg) {
         sysSleepMs(2000);
         dlListBegin();  // its files in Notifications > Downloads
         logLine("downloads: %d item(s)", g_dls.count);
-        dlNotify("Downloading %d item%s in the background", g_dls.count, g_dls.count == 1 ? "" : "s");
+        dlNotifyUnlisted("Downloading %d item%s in the background", g_dls.count, g_dls.count == 1 ? "" : "s");
         int done = 0, failed = 0, i;
         // In order, but Download Now first, paused ones passed over (and
         // waited for while there are some), deleted ones dropped (1.29).
@@ -551,7 +560,7 @@ static void* dlMain(void* arg) {
             dlProgress();
             if (g_dls.item[i].state == DLS_DONE) {
                 done++;
-                if (g_dls.count > 1) dlNotify("Downloaded: %s (%d of %d)", g_dls.item[i].title, done, g_dls.count);
+                if (g_dls.count > 1) dlNotifyUnlisted("Downloaded: %s (%d of %d)", g_dls.item[i].title, done, g_dls.count);
             } else if (g_dls.item[i].state != DLS_WAITING && g_dls.item[i].state != DLS_CANCELLED) {
                 failed++;
             }

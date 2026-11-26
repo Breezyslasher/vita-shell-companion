@@ -1110,6 +1110,15 @@ static void dlListIdle(void) {
     dllRemoveAll();
 }
 
+// The list's items have rows in Notifications > Downloads (1.31): song
+// placeholders, or packages (the service's own rows).
+static int dlListShown(void) {
+    if (g_dll.count > 0) return 1;
+    for (int i = 0; i < g_dls.count; i++)
+        if (!memcmp(g_dls.item[i].kind, "pkg", 4)) return 1;
+    return 0;
+}
+
 // A list starting: entries restored after a reboot go before its items
 // are read in their place (1.29).
 static void dlListForget(void) {
