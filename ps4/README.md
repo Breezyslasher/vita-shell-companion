@@ -305,6 +305,11 @@ service's are, not the managed wrappers 0.85 hooked.
   going; `UpdateTaskInfo` reads it from the query param). 1.27 answers a
   finished one not yet moved as Complete/Complete (`...93`; type 1 then
   maps to Installed for a game), its section 3 param `0x10010361`.
+- **1.27 on the PS4:** finished songs read "Installed." at once.
+- **1.28, package icons:** a package was registered with no icon. Its
+  `icon0.png` (entry id `0x1200` in the package's entry table, in the
+  clear) is now copied to `icons/<content id>.png` beside the module's
+  files (by Range for a URL) and given as the task's `iconPath`.
 
 ### One module, and the cleanup (0.95)
 

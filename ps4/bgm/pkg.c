@@ -170,9 +170,9 @@ static int pkgHeadLocal(const char* path, PkgHead* out) {
     return n > 0 && pkgParse(h, (size_t)n, out);
 }
 
-// Its first 4 KB by HTTP (Range), with the list's headers and extra.
-static int pkgHeadUrl(const char* url, const char* extra, PkgHead* out) {
-    static uint8_t h[0x1000];
+// Bytes off..off+len-1 of a URL by HTTP (Range), with the list's headers
+// and extra: how many came.
+static size_t urlRange(const char* url, const char* extra, uint64_t off, size_t len, uint8_t* buf) {
     if (!httpSetup()) return 0;
     const int tmpl = g_http.tmpl(g_http.ctx, "ShellCompanion/" SC_BGM_VERSION, 2, 1);
     if (tmpl < 0) return 0;
@@ -184,11 +184,14 @@ static int pkgHeadUrl(const char* url, const char* extra, PkgHead* out) {
         if (g_http.recvTimeout) g_http.recvTimeout(req, 30u * 1000000u);
         dlHeaders(req, g_dls.headers);
         dlHeaders(req, extra);
-        if (g_http.addHeader) g_http.addHeader(req, "Range", "bytes=0-4095", 0);
+        char range[64];
+        fmt(range, sizeof(range), "bytes=%lu-%lu", (unsigned long)off, (unsigned long)(off + len - 1));
+        if (g_http.addHeader) g_http.addHeader(req, "Range", range, 0);
         int code = 0;
-        if (g_http.send(req, NULL, 0) >= 0 && (g_http.status(req, &code), code == 200 || code == 206)) {
-            while (got < sizeof(h)) {
-                const int n = g_http.read(req, h + got, sizeof(h) - got);
+        // 200: the server ignored the range; only usable from the start.
+        if (g_http.send(req, NULL, 0) >= 0 && (g_http.status(req, &code), code == 206 || (code == 200 && !off))) {
+            while (got < len) {
+                const int n = g_http.read(req, buf + got, len - got);
                 if (n <= 0) break;
                 got += (size_t)n;
             }
@@ -197,7 +200,82 @@ static int pkgHeadUrl(const char* url, const char* extra, PkgHead* out) {
     }
     if (conn >= 0) g_http.delConn(conn);
     g_http.delTmpl(tmpl);
+    return got;
+}
+
+// Bytes of a package on the console, or by URL.
+static size_t pkgRead(const char* where, const char* extra, uint64_t off, size_t len, uint8_t* buf) {
+    if (where[0] != '/') return urlRange(where, extra, off, len, buf);
+    const int fd = sysOpen(where, SC_O_RDONLY, 0);
+    if (fd < 0) return 0;
+    size_t got = 0;
+    if (sysSeek(fd, (int64_t)off, 0) == (int64_t)off) {
+        while (got < len) {
+            const int n = sysRead(fd, buf + got, len - got);
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+    }
+    sysClose(fd);
+    return got;
+}
+
+// Its first 4 KB by HTTP (Range), with the list's headers and extra.
+static int pkgHeadUrl(const char* url, const char* extra, PkgHead* out) {
+    static uint8_t h[0x1000];
+    const size_t got = urlRange(url, extra, 0, sizeof(h), h);
     return got && pkgParse(h, got, out);
+}
+
+// The package's own icon (1.28): its ICON0_PNG entry (id 0x1200), kept in
+// the clear in the entry table (entry count at 0x10, table offset at 0x18,
+// 32-byte entries: id, name offset, flags, flags, offset, size), copied to
+// SC_BGM_DIR/icons/<content id>.png for the service's iconPath. The
+// Downloads list showed a placeholder icon for ours till installed (1.06).
+// 1 if the file is there.
+static int pkgIcon(const char* where, const char* extra, const char* contentId, char* out, size_t cap) {
+    fmt(out, cap, "%s/icons/%s.png", SC_BGM_DIR, contentId);
+    if (sysExists(out)) return 1;
+    uint8_t h[0x20];
+    if (pkgRead(where, extra, 0, sizeof(h), h) != sizeof(h)) return 0;
+    const uint32_t count = be32p(h + 0x10), table = be32p(h + 0x18);
+    if (!count || count > 4096 || !table) return 0;
+    static uint8_t ents[4096 * 32];
+    if (pkgRead(where, extra, table, (size_t)count * 32, ents) != (size_t)count * 32) return 0;
+    uint32_t off = 0, size = 0;
+    for (uint32_t j = 0; j < count; j++) {
+        const uint8_t* e = ents + j * 32;
+        if (be32p(e) != 0x1200) continue;
+        if (be32p(e + 8) & 0x80000000u) break;  // encrypted
+        off = be32p(e + 16);
+        size = be32p(e + 20);
+        break;
+    }
+    if (!off || !size || size > (4u << 20)) {
+        logLine("pkg: %s: no icon in the clear", contentId);
+        return 0;
+    }
+    const size_t mapped = ((size_t)size + 0x3FFF) & ~(size_t)0x3FFF;
+    uint8_t* png = (uint8_t*)sysMap(mapped);
+    if (!png) return 0;
+    int ok = 0;
+    if (pkgRead(where, extra, off, size, png) == size && png[0] == 0x89 && png[1] == 'P' && png[2] == 'N' &&
+        png[3] == 'G') {
+        char dir[MAX_PATH], tmp[MAX_PATH];
+        fmt(dir, sizeof(dir), "%s/icons", SC_BGM_DIR);
+        sysMkdir(dir, 0777);
+        fmt(tmp, sizeof(tmp), "%s.part", out);
+        const int fd = sysOpen(tmp, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+        if (fd >= 0) {
+            ok = sysWrite(fd, png, size) == (int)size;
+            sysClose(fd);
+            ok = ok && sysRename(tmp, out) == 0;
+            if (!ok) sysUnlink(tmp);
+        }
+    }
+    sysUnmap(png, mapped);
+    logLine("pkg: %s: icon, %u bytes at 0x%x: %s", contentId, (unsigned)size, (unsigned)off, ok ? out : "not kept");
+    return ok;
 }
 
 // The package (a URL, or a path on the console) registered with the
@@ -232,7 +310,8 @@ static int32_t pkgRegister(const char* where, const char* extra, const char* nam
     p->id = head.contentId;
     p->contentUrl = path;
     p->contentName = name && name[0] ? name : head.contentId;
-    p->iconPath = "";
+    static char icon[MAX_PATH];
+    p->iconPath = pkgIcon(where, extra, head.contentId, icon, sizeof(icon)) ? icon : "";
     p->playgoScenarioId = "0";
     p->packageType = head.type;
     p->packageSubType = "";
