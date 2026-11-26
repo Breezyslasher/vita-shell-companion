@@ -761,9 +761,13 @@ static int cmpName(const char* a, const char* b) {
 
 static void addTrack(const char* path, size_t len) {
     if (g_libCount >= MAX_TRACKS || !len) return;
-    // URL<tab>title<tab>artist<tab>album<tab>cover URL (0.72)
+    // URL<tab>title<tab>artist<tab>album<tab>cover URL (0.72); | between
+    // them too (0.80), easier to type than a tab, for a URL that starts the
+    // line (a path keeps any | it has).
+    const int url = isUrl(path);
+#define SEP(c) ((c) == '\t' || (url && (c) == '|'))
     size_t end = 0;
-    while (end < len && path[end] != '\t') end++;
+    while (end < len && !SEP(path[end])) end++;
     if (end >= MAX_PATH) return;
     memcpy(g_tracks[g_libCount], path, end);
     g_tracks[g_libCount][end] = 0;
@@ -776,12 +780,21 @@ static void addTrack(const char* path, size_t len) {
         if (at >= len) continue;
         at++;  // the tab
         size_t k = 0;
-        while (at < len && path[at] != '\t') {
+        while (at < len && !SEP(path[at])) {
             if (k + 1 < caps[f]) fields[f][k++] = path[at];
             at++;
         }
+        // Spaces around a field, as one may write " | ".
+        while (k && fields[f][k - 1] == ' ') k--;
         fields[f][k] = 0;
+        size_t lead = 0;
+        while (fields[f][lead] == ' ') lead++;
+        if (lead) memmove(fields[f], fields[f] + lead, k - lead + 1);
     }
+#undef SEP
+    // The URL without spaces after it.
+    size_t u = end;
+    while (u && g_tracks[g_libCount][u - 1] == ' ') g_tracks[g_libCount][--u] = 0;
     g_libCount++;
 }
 
@@ -869,7 +882,7 @@ static void loadQueue(void) {
         while (len > 0 && (*line == ' ' || *line == '\t')) line++, len--;
         if (len > 8 && isUrl(line)) {
             int urlLen = 0;
-            while (urlLen < len && line[urlLen] != '\t') urlLen++;
+            while (urlLen < len && line[urlLen] != '\t' && line[urlLen] != '|' && line[urlLen] != ' ') urlLen++;
             int seen = 0;
             for (int i = 0; i < g_libCount && !seen; i++)
                 seen = (int)strlen(g_tracks[i]) == urlLen && !memcmp(g_tracks[i], line, (size_t)urlLen);

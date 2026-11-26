@@ -782,6 +782,10 @@ A queue.txt line for a stream:
 URL<tab>title<tab>artist<tab>album<tab>cover URL
 ```
 
+Since 0.80, `|` also separates the fields of a line that starts with a URL,
+with spaces around them allowed:
+`https://…/song.mp3 | Title | Artist | Album | https://…/cover.jpg`.
+
 0.72–0.74 failed on 11.50 with `http: … libSceSsl 0 …: functions missing`:
 the shell's TLS library there is `libSceSsl2.sprx`. 0.75 tries
 `libSceSsl.sprx`, then `libSceSsl2.sprx`, and looks for any function still
