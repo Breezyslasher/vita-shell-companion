@@ -2734,6 +2734,7 @@ void mcwPre(Frame* f) {
 // The player's, in the same module (ps4/bgm/dllist.c, 0.96): the download
 // service's progress call, answered for a download list's placeholders.
 void dlListHook(Frame* f);
+void dlListQueryHook(Frame* f);
 
 // A native function hooked for the player, under the install lock.
 int mcwHookNative(Hook* h, void* fn, const char** why) {
@@ -2748,6 +2749,10 @@ void mcwPost(Frame* f) {
 #ifdef SC_COMPANION
     if (f->hook->json == 18) {
         dlListHook(f);
+        return;
+    }
+    if (f->hook->json == 19) {
+        dlListQueryHook(f);
         return;
     }
 #endif

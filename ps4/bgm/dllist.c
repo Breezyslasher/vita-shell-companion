@@ -38,7 +38,10 @@ typedef int (*FnBgftUnregister)(int32_t);
 static struct {
     int tried, hooked;
     Hook hooks[2];
-    FnBgftUnregister unregister, stop;
+    Hook query[4];  // the list's task queries (0.98)
+    uint32_t queryCalls[4];
+    uint32_t cleared;
+    FnBgftUnregister unregister, stop, pause;
     uint32_t bitsGoing, bitsWaiting, bitsDone;
     int haveGoing, haveWaiting, haveDone;
     volatile int count;
@@ -142,6 +145,47 @@ void dlListHook(Frame* f) {
             scePthreadGetthreadid());
 }
 
+// After one of the service's task queries (0.98): its results are
+// {int taskId; uint param} pairs, param's 0x200 a failed task (0.85's log:
+// the failed probe tasks 0x10008263, the others 0x10008063). That flag,
+// which the service sets on a placeholder, is what the list shows as
+// "Cannot download" (0.97). Cleared for ours, wherever a pair of ours is
+// found in memory an argument points to.
+void dlListQueryHook(Frame* f) {
+    const Hook* h = f->hook;
+    int q = 0;
+    while (q < 4 && &g_dll.query[q] != h) q++;
+    const uint32_t n = q < 4 ? __atomic_add_fetch(&g_dll.queryCalls[q], 1, __ATOMIC_RELAXED) : 0;
+    if (n <= 4)
+        logLine("dllist: %s(%lx, %lx, %lx, %lx, %lx) = 0x%08X  [call %u, thread %d]", h->name,
+                (unsigned long)f->gpr[0], (unsigned long)f->gpr[1], (unsigned long)f->gpr[2],
+                (unsigned long)f->gpr[3], (unsigned long)f->gpr[4], (unsigned)f->retRax, n,
+                scePthreadGetthreadid());
+    const int count = g_dll.count;
+    if (!count) return;
+    for (int a = 0; a < 6; a++) {
+        uint8_t* p = (uint8_t*)(uintptr_t)f->gpr[a];
+        if ((uintptr_t)p < 0x10000 || ((uintptr_t)p & 3) || hookReadable(p, 8) != 8 || !(hookProt(p) & 2) ||
+            (hookProt(p) & 4))
+            continue;
+        const size_t len = hookReadable(p, 256 * 8);
+        for (size_t at = 0; at + 8 <= len; at += 8) {
+            int32_t id;
+            uint32_t prm;
+            memcpy(&id, p + at, 4);
+            memcpy(&prm, p + at + 4, 4);
+            if (id <= 0 || !(prm & 0x200)) continue;
+            for (int k = 0; k < count && k < DLL_MAX; k++)
+                if (g_dll.e[k].task == id) {
+                    prm &= ~0x200u;
+                    memcpy(p + at + 4, &prm, 4);
+                    if (g_dll.cleared++ < 6)
+                        logLine("dllist: %s: task %d (a%d +0x%x) param now 0x%08X", h->name, id, a, (unsigned)at, prm);
+                }
+        }
+    }
+}
+
 static int dllHex(const char* text, const char* key, uint32_t* out) {
     char v[24];
     statusFieldBgm(text, key, v, sizeof(v));
@@ -175,6 +219,21 @@ static int dllSetup(void) {
     const int lib = libLoad("libSceBgft.sprx");
     g_dll.unregister = (FnBgftUnregister)anySym(lib, "sceBgftServiceIntDownloadUnregisterTask");
     g_dll.stop = (FnBgftUnregister)anySym(lib, "sceBgftServiceDownloadStopTask");
+    g_dll.pause = (FnBgftUnregister)anySym(lib, "sceBgftServiceDownloadPauseTask");
+    // The list's task queries (0.98): the names the shell's wrappers
+    // (BgftWrapper.DownloadQueryTask, ...Section) would call, as
+    // DownloadGetProgress calls sceBgftServiceIntDownloadGetProgress.
+    static const char* const qnames[4] = {"sceBgftServiceIntDownloadQueryTask", "sceBgftServiceIntDownloadQueryTaskSection",
+                                          "sceBgftServiceDownloadQueryTask", "sceBgftServiceDownloadQueryTaskSection"};
+    for (int i = 0; i < 4; i++) {
+        void* fn = anySym(lib, qnames[i]);
+        Hook* h = &g_dll.query[i];
+        h->name = qnames[i] + 10;
+        h->json = 19;
+        const char* why = "not found";
+        const int rc = fn ? mcwHookNative(h, fn, &why) : -1;
+        logLine("dllist: %s %p: %s%s", qnames[i], fn, rc == 0 ? "hooked" : "not hooked: ", rc == 0 ? "" : why);
+    }
     static const char* const names[2] = {"sceBgftServiceDownloadGetProgress", "sceBgftServiceIntDownloadGetProgress"};
     for (int i = 0; i < 2; i++) {
         void* fn = anySym(lib, names[i]);
@@ -186,7 +245,7 @@ static int dllSetup(void) {
         if (rc == 0) g_dll.hooked = 1;
         logLine("dllist: %s %p: %s%s", names[i], fn, rc == 0 ? "hooked" : "not hooked: ", rc == 0 ? "" : why);
     }
-    logLine("dllist: unregister %p, stop %p", (void*)g_dll.unregister, (void*)g_dll.stop);
+    logLine("dllist: unregister %p, stop %p, pause %p", (void*)g_dll.unregister, (void*)g_dll.stop, (void*)g_dll.pause);
     // Left from a crash or an earlier boot.
     char text[1024];
     const int n = readText(DLL_TASKS, text, sizeof(text));
@@ -248,6 +307,20 @@ static void dlListBegin(void) {
         const int rc = g_bgft.reg(&p, &task);
         logLine("dllist: item %d (%s) registered: 0x%08X, task %d", i, p.contentName, (unsigned)rc, task);
         if (rc < 0 || task <= 0) continue;
+        // Paused at once (0.98): the service marked 0.97's failed within a
+        // second, never started.
+        if (g_dll.pause && !sysExists(SC_BGM_DIR "/dl-list-nopause")) {
+            BgftProgress pr;
+            memset(&pr, 0, sizeof(pr));
+            g_bgft.progress(task, &pr);
+            const uint32_t b0 = pr.bits;
+            const int32_t e0 = pr.errorResult;
+            const int prc = g_dll.pause(task);
+            memset(&pr, 0, sizeof(pr));
+            g_bgft.progress(task, &pr);
+            logLine("dllist: task %d: bits 0x%x error 0x%08X; paused 0x%08X; bits 0x%x error 0x%08X", task, b0,
+                    (unsigned)e0, (unsigned)prc, pr.bits, (unsigned)pr.errorResult);
+        }
         const int k = g_dll.count;
         g_dll.e[k].item = i;
         g_dll.e[k].t0 = g_dll.e[k].b0 = 0;

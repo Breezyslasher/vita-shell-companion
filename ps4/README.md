@@ -56,6 +56,17 @@ service's are, not the managed wrappers 0.85 hooked.
   already (416), so none was seen going. 0.97 answers `0x188` for a finished
   one, logs other tasks each time their bits or bytes change (a real
   download's states), and the test app deletes its files first.
+- **0.97 on the PS4:** the three songs were listed under their titles, a
+  "?" for an icon. The one going (bits `0x30a`) read "Preparing to
+  download… (0%)": the list reads the bits we answer, and `0x30a` is
+  preparing, not downloading. The others read "Cannot download", the
+  finished one too, though answered `0x188` with no error: the failure
+  comes from elsewhere, most likely the task query's param (`0x200`).
+  0.98 hooks the task queries (`sceBgftServiceIntDownloadQueryTask`,
+  `...Section`, and the public ones, whichever exist), clears `0x200` on
+  our tasks' pairs, logs their first calls, and pauses each placeholder as
+  it is registered (`dl-list-nopause` not to), logging its bits before and
+  after.
 
 ### One module, and the cleanup (0.95)
 
