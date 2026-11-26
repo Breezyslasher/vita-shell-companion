@@ -693,6 +693,43 @@ shell's first 12 loads with its address and manager's name.
 0.66 works: the track row shows its cover at its left, the title and artist
 beside it (photo, 2026-11-26).
 
+### Editing the queue from the Music section (0.67, an experiment)
+
+The player now keeps a **library** and a **queue**. The library is every
+track loaded (from queue.txt or music/), and a track's number in it is its
+id (`sc<n>`) in the Music section. The queue is a list of library numbers in
+play order. The Music section's front page lists Queue, All songs and Liked
+(from liked.txt, R3 "+"), then the albums. Picking a track in any list but
+Queue makes that list the queue, starting from the track picked (Play All
+starts from its first track). Picking in Queue only jumps to the track.
+
+Buttons on a track list's focused track:
+
+| List | □ | △ |
+|---|---|---|
+| Queue | pick the track up: ↑/↓ move it, X or □ puts it down, ○ cancels | take it out of the queue |
+| any other | play it next (after the track playing) | add it to the end of the queue |
+
+The watch hooks the Music panel's global key handler
+(`ControlPanel.OnGlobalKeyEventReceived`) and acts before it, then marks the
+key handled. That way □ doesn't also open the volume and △ doesn't also
+pause. The pick-up mode is the list control's own
+(`ListPanelBase.BeginItemMoveMode`, the one the home screen uses to move
+tiles). Each `ListPanelBase.OnItemMoved` becomes a `move=<from>:<to>`
+command. When the move mode ends (`EndItemMoveMode`), or after a removal,
+the list asks for the queue again (`TrackListPanel.StartQuery`). The watch
+holds that request until the player's `queue_rev` (status.txt) shows the
+edits made, for up to 1.5 s.
+
+The player's new commands:
+- `move=<from>:<to>` and `remove=<place>`: places in the queue
+- `next=<track>` and `add=<track>`: library numbers
+- `liked`: write the Liked list again
+
+`next`, `add` and `remove` each show a notification. `mcw-noqueuekeys` in
+the player's folder turns the buttons off (they need the row pictures'
+setup, so `mcw-norowart` turns them off too).
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our

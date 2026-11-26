@@ -495,12 +495,67 @@ static void putStr(uint8_t* p, size_t at, size_t cap, const char* s) {
     memcpy(p + at, s, n < cap - 1 ? n : cap - 1);
 }
 
+#define SC_O_APPEND_ 0x0008
 static void sendPlayer(const char* cmd) {
-    const int fd = sysOpen(SC_BGM_CMD, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    // Added to what is there (0.67): two commands in one player's turn
+    // (~85 ms) are both kept. The player renames cmd before it reads it.
+    const int fd = sysOpen(SC_BGM_CMD, SC_O_WRONLY | SC_O_CREAT | SC_O_APPEND_, 0666);
     if (fd >= 0) {
         sysWrite(fd, cmd, strlen(cmd));
         sysClose(fd);
     }
+}
+
+// The player's queue_rev (status.txt), counted on once for each edit of
+// the queue: -1 if not known.
+static int queueRevNow(void) {
+    static char text[2048];
+    const int fd = sysOpen(SC_BGM_STATUS, SC_O_RDONLY, 0);
+    if (fd < 0) return -1;
+    const int m = sysRead(fd, text, sizeof(text) - 1);
+    sysClose(fd);
+    text[m > 0 ? m : 0] = 0;
+    char v[24];
+    statusField(text, "queue_rev", v, sizeof(v));
+    return v[0] ? (int)toU64(v) : -1;
+}
+
+// Edits of the queue sent and not yet seen made (0.67): the Music section's
+// asking for the queue's tracks is held until they are.
+static struct {
+    int lock;
+    int base, pending;
+} g_edits;
+
+static void sendEdit(const char* cmd) {
+    lock(&g_edits.lock);
+    if (!g_edits.pending) g_edits.base = queueRevNow();
+    g_edits.pending++;
+    unlock(&g_edits.lock);
+    sendPlayer(cmd);
+}
+
+// Before the queue's tracks are read for the Music section: the edits sent
+// made, waited for (up to 1.5 s, never on the UI thread).
+static int g_uiThread;
+static void editsWait(void) {
+    lock(&g_edits.lock);
+    const int pending = g_edits.pending, want = g_edits.base + g_edits.pending;
+    unlock(&g_edits.lock);
+    if (!pending || g_edits.base < 0) {
+        g_edits.pending = 0;
+        return;
+    }
+    int rev = queueRevNow(), waited = 0;
+    if (scePthreadGetthreadid() != g_uiThread)
+        for (; rev < want && waited < 1500; waited += 50) {
+            sysSleepMs(50);
+            rev = queueRevNow();
+        }
+    say("queue: %d edit(s) sent, queue_rev %d (wanted %d), %d ms waited", pending, rev, want, waited);
+    lock(&g_edits.lock);
+    g_edits.pending = 0;
+    unlock(&g_edits.lock);
 }
 
 static uint8_t* outBuf(const Frame* f, int arg, size_t size) {
@@ -645,7 +700,10 @@ static int ebgmLibrary(const char* sub, int64_t id) {
     fmt(file, sizeof(file), "%s", g_fake.file);
     unlock(&g_fake.lock);
     if (!file[0]) return 0;
-    if (save || del) likedSet(file, save);
+    if (save || del) {
+        likedSet(file, save);
+        sendPlayer("liked\n");  // the Liked list again (0.67)
+    }
     static char text[64 * 1024];
     const int has = likedHas(file, text, sizeof(text));
     EbgmReq* r = ebgmClaim(id);
@@ -702,6 +760,7 @@ static void ebgmCreated(Frame* f) {
             idText[k++] = ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') || (*q >= '0' && *q <= '9')) ? *q : '_';
         idText[k] = 0;
         fmt(name[0], sizeof(name[0]), EBGM_DIR "/tracks_%s.json", idText);
+        if (eq(idText, "queue")) editsWait();
     }
     int fd = -1, which = 0;
     for (; which < 4 && fd < 0; which++)
@@ -1033,7 +1092,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 14
+#define MONO_HOOKS 17
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -1269,6 +1328,21 @@ static void rowShift(void* row, int e, int keep, float dx) {
     }
 }
 
+// The queue's keys' state (0.67, below: qkKey).
+#define KEY_SQUARE 7
+#define KEY_TRIANGLE 8
+static struct {
+    int ready;
+    uint32_t panel;             // the TrackListPanel last seen (weak)
+    uint32_t moving;            // the ListPanel in move mode, ours (weak)
+    int moveOffset;             // its focus index less the track's place
+    void *fKey, *fKeyEvent, *fHandled;           // KeyEventArgs
+    void *fListPanel, *fPlayList, *fTrackIndex;  // TrackListPanelItem, TrackListPanel, TrackListMenuData
+    void *listFocused, *menuData, *startQuery;   // TrackListPanel
+    void* getList;                               // LoadingListPanel.get_ListPanel
+    void *focusIndex, *isMoving, *beginMove, *withTarget, *endOnBack, *decide;  // ListPanelBase
+} g_qk;
+
 // The track's place in the queue, from its uri (spotify:track:sc<n>): -1 if none.
 static int rowIndex(void* data) {
     if (!data || !g_row.jsonItem) return -1;
@@ -1295,6 +1369,15 @@ static void rowArt(Frame* f) {
     void* row = (void*)(uintptr_t)f->gpr[0];
     void* data = (void*)(uintptr_t)f->gpr[1];
     if (!row || !data) return;
+    g_uiThread = scePthreadGetthreadid();
+    // Its list, for the queue's keys (0.67).
+    if (g_qk.fListPanel) {
+        void* panel = monoGet(row, g_qk.fListPanel);
+        if (panel && (!g_qk.panel || g_row.target(g_qk.panel) != panel)) {
+            if (g_qk.panel && g_row.freeHandle) g_row.freeHandle(g_qk.panel);
+            g_qk.panel = g_row.weak(panel, 0);
+        }
+    }
     // This row's entry, or a free one.
     int e = -1, free_ = -1;
     for (int i = 0; i < ROWS; i++) {
@@ -1445,6 +1528,175 @@ static void rowShellLoad(Frame* f) {
     g_row.manager = g_row.strong(mgr, 0);
 }
 
+// ── The queue edited in the Music section (0.67) ────────────────────────────
+//
+// Buttons on a track list's focused track, taken in the Music panel's own
+// global key handler (ControlPanel.OnGlobalKeyEventReceived, before it: the
+// key then marked handled, so □ does not also open the volume, nor △ pause):
+//   in the Queue:   □ picks the track up (the list's own move mode, as the
+//                   home screen moves a tile): up and down move it, X or □
+//                   puts it down, ○ puts it back; △ takes it out.
+//   in other lists: □ puts the track next (after the one playing), △ last.
+// The player is told (move=, remove=, next=, add=: ps4/bgm); after a move or
+// a removal the list asks for the queue again (TrackListPanel.StartQuery),
+// the asking held until the player has written it (editsWait).
+// mcw-noqueuekeys turns it off.
+
+
+static int qkInt(void* obj, void* field) {
+    int v = 0;
+    if (obj && field) g_mono.get(obj, field, &v);
+    return v;
+}
+
+static int qkBool(void* method, void* obj) {
+    void* boxed = rowCall(method, obj, NULL);
+    return boxed ? *(uint8_t*)g_row.unbox(boxed) != 0 : 0;
+}
+
+// The list's id: its uri's end (queue, all, liked, album<n>).
+static void qkListId(void* panel, char* out, size_t cap) {
+    out[0] = 0;
+    void* data = monoGet(panel, g_qk.fPlayList);
+    if (!data) return;
+    void* args[1] = {g_row.stringNew(g_row.domain, "uri")};
+    void* v = rowCall(g_row.jsonItem, data, args);
+    void* exc = NULL;
+    void* str = v ? g_row.toString(v, &exc) : NULL;
+    if (!str || exc) return;
+    char text[160];
+    monoText((uint64_t)(uintptr_t)str, text, sizeof(text));
+    const char* id = text;
+    for (const char* q = text; *q; q++)
+        if (*q == ':') id = q + 1;
+    size_t k = 0;
+    for (; id[k] && id[k] != '"' && k + 1 < cap; k++) out[k] = id[k];
+    out[k] = 0;
+}
+
+static void qkRequery(void* panel) {
+    if (panel) rowCall(g_qk.startQuery, panel, NULL);
+}
+
+// ControlPanel.OnGlobalKeyEventReceived(sender, args), before it.
+static void qkKey(Frame* f) {
+    if (!g_qk.ready) return;
+    void* args = (void*)(uintptr_t)f->gpr[2];
+    if (!args) return;
+    uint8_t handled = 0;
+    g_mono.get(args, g_qk.fHandled, &handled);
+    const int key = qkInt(args, g_qk.fKey), type = qkInt(args, g_qk.fKeyEvent);
+    if (handled || type != 1 /* Down */ || (key != KEY_SQUARE && key != KEY_TRIANGLE)) return;
+    void* panel = g_qk.panel ? g_row.target(g_qk.panel) : NULL;
+    if (!panel || !qkBool(g_qk.listFocused, panel)) return;
+    void* list = rowCall(g_qk.getList, panel, NULL);
+    if (!list) return;
+    uint8_t yes = 1;
+    if (qkBool(g_qk.isMoving, list)) {
+        // □ puts the track down; △ does nothing meanwhile.
+        if (key == KEY_SQUARE) rowCall(g_qk.decide, list, NULL);
+        g_mono.set(args, g_qk.fHandled, &yes);
+        return;
+    }
+    void* boxed = rowCall(g_qk.focusIndex, list, NULL);
+    if (!boxed) return;
+    int at = *(int*)g_row.unbox(boxed);
+    void* margs[1] = {&at};
+    void* md = rowCall(g_qk.menuData, panel, margs);
+    if (!md || qkInt(md, g_row.fType) != 0 /* a track */) return;
+    const int place = qkInt(md, g_qk.fTrackIndex);
+    const int lib = rowIndex(monoGet(md, g_row.fData));
+    char id[48], cmd[48];
+    qkListId(panel, id, sizeof(id));
+    if (eq(id, "queue")) {
+        if (key == KEY_SQUARE) {
+            void* targs[1] = {&yes};
+            rowCall(g_qk.withTarget, list, targs);
+            rowCall(g_qk.endOnBack, list, targs);
+            rowCall(g_qk.beginMove, list, NULL);
+            if (g_qk.moving && g_row.freeHandle) g_row.freeHandle(g_qk.moving);
+            g_qk.moving = g_row.weak(list, 0);
+            g_qk.moveOffset = at - place;
+            say("queue: track %d (row %d) picked up", place, at);
+        } else {
+            fmt(cmd, sizeof(cmd), "remove=%d\n", place);
+            sendEdit(cmd);
+            qkRequery(panel);
+            say("queue: track %d taken out", place);
+        }
+    } else if (lib >= 0) {
+        fmt(cmd, sizeof(cmd), "%s=%d\n", key == KEY_SQUARE ? "next" : "add", lib);
+        sendEdit(cmd);
+        say("queue: from %s, track %d (library %d): %s", id, place, lib, cmd);
+    }
+    g_mono.set(args, g_qk.fHandled, &yes);
+}
+
+// ListPanelBase.OnItemMoved(from, to), after: in our list in move mode, the
+// player told (each step, or once: either way it follows).
+static void qkMoved(Frame* f) {
+    void* list = (void*)(uintptr_t)f->gpr[0];
+    if (!g_qk.moving || g_row.target(g_qk.moving) != list) return;
+    const int from = (int)f->gpr[1] - g_qk.moveOffset, to = (int)f->gpr[2] - g_qk.moveOffset;
+    char cmd[48];
+    fmt(cmd, sizeof(cmd), "move=%d:%d\n", from, to < 0 ? 0 : to);
+    sendEdit(cmd);
+    say("queue: moved from %d to %d (rows %d to %d)", from, to, (int)f->gpr[1], (int)f->gpr[2]);
+}
+
+// ListPanelBase.EndItemMoveMode(), after: our move done; the queue again.
+static void qkMoveEnded(Frame* f) {
+    void* list = (void*)(uintptr_t)f->gpr[0];
+    if (!g_qk.moving || g_row.target(g_qk.moving) != list) return;
+    if (g_row.freeHandle) g_row.freeHandle(g_qk.moving);
+    g_qk.moving = 0;
+    say("queue: move mode ended");
+    qkRequery(g_qk.panel ? g_row.target(g_qk.panel) : NULL);
+}
+
+static void qkSetup(void* pui, void* app, FnMonoClass cls) {
+    if (sysExists(SC_BGM_DIR "/mcw-noqueuekeys")) {
+        say("queue: keys off (mcw-noqueuekeys)");
+        return;
+    }
+    FnMonoMethod m = g_mono.methodByName;
+    void* kea = pui ? cls(pui, "Sce.PlayStation.PUI", "KeyEventArgs") : NULL;
+    void* lpb = pui ? cls(pui, "Sce.PlayStation.PUI.UI2", "ListPanelBase") : NULL;
+    void* llp = app ? cls(app, "Sce.Vsh.ShellUI.QuickMenu", "LoadingListPanel") : NULL;
+    void* tlp = app ? cls(app, "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListPanel") : NULL;
+    void* item = app ? cls(app, "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListPanelItem") : NULL;
+    void* data = app ? cls(app, "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuData") : NULL;
+    if (kea) {
+        g_qk.fKey = g_mono.fieldByName(kea, "<KeyType>k__BackingField");
+        g_qk.fKeyEvent = g_mono.fieldByName(kea, "<KeyEventType>k__BackingField");
+        g_qk.fHandled = g_mono.fieldByName(kea, "handled");
+    }
+    if (lpb) {
+        g_qk.focusIndex = m(lpb, "get_FocusIndex", 0);
+        g_qk.isMoving = m(lpb, "get_IsItemMoveMode", 0);
+        g_qk.beginMove = m(lpb, "BeginItemMoveMode", 0);
+        g_qk.withTarget = m(lpb, "set_BeginItemMoveModeWithTargetSelected", 1);
+        g_qk.endOnBack = m(lpb, "set_EndItemMoveModeOnBackButton", 1);
+        g_qk.decide = m(lpb, "DecideMoveItem", 0);
+    }
+    if (llp) g_qk.getList = m(llp, "get_ListPanel", 0);
+    if (tlp) {
+        g_qk.listFocused = m(tlp, "get_ListFocused", 0);
+        g_qk.menuData = m(tlp, "GetTrackListMenuData", 1);
+        g_qk.startQuery = m(tlp, "StartQuery", 0);
+        g_qk.fPlayList = g_mono.fieldByName(tlp, "m_playListData");
+    }
+    if (item) g_qk.fListPanel = g_mono.fieldByName(item, "m_listPanel");
+    if (data) g_qk.fTrackIndex = g_mono.fieldByName(data, "TrackIndex");
+    g_qk.ready = g_row.ready && g_mono.set && g_qk.fKey && g_qk.fKeyEvent && g_qk.fHandled &&
+                 g_qk.focusIndex && g_qk.isMoving && g_qk.beginMove && g_qk.withTarget &&
+                 g_qk.endOnBack && g_qk.decide && g_qk.getList && g_qk.listFocused &&
+                 g_qk.menuData && g_qk.startQuery && g_qk.fPlayList && g_qk.fListPanel &&
+                 g_qk.fTrackIndex;
+    say("queue: keys %s (KeyEventArgs %p, ListPanelBase %p, LoadingListPanel %p, TrackListPanel %p)",
+        g_qk.ready ? "ready" : "NOT ready", kea, lpb, llp, tlp);
+}
+
 // Mono's functions and the classes' methods, once (on the watch's thread,
 // attached).
 static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* classFromName) {
@@ -1539,6 +1791,7 @@ static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* class
         "JsonObject.get_Item %p, TrackListMenuData %p, TrackListPanelItem %p: %s",
         box, g_row.ctor, g_row.loadAsync, node, g_row.appendChild, g_row.jsonItem, data, item,
         g_row.ready ? "ready" : "NOT ready");
+    qkSetup(pui, app, cls);
 }
 
 static void monoLog(Frame* f) {
@@ -1592,6 +1845,10 @@ static void monoLog(Frame* f) {
         rowLoaded(f);
     } else if (h->json == 10) {
         rowShellLoad(f);
+    } else if (h->json == 12) {
+        qkMoved(f);
+    } else if (h->json == 13) {
+        qkMoveEnded(f);
     } else if (h->json == 5) {
         if (f->seq <= 50)
             say("mono: %s: %d (0x%X), 0x%X  [#%u, thread %d]", h->name, (int32_t)f->gpr[1],
@@ -1949,6 +2206,13 @@ static void monoHooks(void) {
         // The shell's own loads: their AssetManager, for ours (0.66, rowShellLoad).
         {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ImageBox", "LoadAsync", 3, 10,
          "ImageBox.LoadAsync"},
+        // The queue edited by keys in the Music section (0.67, qkKey).
+        {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "ControlPanel", "OnGlobalKeyEventReceived",
+         2, 11, "ControlPanel.OnGlobalKeyEventReceived"},
+        {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ListPanelBase", "OnItemMoved", 2, 12,
+         "ListPanelBase.OnItemMoved"},
+        {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ListPanelBase", "EndItemMoveMode", 0, 13,
+         "ListPanelBase.EndItemMoveMode"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
@@ -2022,6 +2286,10 @@ void mcwPre(Frame* f) {
             }
         }
     }
+    if (h->json == 11) {
+        qkKey(f);  // a key, before the Music panel's handler sees it (0.67)
+        return;
+    }
     if (h->json) return;  // the key, after: nothing read here
     for (int i = 0; i < 6; i++) {
         f->preLen[i] = 0;
@@ -2042,7 +2310,8 @@ void mcwPre(Frame* f) {
 void mcwPost(Frame* f) {
     if (f->hook->json) {
         if (!g_quiet || f->hook->json == 2 || f->hook->json == 6 || f->hook->json == 7 ||
-            f->hook->json == 8 || f->hook->json == 9 || f->hook->json == 10)
+            f->hook->json == 8 || f->hook->json == 9 || f->hook->json == 10 ||
+            f->hook->json == 12 || f->hook->json == 13)
             monoLog(f);
         return;
     }

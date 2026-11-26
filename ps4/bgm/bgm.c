@@ -55,10 +55,17 @@ static const char* stateName(int s) {
     return s == ST_PLAYING ? "playing" : s == ST_PAUSED ? "paused" : "stopped";
 }
 
-// The queue.
+// The library (every track loaded, by its number: a track's id, sc<n>, in
+// the Music section) and the queue (the library's numbers, in the order they
+// play: g_count of them, g_index the one playing). The Music section edits
+// the queue (0.67): an album played becomes it, a track moved, taken out, or
+// put next or last in it.
 static char g_tracks[MAX_TRACKS][MAX_PATH];
+static int g_libCount;
+static int g_q[MAX_TRACKS];
 static int g_count;
 static int g_index;
+static int g_queueRev;  // counts the queue's changes, in status.txt (queue_rev)
 static int g_state = ST_STOPPED;
 // The volume, 0 to 32768 (0 dB): the quick menu's, through the music watch
 // (volume=<n> as cmd).
@@ -469,10 +476,15 @@ static int cmpName(const char* a, const char* b) {
 }
 
 static void addTrack(const char* path, size_t len) {
-    if (g_count >= MAX_TRACKS || !len || len >= MAX_PATH) return;
-    memcpy(g_tracks[g_count], path, len);
-    g_tracks[g_count][len] = 0;
-    g_count++;
+    if (g_libCount >= MAX_TRACKS || !len || len >= MAX_PATH) return;
+    memcpy(g_tracks[g_libCount], path, len);
+    g_tracks[g_libCount][len] = 0;
+    g_libCount++;
+}
+
+// The track playing's path, or "".
+static const char* curPath(void) {
+    return g_index < g_count ? g_tracks[g_q[g_index]] : "";
 }
 
 // Every .mp3 and .wav in music/, by name.
@@ -498,7 +510,7 @@ static void scanMusic(void) {
     sysClose(fd);
     // By name: insertion sort, as there are few.
     static char tmp[MAX_PATH];
-    for (int i = 1; i < g_count; i++) {
+    for (int i = 1; i < g_libCount; i++) {
         memcpy(tmp, g_tracks[i], MAX_PATH);
         int j = i - 1;
         for (; j >= 0 && cmpName(g_tracks[j], tmp) > 0; j--)
@@ -513,6 +525,7 @@ static void writeLibrary(void);
 
 static void loadQueue(void) {
     static char text[MAX_TRACKS * 96];
+    g_libCount = 0;
     g_count = 0;
     g_index = 0;
     const int n = readText(SC_BGM_QUEUE, text, sizeof(text));
@@ -531,11 +544,15 @@ static void loadQueue(void) {
             }
             at = end + 1;
         }
-        logLine("queue.txt: %d track(s)", g_count);
+        logLine("queue.txt: %d track(s)", g_libCount);
     } else {
         scanMusic();
-        logLine("no queue.txt; music/: %d track(s)", g_count);
+        logLine("no queue.txt; music/: %d track(s)", g_libCount);
     }
+    // The queue: the whole library, in order.
+    for (int i = 0; i < g_libCount; i++) g_q[i] = i;
+    g_count = g_libCount;
+    g_queueRev++;
     if (start < g_count) g_index = start;
     writeLibrary();
 }
@@ -702,15 +719,14 @@ static void libRead(int i) {
     g_meta.artLen = keepLen;
 }
 
-// One playlist's tracks: those of album (or all, album -1).
-static void libTracks(char* out, size_t cap, const char* id, int album) {
+// One playlist's tracks, the library's numbers list[0..n), as
+// tracks_<id>.json.
+static void libTracks(char* out, size_t cap, const char* id, const int* list, int n) {
     size_t at = 0;
-    int n = 0;
-    for (int i = 0; i < g_count; i++) n += album < 0 || g_lib[i].albumId == album;
     libAdd(out, cap, &at, "{\"total\":%d,\"offset\":0,\"limit\":%d,\"track_list\":[", n, n);
     int first = 1;
-    for (int i = 0; i < g_count; i++) {
-        if (album >= 0 && g_lib[i].albumId != album) continue;
+    for (int k = 0; k < n; k++) {
+        const int i = list[k];
         libAdd(out, cap, &at, "%s{\"name\":\"", first ? "" : ",");
         jsonPut(out, cap, &at, g_lib[i].title);
         libAdd(out, cap, &at, "\",\"artists\":[{\"name\":\"");
@@ -727,59 +743,178 @@ static void libTracks(char* out, size_t cap, const char* id, int album) {
     writeText(path, out);
 }
 
+#define LIB_CAP (512u * 1024u)
+static char* g_libOut;  // the files' text, made here: mapped once
+
+// The liked tracks (liked.txt, a path a line, as the music watch keeps it for
+// R3 "+"): their library numbers, into list; how many.
+static int likedList(int* list) {
+    static char text[64 * 1024];
+    const int len = readText(SC_BGM_DIR "/liked.txt", text, sizeof(text));
+    int n = 0;
+    for (int at = 0; at < len;) {
+        int end = at;
+        while (end < len && text[end] != '\n' && text[end] != '\r') end++;
+        text[end] = 0;
+        for (int i = 0; end > at && i < g_libCount; i++)
+            if (libSame(g_tracks[i], text + at)) {
+                int seen = 0;
+                for (int k = 0; k < n; k++) seen |= list[k] == i;
+                if (!seen) list[n++] = i;
+                break;
+            }
+        at = end + 1;
+    }
+    return n;
+}
+
+// An album's tracks, in the library's order; how many.
+static int albumList(int a, int* list) {
+    int n = 0;
+    for (int i = 0; i < g_libCount; i++)
+        if (g_lib[i].albumId == a) list[n++] = i;
+    return n;
+}
+
+static int g_list[MAX_TRACKS];  // a list's numbers, made here (the player's thread only)
+
+// A list's picture: the album cover of its first track that has one.
+static int listArt(const int* list, int n) {
+    for (int k = 0; k < n; k++) {
+        const int a = g_lib[list[k]].albumId;
+        if (a >= 0 && a < g_nAlbums && g_albums[a].art) return a;
+    }
+    return -1;
+}
+
+static void viewList(size_t* at, const char* name, const char* id, int art, int total, int first) {
+    char* out = g_libOut;
+    libAdd(out, LIB_CAP, at, "%s{\"name\":\"", first ? "" : ",");
+    jsonPut(out, LIB_CAP, at, name);
+    libAdd(out, LIB_CAP, at, "\",\"uri\":\"" LIB_URI "%s\",\"type\":\"playlist\",\"image_url\":\"", id);
+    if (art >= 0) libAdd(out, LIB_CAP, at, LIB_URL "album%d.jpg", art);
+    libAdd(out, LIB_CAP, at, "\",\"total\":%d}", total);
+}
+
+// The Music section's front page, recommended_views.json: Shell Companion
+// (Queue, All songs, Liked), then Albums.
+static void writeViews(void) {
+    if (!g_libOut) return;
+    size_t at = 0;
+    libAdd(g_libOut, LIB_CAP, &at, "{\"upgrade_scopes_required\":false,\"accounts_linked\":true,"
+                                   "\"views\":[{\"name\":\"Shell Companion\",\"lists\":[");
+    viewList(&at, "Queue", "queue", listArt(g_q, g_count), g_count, 1);
+    for (int i = 0; i < g_libCount; i++) g_list[i] = i;
+    viewList(&at, "All songs", "all", listArt(g_list, g_libCount), g_libCount, 0);
+    const int liked = likedList(g_list);
+    viewList(&at, "Liked", "liked", listArt(g_list, liked), liked, 0);
+    libAdd(g_libOut, LIB_CAP, &at, "]}");
+    if (g_nAlbums) {
+        libAdd(g_libOut, LIB_CAP, &at, ",{\"name\":\"Albums\",\"lists\":[");
+        for (int a = 0; a < g_nAlbums; a++) {
+            char id[16];
+            fmt(id, sizeof(id), "album%d", a);
+            viewList(&at, g_lib[g_albums[a].tracks].album, id, g_albums[a].art ? a : -1,
+                     albumList(a, g_list), a == 0);
+        }
+        libAdd(g_libOut, LIB_CAP, &at, "]}");
+    }
+    libAdd(g_libOut, LIB_CAP, &at, "]}\n");
+    writeText(LIB_DIR "/recommended_views.json", g_libOut);
+}
+
+// The queue changed: its list and the front page (its total) again, and
+// queue_rev counted on, for the music watch, which holds the Music
+// section's asking for the queue until it sees it (0.67).
+static void writeQueue(void) {
+    if (!g_libOut) return;
+    libTracks(g_libOut, LIB_CAP, "queue", g_q, g_count);
+    writeViews();
+    g_queueRev++;
+}
+
+static void writeLiked(void) {
+    if (!g_libOut) return;
+    libTracks(g_libOut, LIB_CAP, "liked", g_list, likedList(g_list));
+    writeViews();
+}
+
 static void writeLibrary(void) {
     sysMkdir(LIB_DIR, 0777);
     g_nAlbums = 0;
-    for (int i = 0; i < g_count; i++) libRead(i);
-    const size_t cap = 512u * 1024u;
-    char* out = (char*)sysMap(cap);
-    if (!out) return;
-    // The whole queue's picture: the first album's with a cover.
-    int queueArt = -1;
-    for (int a = 0; a < g_nAlbums && queueArt < 0; a++)
-        if (g_albums[a].art) queueArt = a;
-    size_t at = 0;
-    libAdd(out, cap, &at, "{\"upgrade_scopes_required\":false,\"accounts_linked\":true,\"views\":["
-                          "{\"name\":\"Shell Companion\",\"lists\":[{\"name\":\"Queue\",\"uri\":\""
-                          LIB_URI "queue\",\"type\":\"playlist\",\"image_url\":\"");
-    if (queueArt >= 0) libAdd(out, cap, &at, LIB_URL "album%d.jpg", queueArt);
-    libAdd(out, cap, &at, "\",\"total\":%d}]}", g_count);
-    if (g_nAlbums) {
-        libAdd(out, cap, &at, ",{\"name\":\"Albums\",\"lists\":[");
-        for (int a = 0; a < g_nAlbums; a++) {
-            int n = 0;
-            for (int i = 0; i < g_count; i++) n += g_lib[i].albumId == a;
-            libAdd(out, cap, &at, "%s{\"name\":\"", a ? "," : "");
-            jsonPut(out, cap, &at, g_lib[g_albums[a].tracks].album);
-            libAdd(out, cap, &at, "\",\"uri\":\"" LIB_URI "album%d\",\"type\":\"playlist\","
-                                  "\"image_url\":\"", a);
-            if (g_albums[a].art) libAdd(out, cap, &at, LIB_URL "album%d.jpg", a);
-            libAdd(out, cap, &at, "\",\"total\":%d}", n);
-        }
-        libAdd(out, cap, &at, "]}");
-    }
-    libAdd(out, cap, &at, "]}\n");
-    writeText(LIB_DIR "/recommended_views.json", out);
-    libTracks(out, cap, "queue", -1);
+    for (int i = 0; i < g_libCount; i++) libRead(i);
+    if (!g_libOut) g_libOut = (char*)sysMap(LIB_CAP);
+    if (!g_libOut) return;
+    for (int i = 0; i < g_libCount; i++) g_list[i] = i;
+    libTracks(g_libOut, LIB_CAP, "all", g_list, g_libCount);
     for (int a = 0; a < g_nAlbums; a++) {
         char id[16];
         fmt(id, sizeof(id), "album%d", a);
-        libTracks(out, cap, id, a);
+        libTracks(g_libOut, LIB_CAP, id, g_list, albumList(a, g_list));
     }
-    sysUnmap(out, cap);
-    logLine("library: %d track(s), %d album(s), written to ebgm/", g_count, g_nAlbums);
+    writeLiked();
+    writeQueue();
+    logLine("library: %d track(s), %d album(s), written to ebgm/", g_libCount, g_nAlbums);
 }
 
-// A track chosen in the Music section: a playlist's id (queue, album<n>)
-// and the track's place in it, to its place in the queue; -1 if none.
+static const char* libTitle(int i) {
+    return i >= 0 && i < g_libCount && g_lib[i].title[0] ? g_lib[i].title : "a track";
+}
+
+// A track chosen in the Music section: a list's id (queue, all, liked,
+// album<n>) and the track's place in it, to its place in the queue; -1 if
+// none. A list other than the queue becomes the queue (0.67), as a player
+// plays an album from the track chosen.
 static int libPick(const char* id, int n) {
     if (libSame(id, "queue")) return n >= 0 && n < g_count ? n : -1;
-    if (memcmp(id, "album", 5) != 0) return -1;
-    int a = 0;
-    for (const char* p = id + 5; *p >= '0' && *p <= '9'; p++) a = a * 10 + (*p - '0');
-    for (int i = 0; i < g_count; i++)
-        if (g_lib[i].albumId == a && n-- == 0) return i;
-    return -1;
+    int count;
+    if (libSame(id, "all")) {
+        for (int i = 0; i < g_libCount; i++) g_list[i] = i;
+        count = g_libCount;
+    } else if (libSame(id, "liked")) {
+        count = likedList(g_list);
+    } else if (!memcmp(id, "album", 5)) {
+        int a = 0;
+        for (const char* p = id + 5; *p >= '0' && *p <= '9'; p++) a = a * 10 + (*p - '0');
+        count = albumList(a, g_list);
+    } else {
+        return -1;
+    }
+    if (n < 0 || n >= count) return -1;
+    memcpy(g_q, g_list, sizeof(int) * (size_t)count);
+    g_count = count;
+    g_played = 0;
+    writeQueue();
+    logLine("queue: now %s, %d track(s)", id, count);
+    return n;
+}
+
+// The queue edited from the Music section (0.67, through the music watch).
+static void queueMove(int from, int to) {
+    if (from < 0 || from >= g_count || from == to) return;
+    if (to < 0) to = 0;
+    if (to >= g_count) to = g_count - 1;
+    const int t = g_q[from];
+    if (from < to)
+        for (int k = from; k < to; k++) g_q[k] = g_q[k + 1];
+    else
+        for (int k = from; k > to; k--) g_q[k] = g_q[k - 1];
+    g_q[to] = t;
+    if (g_index == from) g_index = to;
+    else if (from < g_index && to >= g_index) g_index--;
+    else if (from > g_index && to <= g_index) g_index++;
+    logLine("queue: %s moved from %d to %d", libTitle(t), from, to);
+    writeQueue();
+}
+
+static void queueInsert(int at, int lib) {
+    if (lib < 0 || lib >= g_libCount || g_count >= MAX_TRACKS) return;
+    if (at > g_count) at = g_count;
+    for (int k = g_count; k > at; k--) g_q[k] = g_q[k - 1];
+    g_q[at] = lib;
+    g_count++;
+    if (at <= g_index && g_count > 1) g_index++;
+    writeQueue();
 }
 
 static uint64_t g_lastStatus;
@@ -789,10 +924,12 @@ static void writeStatus(void) {
     const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : 0;
     fmt(text, sizeof(text),
         "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\ndur_ms=%lu\nfile=%s\nbeat_ms=%lu\n"
-        "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\nvolume=%d\nrepeat=%d\nshuffle=%d\ncover=%s\n",
+        "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\nvolume=%d\nrepeat=%d\nshuffle=%d\ncover=%s\n"
+        "queue_rev=%d\ntrack=%d\n",
         SC_BGM_PROTOCOL, stateName(g_state), g_index, g_count, (uint64_t)posMs, g_src.durMs,
-        g_count ? g_tracks[g_index] : "", (uint64_t)(sysNowUs() / 1000u), g_meta.title,
-        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen, (int)g_volume, g_repeat, g_shuffle, g_meta.cover);
+        curPath(), (uint64_t)(sysNowUs() / 1000u), g_meta.title,
+        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen, (int)g_volume, g_repeat, g_shuffle, g_meta.cover,
+        g_queueRev, g_index < g_count ? g_q[g_index] : -1);
     writeText(SC_BGM_STATUS, text);
     g_lastStatus = sysNowUs();
 }
@@ -837,9 +974,9 @@ static int portOpen(void) {
 // is left.
 static int openTrack(void) {
     for (; g_index < g_count; g_index++) {
-        if (srcOpen(g_tracks[g_index])) {
+        if (srcOpen(curPath())) {
             rsStart();
-            notify("Now playing: %s", baseName(g_tracks[g_index]));
+            notify("Now playing: %s", baseName(curPath()));
             return 1;
         }
     }
@@ -918,6 +1055,51 @@ static void runCommand(const char* text, int n) {
             if (openTrack()) g_state = ST_PLAYING;
             else stop("that track would not open");
         }
+    } else if (n >= 5 && (!memcmp(text, "move=", 5) || !memcmp(text, "remove=", 7) ||
+                         !memcmp(text, "next=", 5) || !memcmp(text, "add=", 4))) {
+        // The queue edited in the Music section (0.67): move=<from>:<to>
+        // (places in the queue), remove=<place>, next=<track> and
+        // add=<track> (the library's numbers: put after the one playing, or
+        // last).
+        int v[2] = {0, 0}, k = 0;
+        for (int i = 0; i < n && k < 2; i++) {
+            if (text[i] == '=' || text[i] == ':') {
+                for (i++; i < n && text[i] >= '0' && text[i] <= '9'; i++) v[k] = v[k] * 10 + (text[i] - '0');
+                k++;
+                i--;
+            }
+        }
+        if (!g_count && g_libCount == 0) loadQueue();
+        if (text[0] == 'm' && text[1] == 'o') {
+            queueMove(v[0], v[1]);
+        } else if (text[0] == 'r') {
+            if (v[0] >= 0 && v[0] < g_count) {
+                const int t = g_q[v[0]];
+                for (int i = v[0]; i + 1 < g_count; i++) g_q[i] = g_q[i + 1];
+                g_count--;
+                notify("Removed from the queue: %s", libTitle(t));
+                if (v[0] < g_index) {
+                    g_index--;
+                } else if (v[0] == g_index) {
+                    // The one playing: the next plays, or the queue has ended.
+                    const int was = g_state;
+                    srcClose();
+                    if (g_index >= g_count) g_index = 0;
+                    if (!g_count || (was != ST_STOPPED && !openTrack())) stop("its track was removed");
+                    else if (was == ST_PAUSED && g_state != ST_STOPPED) g_state = ST_PAUSED;
+                    if (was == ST_STOPPED) g_state = ST_STOPPED;
+                }
+                writeQueue();
+            }
+        } else if (text[0] == 'n') {
+            queueInsert(g_count ? g_index + 1 : 0, v[0]);
+            notify("Plays next: %s", libTitle(v[0]));
+        } else {
+            queueInsert(g_count, v[0]);
+            notify("Added to the queue: %s", libTitle(v[0]));
+        }
+    } else if (IS("liked")) {
+        writeLiked();  // liked.txt changed (R3 "+"): the Liked list again
     } else if (n > 7 && !memcmp(text, "repeat=", 7)) {
         g_repeat = text[7] == '1' ? 1 : text[7] == '2' ? 2 : 0;
     } else if (n > 8 && !memcmp(text, "shuffle=", 8)) {
