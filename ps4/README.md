@@ -149,6 +149,44 @@ With only our own player running, the Quick Menu's music widget polls:
 memory other threads change. From 0.28 a getter's answer is only the rows
 the call itself wrote, and it's logged at most 5 times a second.
 
+### The USB Music Player and the quick menu: the protocol (11.50)
+
+Seen with the watch while the USB Music Player played `yoursong.mp3` from a
+USB drive and its quick menu entry's buttons were pressed:
+
+**`GetPlayStatus(status*)`**: returns 0 and fills 0x70 bytes:
+
+| Offset | Seen | Meaning |
+|---|---|---|
+| `+04` u32 | 2 playing, 3 paused | state |
+| `+08` u32 | 100 | volume |
+| `+10` u64 | 281 | the track's length, s (the MP3 is 4:41) |
+| `+18` u64 | 1, 2, 3 ... once a second | position, s |
+| `+2C` u32 | 1 | (track count?) |
+| `+30` u32 | 0x8000 | ? |
+| `+44` u32 | 1 | ? |
+| `+48` s32 | -2 | the core's id: PlayControl's first argument |
+| `+54`, `+58` u32 | 1, 1 | ? |
+| `+60` char[] | `NPXS20117` | the core's title (the USB Music Player) |
+
+**`GetEvent(event*, 1, ...)`**: polled 60 times a second; `0x80FD0014`
+when there is nothing, else 0 with `event+0` = **2**, about once a second
+while playing and at once after each button. The shell then calls
+GetPlayStatus.
+
+**`PlayControl(core, command, 0, 100, 100)`**: `core` -2 (GetPlayStatus's
+`+48`). Command **1 play** (state 3 to 2), **3 pause** (2 to 3, the position
+kept). Next and previous weren't pressed.
+
+**`GetTrackInfo(index, uri*, ...)`**: index 0 filled `uri` with
+`file:///usb264499990_music/yoursong.mp3`, the track's file; the call took
+13 ms. Its title and artist come from elsewhere (the file's tags?).
+
+**`LaunchUsbMusicCore(3, 1)`**: called twice, returned 0, when the music
+started. **`GetPlayStartCondition(titleId, out*)`**: called from the
+Library's option menu with a game's title (`CUSA01780`): `out` `00 01 01 00`,
+whether music may play on in that game, it seems.
+
 ### The USB Music Player is NPXS20117
 
 `/system_ex/app/NPXS20117/sce_sys/param.sfo` says TITLE "USB Music Player",
