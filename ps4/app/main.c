@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.8"
+#define APP_VERSION "0.9"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -386,16 +386,37 @@ static void listShellSandbox(void) {
     fflush(g_log);
 }
 
-// Copies the package's build of the module to dest: 0, or -1.
-static int copyBuild(const char* dest) {
+// Copies a file of the package to dest: 0, or -1.
+static int copyFromPackage(const char* name, const char* dest) {
     char src[160];
-    snprintf(src, sizeof(src), PKG_DIR "/%s", g_builds[g_build]);
+    snprintf(src, sizeof(src), PKG_DIR "/%s", name);
     FILE* f = fopen(src, "rb");
     if (!f) return -1;
     static uint8_t buf[512 * 1024];
     const size_t n = fread(buf, 1, sizeof(buf), f);
     fclose(f);
     return n ? writeFile(dest, buf, n) : -1;
+}
+
+// The places to ask the shell for a module from, as the projects that do
+// it keep theirs: Zenalios/ps4-thumbgrid-ime asks for /user/data/... and
+// /data/...; j117mw3/ps4-hen-rest copies its module into the shell's
+// sandbox under Temp/. name is copied to each first. 1 if one loaded.
+static int intoShell(const char* name) {
+    char data[160], temp[200], inShell[160];
+    snprintf(data, sizeof(data), SC_BGM_DIR "/%s", name);
+    if (copyFromPackage(name, data) == 0) {
+        char user[180];
+        snprintf(user, sizeof(user), "/user%s", data);
+        if (shellLoad(user) || shellLoad(data)) return 1;
+    }
+    mkdir(SHELL_SANDBOX "/Temp/ShellCompanion", 0777);
+    snprintf(temp, sizeof(temp), SHELL_SANDBOX "/Temp/ShellCompanion/%s", name);
+    snprintf(inShell, sizeof(inShell), "/Temp/ShellCompanion/%s", name);
+    if (copyFromPackage(name, temp) == 0 && (shellLoad(inShell) || shellLoad(temp))) return 1;
+    char pkg[160];
+    snprintf(pkg, sizeof(pkg), PKG_DIR "/%s", name);
+    return shellLoad(pkg);
 }
 
 // Starts the player inside this app, the way a module is meant to be
@@ -405,7 +426,7 @@ static int copyBuild(const char* dest) {
 static int g_inApp;
 static int startInApp(void) {
     if (g_inApp) return 1;
-    if (g_build < 0) return 0;
+    if (g_build < 0) g_build = 0;  // its only build: tried anyway
     char paths[2][160];
     snprintf(paths[0], sizeof(paths[0]), PKG_DIR "/%s", g_builds[g_build]);
     snprintf(paths[1], sizeof(paths[1]), "/app0/%s", g_builds[g_build]);
@@ -435,30 +456,20 @@ static void loadPlayer(void) {
         return;
     }
     say("-- loading, app " APP_VERSION " --");
-    findBuild();
     listShellSandbox();
-    if (g_build < 0) return;
-    // Into the shell, where the two projects that do it load from:
-    // Zenalios/ps4-thumbgrid-ime asks for /data/..., then /user/data/...;
-    // j117mw3/ps4-hen-rest copies its module into the shell's sandbox,
-    // under Temp/, and loads it from there.
-    if (copyBuild(SC_BGM_PRX) == 0) {
-        if (shellLoad("/user" SC_BGM_PRX) || shellLoad(SC_BGM_PRX)) {
-            g_loadedFrom = 1;
-            return;
-        }
+    // First, once, the test module made as ps4-hen-rest makes its shell
+    // module: a notification says it runs in the shell.
+    static int helloTried;
+    if (!helloTried) {
+        helloTried = 1;
+        selfLoad(PKG_DIR "/hello.prx");
+        say("Test module into the shell: %s", intoShell("hello.prx") ? "loaded" : "refused");
     }
-    mkdir(SHELL_SANDBOX "/Temp/ShellCompanion", 0777);
-    if (copyBuild(SHELL_SANDBOX "/Temp/ShellCompanion/sc_bgm.prx") == 0 &&
-        (shellLoad("/Temp/ShellCompanion/sc_bgm.prx") ||
-         shellLoad(SHELL_SANDBOX "/Temp/ShellCompanion/sc_bgm.prx"))) {
-        g_loadedFrom = 3;
-        return;
-    }
-    char path[160];
-    snprintf(path, sizeof(path), PKG_DIR "/%s", g_builds[g_build]);
-    if (shellLoad(path)) {
-        g_loadedFrom = 4;
+    // Then the player. Loading it into this app is logged, but does not
+    // decide: the projects above never load theirs into an app.
+    findBuild();
+    if (intoShell("sc_bgm.prx")) {
+        g_loadedFrom = 1;
         return;
     }
     say("The shell would not load it: send app.log");

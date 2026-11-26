@@ -24,3 +24,7 @@ The PS4 test app (ps4/app) carries OpenOrbis's libc.prx, libSceFios2.prx
 and right.sprx, from the OpenOrbis PS4 Toolchain v0.5.2
 (https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain, GPL-3.0), and draws
 its text with font8x8 by Daniel Hepper (public domain).
+
+The test app's test module (ps4/app/recipe) uses crt/crtprx.c of the
+GoldHEN Plugins SDK (https://github.com/GoldHEN/GoldHEN_Plugins_SDK, MIT
+licence, ps4/app/recipe/LICENSE-GoldHEN_Plugins_SDK).
