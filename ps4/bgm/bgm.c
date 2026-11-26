@@ -1188,8 +1188,11 @@ static void libTracks(char* out, size_t cap, const char* id, const int* list, in
         jsonPut(out, cap, &at, g_lib[i].artist);
         libAdd(out, cap, &at, "\"}],\"album\":{\"name\":\"");
         jsonPut(out, cap, &at, g_lib[i].album);
-        libAdd(out, cap, &at, "\"},\"uri\":\"spotify:track:sc%d\",\"explicit\":false,"
-                              "\"is_playable\":true}", i);
+        // "id": the shell's TrackListMenuData.IsSameData compares it (0.79):
+        // with none, a row reused for another track as the list scrolled was
+        // taken for the same and kept its old title.
+        libAdd(out, cap, &at, "\"},\"id\":\"sc%d\",\"uri\":\"spotify:track:sc%d\",\"explicit\":false,"
+                              "\"is_playable\":true}", i, i);
         first = 0;
     }
     libAdd(out, cap, &at, "]}\n");

@@ -836,6 +836,16 @@ the tracks asked for (`offset`, `limit`), the `total` counting all of them,
 so the shell asks for the next page as the list scrolls. This also lifts the
 64 KB limit an answer had, which a long list would have passed.
 
+### Rows' titles: a track's `id` (0.79)
+
+With the pages right (0.78), rows reused while scrolling still kept their old
+titles: the stream's row read "Dublin to L.A.", and track 13's row read the
+first track's. Before updating a row, the shell compares the old track and
+the new one by `id` (`TryGetValue("id")` on both, `TrackListMenuData.IsSameData`).
+Our tracks had none, so every pair matched and the title was not redrawn.
+The pictures and the track played were right, since they come from our
+hooks and the row's `uri`. Each track now has `"id":"sc<n>"`.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our
