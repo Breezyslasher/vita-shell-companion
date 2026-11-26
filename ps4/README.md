@@ -896,6 +896,19 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### Set up again when loaded early (0.88)
+
+When the shell started again (after a crash), the watch was loaded while
+only 63 of its ~220 modules were in. The UI library
+(`Sce.PlayStation.PUI`) wasn't there yet, so the rows' covers and the
+queue's keys stayed off for the session (`rowart: … NOT ready`,
+`queue: keys NOT ready`); 0.15 s later the library was in, and the other
+hooks went in. The watch now tries those two setups again every 2 s, up
+to a minute, until they are ready.
+
+0.87, with the download service's hooks off, didn't crash with a download
+going.
+
 ### "+" as each app wants it (0.86)
 
 The Music section's "+" (R3, Spotify's "Add to Your Music") is the shell's,

@@ -1969,6 +1969,26 @@ static void qkSetup(void* pui, void* app, FnMonoClass cls) {
 
 // Mono's functions and the classes' methods, once (on the watch's thread,
 // attached).
+static struct {
+    void *mono, *domain, *attach, *detach, *imageLoaded, *classFromName;
+    int tries;
+} g_setupAgain;
+
+static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* classFromName);
+
+// From the watch's loop, every 2 s while the rows' covers or the queue's keys
+// are not ready, up to a minute.
+static void setupAgain(void) {
+    if (!g_setupAgain.attach || g_setupAgain.tries >= 30 || (g_row.ready && g_qk.ready)) return;
+    if (sysExists(SC_BGM_DIR "/mcw-norowart")) return;
+    g_setupAgain.tries++;
+    void* thread = ((FnMonoPtr)g_setupAgain.attach)(g_setupAgain.domain);
+    if (!thread) return;
+    say("rowart: setting up again (%d)", g_setupAgain.tries);
+    rowArtSetup(g_setupAgain.mono, g_setupAgain.domain, g_setupAgain.imageLoaded, g_setupAgain.classFromName);
+    if (g_setupAgain.detach) ((FnMonoDetach)g_setupAgain.detach)(thread);
+}
+
 static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* classFromName) {
     if (sysExists(SC_BGM_DIR "/mcw-norowart")) {
         say("rowart: off (mcw-norowart)");
@@ -2496,6 +2516,15 @@ static void monoHooks(void) {
     drain();
     if (!thread) return;
     rowArtSetup((void*)(intptr_t)mono, domain, imageLoaded, classFromName);
+    // Kept to try again (0.88): loaded early, as the shell starts again, the
+    // UI library was not there yet, and the rows' covers and the queue's keys
+    // stayed off.
+    g_setupAgain.mono = (void*)(intptr_t)mono;
+    g_setupAgain.domain = domain;
+    g_setupAgain.attach = attach;
+    g_setupAgain.detach = detach;
+    g_setupAgain.imageLoaded = imageLoaded;
+    g_setupAgain.classFromName = classFromName;
     drain();
     static const struct {
         const char *image, *ns, *klass, *method;
@@ -3163,6 +3192,11 @@ static void* watchMain(void* arg) {
         sysSleepMs(200);
         fakeRefresh();
         const uint64_t now = sysNowUs();
+        static uint64_t lastSetup;
+        if (now - lastSetup >= 2000000u) {
+            lastSetup = now;
+            setupAgain();
+        }
         if (now - lastBeat >= 1000000u) {
             // Alive, for the client library (scOpen loads the watch only
             // when this is old: a second copy would hook everything twice).
