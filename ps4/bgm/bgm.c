@@ -135,6 +135,7 @@ typedef int (*FnHttpRead)(int, void*, size_t);
 typedef int (*FnHttpId)(int);
 typedef int (*FnHttpTimeout)(int, uint32_t);
 typedef int (*FnHttpsOption)(int, uint32_t);
+typedef int (*FnHttpHeader)(int, const char*, const char*, uint32_t);
 static struct {
     int tried, ok, ctx;
     FnHttpTmpl tmpl;
@@ -147,6 +148,8 @@ static struct {
     FnHttpId delReq, delConn, delTmpl;
     FnHttpTimeout connectTimeout, recvTimeout;
     FnHttpsOption httpsOff;
+    FnHttpHeader addHeader;  // sceHttpAddRequestHeader (0.82, downloads)
+    volatile int lock;
 } g_http;
 
 // A function from the module given, else from any module the shell has
@@ -162,7 +165,16 @@ static void* anySym(int handle, const char* symbol) {
 }
 
 // libSceHttp, once: 1 if it is there to use.
+static int httpSetupOnce(void);
+// Two threads ask (a stream's, the downloads'): one sets it up.
 static int httpSetup(void) {
+    while (__atomic_exchange_n(&g_http.lock, 1, __ATOMIC_ACQUIRE)) sysSleepMs(1);
+    const int ok = httpSetupOnce();
+    __atomic_store_n(&g_http.lock, 0, __ATOMIC_RELEASE);
+    return ok;
+}
+
+static int httpSetupOnce(void) {
     if (g_http.tried) return g_http.ok;
     g_http.tried = 1;
     const int net = libLoad("libSceNet.sprx"), http = libLoad("libSceHttp.sprx");
@@ -191,6 +203,7 @@ static int httpSetup(void) {
     HTTP_SYM(connectTimeout, FnHttpTimeout, "sceHttpSetConnectTimeOut");
     HTTP_SYM(recvTimeout, FnHttpTimeout, "sceHttpSetRecvTimeOut");
     HTTP_SYM(httpsOff, FnHttpsOption, "sceHttpsDisableOption");
+    HTTP_SYM(addHeader, FnHttpHeader, "sceHttpAddRequestHeader");
 #undef HTTP_SYM
     if (!pool || !sslInit || !httpInit || !g_http.tmpl || !g_http.conn || !g_http.req ||
         !g_http.send || !g_http.status || !g_http.length || !g_http.read || !g_http.delReq ||
