@@ -539,6 +539,13 @@ static void sendEdit(const char* cmd) {
     sendPlayer(cmd);
 }
 
+// The row last chosen in a track list: its track (the library's number, from
+// its uri, sc<n>), or -1 for Play All; when (0.77).
+static struct {
+    int lib;
+    uint64_t us;
+} g_chosen = {-1, 0};
+
 // Before the queue's tracks are read for the Music section: the edits sent
 // made, waited for (up to 1.5 s, never on the UI thread).
 static int g_uiThread;
@@ -1000,7 +1007,11 @@ static void fakeApply(Frame* f) {
         for (const char* q = uri; *q; q++)
             if (*q == ':') id = q + 1;
         char cmd[80];
-        fmt(cmd, sizeof(cmd), "pick=%s:%d\n%s", id, index < 0 ? 0 : index,
+        // The row's own track, if it was just chosen (0.77, qkChosen).
+        char lib[16] = "";
+        if (g_chosen.lib >= 0 && sysNowUs() - g_chosen.us < 3000000u) fmt(lib, sizeof(lib), ":%d", g_chosen.lib);
+        g_chosen.lib = -1;
+        fmt(cmd, sizeof(cmd), "pick=%s:%d%s\n%s", id, index < 0 ? 0 : index, lib,
             (uint32_t)f->gpr[4] ? "shuffle=1\n" : "");
         sendPlayer(cmd);
         say("fake: PlaySpUri(\"%s\", track %d, view %lu, shuffle %lu): %s", uri, index, f->gpr[3],
@@ -1098,7 +1109,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 19
+#define MONO_HOOKS 21
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -1707,6 +1718,18 @@ static void qkKey(Frame* f) {
 static int qkIndex(void* method, void* list) {
     void* boxed = method ? rowCall(method, list, NULL) : NULL;
     return boxed ? *(int*)g_row.unbox(boxed) : -1;
+}
+
+// TrackListMenuPanel.OnItemSelected(menuData), before: the row's own track,
+// for PlaySpUri's pick (the list's place alone played another song when the
+// list the shell showed was older than the player's).
+static void qkChosen(Frame* f) {
+    void* md = (void*)(uintptr_t)f->gpr[1];
+    g_chosen.lib = -1;
+    g_chosen.us = sysNowUs();
+    if (!md || !g_row.ready || !g_row.fType) return;
+    if (qkInt(md, g_row.fType) == 0) g_chosen.lib = rowIndex(monoGet(md, g_row.fData));
+    say("queue: row chosen: track %d", g_chosen.lib);
 }
 
 // ListPanelBase.OnItemMoved(from, to), after: logged only. 0.67 took each
@@ -2323,6 +2346,11 @@ static void monoHooks(void) {
          "ListPanelBase.DecideMoveItem"},
         {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ListPanelBase", "RollbackMoveTarget", 0, 15,
          "ListPanelBase.RollbackMoveTarget"},
+        // A row chosen: its own track, for the pick (0.77, qkChosen).
+        {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuPanel", "OnItemSelected", 1, 16,
+         "TrackListMenuPanel.OnItemSelected"},
+        {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuPanel", "OnItemSelected", 2, 16,
+         "TrackListMenuPanel.OnItemSelected(withLog)"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
@@ -2398,6 +2426,10 @@ void mcwPre(Frame* f) {
     }
     if (h->json == 11) {
         qkKey(f);  // a key, before the Music panel's handler sees it (0.67)
+        return;
+    }
+    if (h->json == 16) {
+        qkChosen(f);  // a row chosen, before it is played (0.77)
         return;
     }
     if (h->json == 14 || h->json == 15) {

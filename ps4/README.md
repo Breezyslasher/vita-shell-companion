@@ -811,6 +811,19 @@ is replaced for any new cover once a load has been begun into it. 0.75 kept
 the box when the row had held a track with no cover in between, and that
 load could still land.
 
+### A pick plays the row's own track (0.77)
+
+PlaySpUri gives only the list and the row's place in it. The list the shell
+shows can be older than the player's: the Queue it had loaded before a pick
+in an album replaced the queue, or before an edit. Then the row's place
+holds another track, and a different song played. The watch now hooks
+`TrackListMenuPanel.OnItemSelected(menuData)` (both overloads, before) and
+keeps the chosen row's own track (`sc<n>` from its uri). PlaySpUri then
+sends `pick=<list>:<place>:<track>`. The player plays that track: at that
+place if it is there, else where it is in the list (the nearest), else, for
+the queue, put after the one playing. bgm.log says when the place held
+another track.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our

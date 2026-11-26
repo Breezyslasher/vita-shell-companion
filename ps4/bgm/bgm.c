@@ -1330,8 +1330,31 @@ static const char* libTitle(int i) {
 // album<n>) and the track's place in it, to its place in the queue; -1 if
 // none. A list other than the queue becomes the queue (0.67), as a player
 // plays an album from the track chosen.
-static int libPick(const char* id, int n) {
-    if (libSame(id, "queue")) return n >= 0 && n < g_count ? n : -1;
+static void queueInsert(int at, int lib);
+
+// lib, the row's own track if known (0.77): the list the shell shows may be
+// older than ours (the queue, after a list played became it), so where the
+// row's place holds another track, the track is looked for.
+static int listFind(const int* list, int count, int n, int lib) {
+    if (lib < 0 || lib >= g_libCount) return n;
+    if (n >= 0 && n < count && list[n] == lib) return n;
+    int best = -1;
+    for (int k = 0; k < count; k++)
+        if (list[k] == lib && (best < 0 || (k > n ? k - n : n - k) < (best > n ? best - n : n - best))) best = k;
+    if (best >= 0) logLine("pick: place %d holds track %d, not %d: track %d is at %d", n,
+                           n >= 0 && n < count ? list[n] : -1, lib, lib, best);
+    return best;  // -1: not in it
+}
+
+static int libPick(const char* id, int n, int lib) {
+    if (libSame(id, "queue")) {
+        n = listFind(g_q, g_count, n, lib);
+        if (n >= 0 && n < g_count) return n;
+        if (lib < 0 || lib >= g_libCount || g_count >= MAX_TRACKS) return -1;
+        // Not in the queue now: put after the one playing, and played.
+        queueInsert(g_count ? g_index + 1 : 0, lib);
+        return g_count > 1 ? g_index + 1 : 0;
+    }
     int count;
     if (libSame(id, "all")) {
         for (int i = 0; i < g_libCount; i++) g_list[i] = i;
@@ -1345,6 +1368,8 @@ static int libPick(const char* id, int n) {
     } else {
         return -1;
     }
+    const int found = listFind(g_list, count, n, lib);
+    if (found >= 0) n = found;
     if (n < 0 || n >= count) return -1;
     memcpy(g_q, g_list, sizeof(int) * (size_t)count);
     g_count = count;
@@ -1518,11 +1543,15 @@ static void runCommand(const char* text, int n) {
         int k = 0, i = 5;
         while (i < n && text[i] != ':' && k < 31) id[k++] = text[i++];
         id[k] = 0;
-        int v = 0;
+        int v = 0, lib = -1;
         for (i++; i < n && text[i] >= '0' && text[i] <= '9'; i++) v = v * 10 + (text[i] - '0');
+        // :<track>: the row's own track (0.77), the library's number.
+        if (i < n && text[i] == ':')
+            for (lib = 0, i++; i < n && text[i] >= '0' && text[i] <= '9'; i++) lib = lib * 10 + (text[i] - '0');
         if (!g_count) loadQueue();
-        const int at = libPick(id, v);
-        logLine("pick %s:%d: track %d", id, v, at);
+        const int at = libPick(id, v, lib);
+        logLine("pick %s:%d (track %d): place %d in the queue, track %d", id, v, lib, at,
+                at >= 0 && at < g_count ? g_q[at] : -1);
         if (at >= 0) {
             g_index = at;
             if (openTrack()) g_state = ST_PLAYING;
