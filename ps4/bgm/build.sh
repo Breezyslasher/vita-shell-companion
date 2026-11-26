@@ -62,7 +62,7 @@ fi
 objcopy --set-section-flags .bss=alloc,load,contents -O binary -R .rela.dyn \
     "$OUT/sc_bgm_raw.elf" "$OUT/sc_bgm.bin"
 for e in sc_bgm sc_bgm_c; do
-    if ! readelf -lW "$OUT/$e.elf" | grep -q GNU_EH_FRAME; then
+    if ! objdump -p "$OUT/$e.elf" | grep -q EH_FRAME; then  # GNU objdump: the image's readelf prints nothing
         echo "bgm: $e.elf has no PT_GNU_EH_FRAME" >&2
         exit 1
     fi
