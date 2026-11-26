@@ -854,10 +854,13 @@ static void jsonLog(Frame* f) {
 // keys logged while an answer is read); the Music section's check that
 // Spotify's app is there and recent enough (2, answered true while ebgm/ is
 // there: Spotify is not installed, and the section offered to download it);
-// the version it found (3, logged).
-#define MONO_HOOKS 6
+// the version it found (3, logged); the panels told of it (4, never of a
+// version below APPVER_SAID while ebgm/ is there).
+#define MONO_HOOKS 7
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
+#define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
+#define APPVER_SAID 9.99f   // what it is made when lower: Spotify's app there, and recent
 
 static void monoLog(Frame* f) {
     const Hook* h = f->hook;
@@ -869,9 +872,26 @@ static void monoLog(Frame* f) {
     if (h->json == 2) {
         const int was = (int)(f->retRax & 0xFF);
         if (g_forceApp) f->retRax = (f->retRax & ~(uint64_t)0xFF) | 1;
-        if (first)
-            say("mono: %s(%lu) = %d%s  [#%u, thread %d]", h->name, f->gpr[1] & 0xFF, was,
-                g_forceApp && !was ? ", answered 1" : "", f->seq, scePthreadGetthreadid());
+        // Its object's m_appVer, the Spotify app's version it found (0: not
+        // installed), at 0xB8 (get_AppVer: vmovss xmm0, [rdi+0xb8]). 0.44's
+        // true alone left "Download Spotify" there, X going to it.
+        float ver = -1.0f;
+        uint8_t* self = (uint8_t*)(uintptr_t)f->gpr[0];
+        if (hookReadable(self + APPVER_AT, 4) == 4 && (hookProt(self + APPVER_AT) & 2)) {
+            memcpy(&ver, self + APPVER_AT, 4);
+            if (g_forceApp && ver < APPVER_SAID) {
+                const float said = APPVER_SAID;
+                memcpy(self + APPVER_AT, &said, 4);
+            }
+        }
+        if (first) {
+            const int v100 = (int)(ver * 100.0f);
+            say("mono: %s(%lu) = %d%s; app version there %d.%02d%s  [#%u, thread %d]", h->name,
+                f->gpr[1] & 0xFF, was, g_forceApp && !was ? ", answered 1" : "", v100 / 100,
+                (v100 < 0 ? -v100 : v100) % 100,
+                g_forceApp && ver < APPVER_SAID ? ", made 9.99" : "", f->seq,
+                scePthreadGetthreadid());
+        }
     } else if (h->json == 3 && first) {
         float v;
         memcpy(&v, f->retXmm0, 4);
@@ -928,6 +948,8 @@ static void monoHooks(void) {
          "IsValidAppVer", 1, 2, "IsValidAppVer"},
         {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicContext",
          "get_AppVer", 0, 3, "AppVer"},
+        {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicContext",
+         "NotifyAppVerChanged", 1, 4, "NotifyAppVerChanged"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
@@ -959,6 +981,21 @@ void mcwPre(Frame* f) {
     f->t0 = sysNowUs();
     Hook* h = f->hook;
     f->seq = __atomic_add_fetch(&h->calls, 1, __ATOMIC_RELAXED);
+    if (h->json == 4 && g_forceApp) {
+        // NotifyAppVerChanged(float ver), ver in xmm0, changed before the
+        // call: the panels told of an installed Spotify, never of 0.
+        float v;
+        memcpy(&v, f->xmm[0], 4);
+        if (v < APPVER_SAID) {
+            const float said = APPVER_SAID;
+            memcpy(f->xmm[0], &said, 4);
+            if (f->seq <= 20) {
+                const int v100 = (int)(v * 100.0f);
+                say("mono: NotifyAppVerChanged(%d.%02d) made 9.99  [#%u]", v100 / 100,
+                    (v100 < 0 ? -v100 : v100) % 100, f->seq);
+            }
+        }
+    }
     if (h->json) return;  // the key, after: nothing read here
     for (int i = 0; i < 6; i++) {
         f->preLen[i] = 0;

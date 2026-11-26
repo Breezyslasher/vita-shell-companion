@@ -363,6 +363,16 @@ true while `ebgm/` is there; `get_AppVer`, the version it found, is logged.
 `accounts_linked` (the shell asked for it on the views' root). 0.45's views
 have `"accounts_linked": true`.
 
+### "Download Spotify" (0.45, 0.46)
+
+With `accounts_linked`, choosing the playlist no longer opened Spotify's
+linking page, but "Download Spotify" stayed beside it and X moved there:
+`IsValidAppVer` answered true is not all that is read. Its object's
+`m_appVer` (the Spotify app's version found, 0 for none: `get_AppVer` is
+`vmovss xmm0, [rdi+0xb8]`) is made 9.99 after each `IsValidAppVer`, and
+`NotifyAppVerChanged(float)` is hooked and its argument made 9.99 before the
+call, while `ebgm/` is there.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
