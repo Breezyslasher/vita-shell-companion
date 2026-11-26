@@ -1,0 +1,64 @@
+name: Docs
+
+# The documentation as a website on GitHub Pages: README.md as its front
+# page, docs/ and ps4/README.md beside it, each Markdown file a page (links
+# between them kept). Pages must be set to "GitHub Actions" once, in the
+# repository's Settings > Pages.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - docs/**
+      - ps4/README.md
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gather the pages
+        run: |
+          set -eu
+          mkdir -p site/docs site/ps4
+          # Each page raw to Jekyll's templates: the C in them has {{ and {%.
+          raw() { { printf '{%% raw %%}\n'; cat "$1"; printf '\n{%% endraw %%}\n'; } > "$2"; }
+          raw README.md site/index.md
+          for f in docs/*.md; do raw "$f" "site/docs/$(basename "$f")"; done
+          raw ps4/README.md site/ps4/README.md
+          printf '%s\n' \
+            'title: Shell Companion' \
+            'description: Keep an app'"'"'s music and downloads going in the PS Vita and PS4 shells' \
+            'theme: jekyll-theme-primer' \
+            'plugins:' \
+            '  - jekyll-relative-links' \
+            'relative_links:' \
+            '  enabled: true' > site/_config.yml
+      - uses: actions/configure-pages@v5
+      - uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./site
+          destination: ./_site
+      - uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
