@@ -394,6 +394,21 @@ Spotify's (`mono_field_set_value`) and calls its
 `NotifyAppBrowseItemChanged` (`mono_runtime_invoke`). Each step is logged
 (`mono: spotify entry: …`).
 
+### The Music section's own code (0.49)
+
+Once per boot, unless `code/methods.map` is there, the watch writes the
+machine code of the Music section's classes (`PlayStationMusicPanel`,
+`PlayListPanel`, `PlayListPanelItem`, `PlayListMenuData`,
+`PlayStationMusicContext`, `MusicPlayerPanel`, `ControlPanel`, the track list's
+classes, `UserContext`, `AppBrowseItemData`, `DirectPlayback`) to
+`code/code.bin`, and `code/methods.map`: each class's fields and their offsets,
+each method's place in `code.bin`, its address, size and full name, and each
+call in it (walked with HDE64, followed through `jmp [rip]` stubs) with the
+method called, named by Mono. Methods with no AOT code (abstract, P/Invoke,
+runtime) are skipped, as asking for them would abort the runtime; the one
+being asked for is kept in `code/dumping`, and one the shell went down on is
+skipped from then on (`code/skip.txt`).
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

@@ -34,6 +34,7 @@
 
 #include "../bgm/bgm.h"
 #include "../probe/sys.h"
+#include "hde64.h"
 #include "hook.h"
 
 int sceKernelLoadStartModule(const char* path, size_t args, const void* argp, uint32_t flags,
@@ -987,6 +988,206 @@ static void monoLog(Frame* f) {
     }
 }
 
+// ── The Music section's own code, for reading (0.49) ─────────────────────────
+//
+// Its C# is compiled away (full AOT): what decides "Download Spotify", and
+// what X on a playlist does, is only in its machine code. For each class
+// below, through Mono: its fields' offsets; each method's code (its address
+// from mono_compile_method, its start and size from mono_jit_info_table_find),
+// into code/code.bin; and each call in it, walked with HDE64, followed through
+// a jmp [rip] stub, named by mono_jit_info_table_find. code/methods.map has
+// it all, to disassemble beside. Once: delete code/ to have it again.
+//
+// mono_compile_method on a method with no AOT code would abort this
+// precompiled runtime: abstract, P/Invoke and runtime methods are skipped,
+// and the method about to be asked for is kept in code/dumping; one the shell
+// went down on is in code/skip.txt from then on.
+
+#define CODE_DIR SC_BGM_DIR "/code"
+typedef void* (*FnMonoIter)(void*, void**);
+typedef char* (*FnMonoFullName)(void*, int);
+typedef uint32_t (*FnMonoFlags)(void*, uint32_t*);
+typedef void* (*FnMonoJitFind)(void*, void*);
+typedef void* (*FnMonoJitPtr)(void*);
+typedef int (*FnMonoJitSize)(void*);
+typedef int (*FnMonoFieldOffset)(void*);
+static struct {
+    FnMonoIter methods;
+    FnMonoFullName fullName;
+    FnMonoFlags flags;
+    FnMonoJitFind jitFind;
+    FnMonoJitPtr jitStart, jitMethod;
+    FnMonoJitSize jitSize;
+    FnMonoFieldOffset fieldOffset;
+} g_dump;
+
+static int dumpPut(int fd, const char* f, ...) __attribute__((format(printf, 2, 3)));
+static int dumpPut(int fd, const char* f, ...) {
+    char line[700];
+    va_list ap;
+    va_start(ap, f);
+    int n = fmtv(line, sizeof(line), f, ap);
+    va_end(ap);
+    if (n > (int)sizeof(line) - 2) n = sizeof(line) - 2;
+    line[n++] = '\n';
+    return sysWrite(fd, line, (size_t)n);
+}
+
+// The managed method at addr, by name, into out: "" if Mono has none.
+static void dumpName(void* domain, uint64_t addr, char* out, size_t cap) {
+    out[0] = 0;
+    void* ji = g_dump.jitFind(domain, (void*)(uintptr_t)addr);
+    void* m = ji ? g_dump.jitMethod(ji) : NULL;
+    char* n = m ? g_dump.fullName(m, 1) : NULL;
+    if (n) fmt(out, cap, "%s", n);
+}
+
+static uint64_t followStub(uint64_t t) {
+    const uint8_t* p = (const uint8_t*)(uintptr_t)t;
+    if (hookReadable(p, 6) == 6 && p[0] == 0xFF && p[1] == 0x25) {  // jmp [rip+d]: a PLT entry
+        int32_t d;
+        memcpy(&d, p + 2, 4);
+        const uint64_t* slot = (const uint64_t*)(uintptr_t)(t + 6 + (int64_t)d);
+        if (hookReadable(slot, 8) == 8) return *slot;
+    }
+    return t;
+}
+
+static void codeDump(void* domain, void* imageLoaded, void* classFromName, void* compile) {
+    if (sysExists(CODE_DIR "/methods.map")) {
+        say("code: code/methods.map is there already: not again");
+        return;
+    }
+    if (!g_dump.methods || !g_dump.fullName || !g_dump.jitFind || !g_dump.jitStart ||
+        !g_dump.jitSize || !g_dump.jitMethod) {
+        say("code: Mono's API for it is not all there");
+        return;
+    }
+    sysMkdir(CODE_DIR, 0777);
+    // A method the shell went down on last time: skipped from now on.
+    char last[300];
+    int fd = sysOpen(CODE_DIR "/dumping", SC_O_RDONLY, 0);
+    if (fd >= 0) {
+        const int n = sysRead(fd, last, sizeof(last) - 1);
+        sysClose(fd);
+        if (n > 0) {
+            last[n] = 0;
+            const int sk = sysOpen(CODE_DIR "/skip.txt", SC_O_WRONLY | SC_O_CREAT, 0666);
+            if (sk >= 0) {
+                sysSeek(sk, 0, 2);
+                dumpPut(sk, "%s", last);
+                sysClose(sk);
+            }
+            say("code: the last dump stopped at %s: skipped from now on", last);
+        }
+        sysUnlink(CODE_DIR "/dumping");
+    }
+    static char skips[4096];
+    skips[0] = 0;
+    fd = sysOpen(CODE_DIR "/skip.txt", SC_O_RDONLY, 0);
+    if (fd >= 0) {
+        const int n = sysRead(fd, skips, sizeof(skips) - 1);
+        skips[n > 0 ? n : 0] = 0;
+        sysClose(fd);
+    }
+    const int map = sysOpen(CODE_DIR "/methods.map.new", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    const int bin = sysOpen(CODE_DIR "/code.bin", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    if (map < 0 || bin < 0) return;
+    static const char* const want[][2] = {
+        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicPanel"},
+        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayListPanel"},
+        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayListPanelItem"},
+        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayListMenuData"},
+        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicContext"},
+        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "MusicPlayerPanel"},
+        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "ControlPanel"},
+        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListPanel"},
+        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuData"},
+        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuPanel"},
+        {"Sce.Vsh.ShellUI.QuickMenu", "UserContext"},
+        {"Sce.Vsh.ShellUI.QuickMenu", "AppBrowseItemData"},
+        {"Sce.Vsh.ShellUI.QuickMenu", "DirectPlayback"},
+    };
+    void* image = ((FnMonoName)imageLoaded)("app");
+    uint64_t at = 0;
+    int methods = 0, calls = 0;
+    for (size_t k = 0; image && k < sizeof(want) / sizeof(want[0]); k++) {
+        void* klass = ((FnMonoClass)classFromName)(image, want[k][0], want[k][1]);
+        dumpPut(map, "class %s.%s %p", want[k][0], want[k][1], klass);
+        if (!klass) continue;
+        void* iter = NULL;
+        void* f;
+        while (g_dump.fieldOffset && g_mono.fields && (f = g_mono.fields(klass, &iter)))
+            dumpPut(map, "field 0x%x %s", (unsigned)g_dump.fieldOffset(f),
+                    g_mono.fieldName ? g_mono.fieldName(f) : "?");
+        iter = NULL;
+        void* m;
+        while ((m = g_dump.methods(klass, &iter))) {
+            char* full = g_dump.fullName(m, 1);
+            if (!full) continue;
+            uint32_t iflags = 0;
+            const uint32_t flags = g_dump.flags ? g_dump.flags(m, &iflags) : 0;
+            // abstract 0x400, pinvoke 0x2000; internal call 0x1000, runtime 0x3
+            if ((flags & 0x2400) || (iflags & 0x1003)) {
+                dumpPut(map, "skip %s (flags 0x%x, 0x%x)", full, flags, iflags);
+                continue;
+            }
+            if (contains(skips, full)) {
+                dumpPut(map, "skip %s (it went down last time)", full);
+                continue;
+            }
+            fd = sysOpen(CODE_DIR "/dumping", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+            if (fd >= 0) {
+                sysWrite(fd, full, strlen(full));
+                sysFsync(fd);
+                sysClose(fd);
+            }
+            void* code = ((FnMonoPtr)compile)(m);
+            void* ji = code ? g_dump.jitFind(domain, code) : NULL;
+            const uint8_t* start = ji ? g_dump.jitStart(ji) : NULL;
+            const int size = ji ? g_dump.jitSize(ji) : 0;
+            if (!start || size <= 0 || size > (1 << 20) || hookReadable(start, (size_t)size) < (size_t)size) {
+                dumpPut(map, "nocode %p %s", code, full);
+                continue;
+            }
+            sysWrite(bin, start, (size_t)size);
+            dumpPut(map, "method 0x%lx %p 0x%x %s", at, start, (unsigned)size, full);
+            // Its calls, named.
+            for (int o = 0; o < size;) {
+                hde64s hs;
+                const unsigned len = hde64_disasm(start + o, &hs);
+                if (!len || (hs.flags & F_ERROR)) break;
+                uint64_t to = 0;
+                const uint64_t end = (uint64_t)(uintptr_t)(start + o + len);
+                if (hs.opcode == 0xE8 && (hs.flags & F_IMM32)) to = end + (int64_t)(int32_t)hs.imm.imm32;
+                else if (hs.opcode == 0xFF && hs.modrm_reg == 2 && hs.modrm_mod == 0 && hs.modrm_rm == 5) {
+                    const uint64_t* slot = (const uint64_t*)(uintptr_t)(end + (int64_t)(int32_t)hs.disp.disp32);
+                    if (hookReadable(slot, 8) == 8) to = *slot;
+                }
+                if (to) {
+                    char name[400];
+                    const uint64_t real = followStub(to);
+                    dumpName(domain, real, name, sizeof(name));
+                    dumpPut(map, "  call +0x%x %lx %s", (unsigned)o, real, name[0] ? name : "?");
+                    calls++;
+                }
+                o += (int)len;
+            }
+            at += (uint64_t)size;
+            methods++;
+        }
+        say("code: %s: done, %d methods so far", want[k][1], methods);
+        drain();
+    }
+    sysClose(bin);
+    sysClose(map);
+    sysUnlink(CODE_DIR "/dumping");
+    sysRename(CODE_DIR "/methods.map.new", CODE_DIR "/methods.map");
+    say("code: %d methods, %lu bytes, %d calls named: code/methods.map and code/code.bin", methods,
+        at, calls);
+    notify("Music watch: the Music section's code is in ShellCompanion/ps4/code");
+}
+
 static void monoHooks(void) {
     g_forceApp = sysExists(EBGM_DIR);
     int mono = -1;
@@ -1017,6 +1218,14 @@ static void monoHooks(void) {
     if (!sceKernelDlsym(mono, "mono_field_get_name", &p)) g_mono.fieldName = (FnMonoFieldName)p;
     if (!sceKernelDlsym(mono, "mono_runtime_invoke", &p)) g_mono.invoke = (FnMonoInvoke)p;
     g_mono.methodByName = (FnMonoMethod)methodFromName;
+    if (!sceKernelDlsym(mono, "mono_class_get_methods", &p)) g_dump.methods = (FnMonoIter)p;
+    if (!sceKernelDlsym(mono, "mono_method_full_name", &p)) g_dump.fullName = (FnMonoFullName)p;
+    if (!sceKernelDlsym(mono, "mono_method_get_flags", &p)) g_dump.flags = (FnMonoFlags)p;
+    if (!sceKernelDlsym(mono, "mono_jit_info_table_find", &p)) g_dump.jitFind = (FnMonoJitFind)p;
+    if (!sceKernelDlsym(mono, "mono_jit_info_get_code_start", &p)) g_dump.jitStart = (FnMonoJitPtr)p;
+    if (!sceKernelDlsym(mono, "mono_jit_info_get_code_size", &p)) g_dump.jitSize = (FnMonoJitSize)p;
+    if (!sceKernelDlsym(mono, "mono_jit_info_get_method", &p)) g_dump.jitMethod = (FnMonoJitPtr)p;
+    if (!sceKernelDlsym(mono, "mono_field_get_offset", &p)) g_dump.fieldOffset = (FnMonoFieldOffset)p;
     say("mono: object class %p, field by name %p, get %p, set %p, fields %p, field name %p, invoke %p",
         (void*)g_mono.objectClass, (void*)g_mono.fieldByName, (void*)g_mono.get, (void*)g_mono.set,
         (void*)g_mono.fields, (void*)g_mono.fieldName, (void*)g_mono.invoke);
@@ -1071,6 +1280,9 @@ static void monoHooks(void) {
             rc == 0 ? "hooked" : "NOT hooked: ", rc == 0 ? "" : why);
         drain();
     }
+    drain();
+    codeDump(domain, imageLoaded, classFromName, compile);
+    drain();
     if (detach) ((FnMonoDetach)detach)(thread);
     say("mono: this thread detached; IsValidAppVer %s", g_forceApp ? "answered true (ebgm/ is there)" : "only logged");
 }
