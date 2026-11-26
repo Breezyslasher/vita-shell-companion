@@ -278,6 +278,55 @@ static int pkgIcon(const char* where, const char* extra, const char* contentId, 
     return ok;
 }
 
+// The icon an app gave an item (icon=, 1.29), ready for the service's
+// iconPath: a path on the console as it is (/data/... is /user/data/...
+// here), a URL fetched once to SC_BGM_DIR/icons/u<hash>.<png|jpg>. NULL
+// if it gave none or it can't be had. The service is given PNGs (the
+// apps' icon0.png, packages' own); anything else is passed on and logged.
+static const char* dlItemIcon(int i, char* out, size_t cap) {
+    const char* want = i >= 0 && i < g_dls.count ? g_dls.item[i].icon : "";
+    if (!want[0]) return NULL;
+    if (want[0] == '/') {
+        fmt(out, cap, "%s%s", !memcmp(want, "/data/", 6) ? "/user" : "", want);
+        if (sysExists(out)) return out;
+        logLine("dlicon: %s: not there", out);
+        return NULL;
+    }
+    uint32_t h = 2166136261u;
+    for (const char* p = want; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+    char dir[MAX_PATH], part[MAX_PATH];
+    fmt(dir, sizeof(dir), "%s/icons", SC_BGM_DIR);
+    fmt(out, cap, "%s/u%08x.png", dir, h);
+    if (sysExists(out)) return out;
+    fmt(out, cap, "%s/u%08x.jpg", dir, h);
+    if (sysExists(out)) return out;
+    sysMkdir(dir, 0777);
+    fmt(part, sizeof(part), "%s/u%08x.part", dir, h);
+    sysUnlink(part);
+    uint64_t got = 0, have = 0, size = 0;
+    const int r = dlGet(want, part, NULL, &got, &have, &size);
+    uint8_t m[4] = {0};
+    const int fd = r == GET_DONE ? sysOpen(part, SC_O_RDONLY, 0) : -1;
+    if (fd >= 0) {
+        sysRead(fd, m, sizeof(m));
+        sysClose(fd);
+    }
+    const int png = m[0] == 0x89 && m[1] == 'P' && m[2] == 'N' && m[3] == 'G';
+    const int jpg = m[0] == 0xFF && m[1] == 0xD8;
+    if (!png && !jpg) {
+        logLine("dlicon: item %d: icon URL not fetched as a picture (%d, %lu bytes)", i, r, (unsigned long)have);
+        sysUnlink(part);
+        return NULL;
+    }
+    fmt(out, cap, "%s/u%08x.%s", dir, h, png ? "png" : "jpg");
+    if (sysRename(part, out) != 0) {
+        sysUnlink(part);
+        return NULL;
+    }
+    logLine("dlicon: item %d: %lu bytes, %s%s", i, (unsigned long)have, out, png ? "" : " (a JPEG: may not show)");
+    return out;
+}
+
 // The package (a URL, or a path on the console) registered with the
 // service and started: its task id, or a negative code.
 // The form of a path on the console the service is given: 0 the system's
@@ -286,7 +335,7 @@ static int pkgIcon(const char* where, const char* extra, const char* contentId, 
 // /user/data/... it installed (1.05). pkgItem tries /data/... if that fails.
 static int g_pkgUserPaths = 1;  // 1.05: /data/... failed 0x80990004, /user/data/... installed
 
-static int32_t pkgRegister(const char* where, const char* extra, const char* name) {
+static int32_t pkgRegister(const char* where, const char* extra, const char* name, const char* given) {
     if (!bgftSetup()) return -1;
     if (g_bgft.user == -1) bgftUser();
     const int local = where[0] == '/';
@@ -311,7 +360,8 @@ static int32_t pkgRegister(const char* where, const char* extra, const char* nam
     p->contentUrl = path;
     p->contentName = name && name[0] ? name : head.contentId;
     static char icon[MAX_PATH];
-    p->iconPath = pkgIcon(where, extra, head.contentId, icon, sizeof(icon)) ? icon : "";
+    // The app's for it first (1.29), else the package's own (1.28).
+    p->iconPath = given ? given : pkgIcon(where, extra, head.contentId, icon, sizeof(icon)) ? icon : "";
     p->playgoScenarioId = "0";
     p->packageType = head.type;
     p->packageSubType = "";
@@ -439,7 +489,7 @@ static void* updateMain(void* arg) {
     // The app's /data path is /user/data here.
     char where[MAX_PATH];
     fmt(where, sizeof(where), "%s%s", !memcmp(source, "/data/", 6) ? "/user" : "", source);
-    const int32_t task = pkgRegister(where, NULL, title);
+    const int32_t task = pkgRegister(where, NULL, title, NULL);
     if (task < 0) {
         char why[96];
         fmt(why, sizeof(why), "the PS4 would not take the package (0x%08X)", (unsigned)task);
@@ -495,7 +545,9 @@ static int pkgItem(int i) {
     // A path the app gave (/data/...) is /user/data/... in the shell (0.99).
     char where[MAX_PATH];
     fmt(where, sizeof(where), "%s%s", !memcmp(it->arg[0], "/data/", 6) ? "/user" : "", it->arg[0]);
-    const int32_t task = pkgRegister(where, it->arg[1], it->title);
+    char given[MAX_PATH];
+    const char* icon = dlItemIcon(i, given, sizeof(given));
+    const int32_t task = pkgRegister(where, it->arg[1], it->title, icon);
     if (task == (int32_t)0x80990088) {
         // 1.01's log: the same package (its content id, version and size)
         // installed already, as the Downloads list's finished task for it
@@ -515,7 +567,7 @@ static int pkgItem(int i) {
         logLine("pkg: task %d failed 0x80990004: removed 0x%08X; trying the path as /data/...", task,
                 (unsigned)(unregister ? unregister(task) : -1));
         g_pkgUserPaths = 0;
-        const int32_t again = pkgRegister(where, it->arg[1], it->title);
+        const int32_t again = pkgRegister(where, it->arg[1], it->title, icon);
         if (again < 0) return again == (int32_t)0x80990088 ? GET_DONE : GET_RETRY;
         it->task = again;
         dlStatus();

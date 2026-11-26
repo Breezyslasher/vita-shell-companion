@@ -462,6 +462,13 @@ int scWriteDownloads(int notify, const char* headers, const ScDownload* items, u
             at = putEncoded(out, at, cap, d->args[a]);
         }
         out[at++] = '\n';
+        // Its own icon (1.29): a line of its own after the item, which
+        // earlier modules pass over.
+        if (d->icon && d->icon[0]) {
+            at += (size_t)snprintf(out + at, cap - at, "icon=");
+            at = putEncoded(out, at, cap, d->icon);
+            out[at++] = '\n';
+        }
     }
     at += (size_t)snprintf(out + at, cap - at, "end\n");
     const int rc = writeAll(DL_LIST, out, at);

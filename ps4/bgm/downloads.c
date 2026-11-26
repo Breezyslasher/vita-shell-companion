@@ -9,6 +9,7 @@
  *                     notify=<1: notifications>
  *                     headers=<header lines, \r\n between, sent with every request>
  *                     item=<id>\t<file>\t<size>\t<title>\t<kind>\t<arg>\t<arg>\t<arg>
+ *                     icon=<path or URL of the item above's icon (1.29), optional>
  *                     end
  *   cmd             dl_start (begin, or begin again from the list), dl_takeback
  *   downloads-status.txt  every 2 s and at each change:
@@ -31,8 +32,10 @@
 #define DL_MAX 200
 #define DL_TEXT 1024
 
-enum { DLS_WAITING, DLS_GOING, DLS_DONE, DLS_GONE, DLS_FAILED };
-static const char* const g_dlStateName[] = {"waiting", "going", "done", "gone", "failed"};
+// cancelled (1.29): deleted from Notifications > Downloads before it was
+// done; its part of a file removed.
+enum { DLS_WAITING, DLS_GOING, DLS_DONE, DLS_GONE, DLS_FAILED, DLS_CANCELLED };
+static const char* const g_dlStateName[] = {"waiting", "going", "done", "gone", "failed", "cancelled"};
 
 static struct {
     volatile int start, takeBack;  // asked for (runCommand), seen by dlMain
@@ -44,10 +47,14 @@ static struct {
     struct {
         char id[64], file[DL_TEXT], title[128], kind[16];
         char arg[3][DL_TEXT];
+        char icon[DL_TEXT];  // the app's icon for it (icon=, 1.29), or empty
         uint64_t size, bytes;
         int state;
         int task;  // a package's task with the PS4's download service (0.89), 0 if none
         int pagesDone, pages;
+        // From the Downloads list's buttons (1.29): paused (Pause, till
+        // Resume), next (Download Now), cancel (deleted).
+        volatile int paused, now, cancel;
     } item[DL_MAX];
     uint64_t lastStatus;
     int quarter;          // the last progress notification's (1-3), 0 none yet
@@ -57,9 +64,17 @@ static struct {
 
 static uint8_t g_dlBuf[64 * 1024];
 
+// The item being fetched paused or deleted from the list (1.29): it stops
+// after the piece it is writing.
+static int dlHeld(void) {
+    const int c = g_dls.current;
+    return c >= 0 && c < g_dls.count && (g_dls.item[c].paused || g_dls.item[c].cancel);
+}
+
 static void dllRepair(void);  // dllist.c (1.02)
 static void dlListLeftovers(void);  // dllist.c (1.04)
 static void dlListIdle(void);        // dllist.c (1.15)
+static void dlListForget(void);      // dllist.c (1.29)
 
 // %XX back to its byte.
 static void dlDecode(char* s) {
@@ -113,6 +128,9 @@ static int dlRead(void) {
         } else if (!memcmp(line, "headers=", 8)) {
             fmt(g_dls.headers, sizeof(g_dls.headers), "%s", line + 8);
             dlDecode(g_dls.headers);
+        } else if (!memcmp(line, "icon=", 5) && g_dls.count > 0) {
+            fmt(g_dls.item[g_dls.count - 1].icon, DL_TEXT, "%s", line + 5);
+            dlDecode(g_dls.item[g_dls.count - 1].icon);
         } else if (!memcmp(line, "item=", 5) && g_dls.count < DL_MAX) {
             // Tab-separated fields, each decoded.
             char* f[8] = {0};
@@ -188,7 +206,9 @@ static void dlStatus(void) {
     size_t at = (size_t)fmt(text, sizeof(text), "running=%d\npaused=0\n", g_dls.running);
     for (int i = 0; i < g_dls.count && at + 128 < sizeof(text); i++) {
         at += (size_t)fmt(text + at, sizeof(text) - at, "item=%s\t%s\t%lu\t%lu\t", g_dls.item[i].id,
-                          g_dlStateName[g_dls.item[i].state], (unsigned long)g_dls.item[i].bytes,
+                          g_dls.item[i].state == DLS_WAITING && g_dls.item[i].paused ? "paused"
+                                                                                     : g_dlStateName[g_dls.item[i].state],
+                          (unsigned long)g_dls.item[i].bytes,
                           (unsigned long)g_dls.item[i].size);
         if (g_dls.item[i].task > 0) at += (size_t)fmt(text + at, sizeof(text) - at, "%d", g_dls.item[i].task);
         text[at++] = '\t';
@@ -313,7 +333,7 @@ static int dlGet(const char* url, const char* file, const char* extra, uint64_t*
     if (have) sysSeek(fd, have, 0);
     *progress = (uint64_t)have;
     for (;;) {
-        if (g_dls.takeBack) {
+        if (g_dls.takeBack || dlHeld()) {
             result = GET_STOPPED;
             goto out;
         }
@@ -369,7 +389,7 @@ static int dlFetch(const char* url, const char* file, const char* extra, uint64_
         *state = DLS_WAITING;
         dlStatus();
         for (uint32_t s = 0; s < wait * 10; s++) {
-            if (g_dls.takeBack) return GET_STOPPED;
+            if (g_dls.takeBack || dlHeld()) return GET_STOPPED;
             sysSleepMs(100);
         }
     }
@@ -415,6 +435,8 @@ static void dlItem(int i) {
     __typeof__(g_dls.item[0])* it = &g_dls.item[i];
     if (it->state == DLS_DONE || it->state == DLS_GONE) return;
     int r = GET_RETRY;
+    if (it->cancel) r = GET_STOPPED;
+    else
     if (!memcmp(it->kind, "url", 4)) {
         r = dlFetch(it->arg[0], it->file, it->arg[1], &it->bytes, &it->size, &it->state);
     } else if (!memcmp(it->kind, "pages", 6)) {
@@ -456,7 +478,36 @@ static void dlItem(int i) {
         r = GET_GONE;
     }
     it->state = r == GET_DONE ? DLS_DONE : r == GET_GONE ? DLS_GONE : r == GET_STOPPED ? DLS_WAITING : DLS_FAILED;
+    if (it->cancel && it->state != DLS_DONE) {
+        // Deleted from the list (1.29): its part gone too.
+        if (!memcmp(it->kind, "url", 4)) sysUnlink(it->file);
+        it->state = DLS_CANCELLED;
+    }
     logLine("download %s (%s): %s, %lu bytes", it->id, it->title, g_dlStateName[it->state], (unsigned long)it->bytes);
+}
+
+// The next item to fetch: one asked for with Download Now, else the
+// first waiting; -2 if only paused ones are left (wait), -1 if none.
+static int dlNext(void) {
+    int first = -1, paused = 0;
+    for (int i = 0; i < g_dls.count; i++) {
+        __typeof__(g_dls.item[0])* it = &g_dls.item[i];
+        if (it->state != DLS_WAITING) continue;
+        if (it->cancel) {
+            if (!memcmp(it->kind, "url", 4)) sysUnlink(it->file);
+            it->state = DLS_CANCELLED;
+            logLine("download %s (%s): deleted from the list", it->id, it->title);
+            dlStatus();
+            continue;
+        }
+        if (it->paused) {
+            paused = 1;
+            continue;
+        }
+        if (it->now) return i;
+        if (first < 0) first = i;
+    }
+    return first >= 0 ? first : paused ? -2 : -1;
 }
 
 static void* dlMain(void* arg) {
@@ -469,6 +520,7 @@ static void* dlMain(void* arg) {
         }
         g_dls.start = 0;
         g_dls.takeBack = 0;
+        dlListForget();  // entries kept from before a reboot, removed first (1.29)
         if (!dlRead()) {
             logLine("downloads: no list (" DL_LIST ")");
             continue;
@@ -483,16 +535,24 @@ static void* dlMain(void* arg) {
         dlListBegin();  // its files in Notifications > Downloads
         logLine("downloads: %d item(s)", g_dls.count);
         dlNotify("Downloading %d item%s in the background", g_dls.count, g_dls.count == 1 ? "" : "s");
-        int done = 0, failed = 0;
-        for (int i = 0; i < g_dls.count && !g_dls.takeBack && !g_dls.start; i++) {
+        int done = 0, failed = 0, i;
+        // In order, but Download Now first, paused ones passed over (and
+        // waited for while there are some), deleted ones dropped (1.29).
+        while (!g_dls.takeBack && !g_dls.start && (i = dlNext()) != -1) {
+            if (i == -2) {
+                sysSleepMs(200);
+                dlListIdle();
+                continue;
+            }
             g_dls.current = i;
+            g_dls.item[i].now = 0;
             dlItem(i);
             dlStatus();
             dlProgress();
             if (g_dls.item[i].state == DLS_DONE) {
                 done++;
-                if (g_dls.count > 1) dlNotify("Downloaded: %s (%d of %d)", g_dls.item[i].title, i + 1, g_dls.count);
-            } else if (g_dls.item[i].state != DLS_WAITING) {
+                if (g_dls.count > 1) dlNotify("Downloaded: %s (%d of %d)", g_dls.item[i].title, done, g_dls.count);
+            } else if (g_dls.item[i].state != DLS_WAITING && g_dls.item[i].state != DLS_CANCELLED) {
                 failed++;
             }
         }

@@ -310,6 +310,24 @@ service's are, not the managed wrappers 0.85 hooked.
   `icon0.png` (entry id `0x1200` in the package's entry table, in the
   clear) is now copied to `icons/<content id>.png` beside the module's
   files (by Range for a URL) and given as the task's `iconPath`.
+- **1.29:**
+  - **Icons for songs (and packages) from the app:** `ScDownload.icon`, a
+    PNG on the console (`/data/...`) or a URL (fetched once to `icons/`),
+    written as an `icon=` line after its item (earlier modules pass over
+    it). Without one: the app's icon, or a package's own.
+  - **Finished songs after a reboot:** 1.28 removed every placeholder at
+    the module's start, and they read "Paused" till then. `dl-list-tasks.txt`
+    now keeps each task's state, bytes and size; finished and failed ones
+    are taken back and answered as before (removed by the next list, the
+    app, or 30 minutes on), the rest removed, tried again every 10 s while
+    the service refuses (0x80990019).
+  - **The buttons:** 1.28's Download Now, Pause and delete reached none of
+    the five hooked functions; the `Int` ones are hooked too. Delete (the
+    task gone, 0x80990019, or unregistered) cancels the song: its part
+    removed, its status `cancelled`. Pause stops its fetch after the piece
+    being written, the next one goes, and it answers paused (bit 5, param
+    bit 17): "Paused". Resume and Download Now make it the next one.
+    Status `paused` while paused.
 
 ### One module, and the cleanup (0.95)
 

@@ -147,6 +147,9 @@ typedef struct ScDownload {
     const char* kind;      // "url", "pages" or "pkg" (below)
     const char* args[3];   // url: the URL, extra header lines; pages: the URL with
                            // {page}, "count" or "count,first", extra header lines
+    const char* icon;      // optional: its picture in Notifications > Downloads, a PNG
+                           // (a path on the console, /data/..., or a URL); NULL for
+                           // the app's own icon (a package's own if it has one)
 } ScDownload;
 
 // The list, written whole (downloads.txt): up to 200 items, in order.
@@ -162,7 +165,7 @@ int scDownloadsTakeBack(void);
 
 typedef struct ScDownloadStatus {
     char id[64];
-    char state[12];        // going, waiting, done, gone or failed
+    char state[12];        // going, waiting, paused, done, gone, failed or cancelled
     uint64_t bytes;
     uint64_t size;         // 0 if not known
     uint32_t pagesDone;    // pages: those whole, of pageCount
