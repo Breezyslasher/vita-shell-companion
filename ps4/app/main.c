@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.25"
+#define APP_VERSION "0.26"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -91,6 +91,7 @@ int scePadReadState(int handle, OrbisPadData* data);
 #define ORBIS_VIDEO_OUT_BUS_MAIN 0
 #define ORBIS_VIDEO_OUT_FLIP_VSYNC 1
 #define ORBIS_PAD_BUTTON_OPTIONS 0x0008
+#define ORBIS_PAD_BUTTON_UP 0x0010
 #define ORBIS_PAD_BUTTON_RIGHT 0x0020
 #define ORBIS_PAD_BUTTON_LEFT 0x0080
 #define ORBIS_PAD_BUTTON_L2 0x0100
@@ -705,6 +706,8 @@ static void draw(void) {
     y += LINE;
     text(x, y, FG, "R2     try the PS4's own music service in this app (quick menu test)");
     y += LINE;
+    text(x, y, FG, "UP     music watch in the shell: logs the quick menu's music calls");
+    y += LINE;
     text(x, y, DIM, "Leave with the PS button: the music should keep playing.");
     y += LINE * 2;
 
@@ -992,6 +995,15 @@ int main(void) {
             if (copyFromPackage("sc_mps.prx", "/user/data/GoldHEN/plugins/sc_mps.prx") == 0 &&
                 shellLoad("/user/data/GoldHEN/plugins/sc_mps.prx"))
                 say("Music service probe in the shell: open the quick menu when it says so");
+        }
+        if (down & ORBIS_PAD_BUTTON_UP) {
+            // The music watch (ps4/mcw): hooks the shell's calls to the music
+            // server, passes each on unchanged, and logs it to mcw.log. Once
+            // in the shell it stays until the PS4 restarts.
+            mkdir("/user/data/GoldHEN/plugins", 0777);
+            if (copyFromPackage("sc_mcw.prx", "/user/data/GoldHEN/plugins/sc_mcw.prx") == 0 &&
+                shellLoad("/user/data/GoldHEN/plugins/sc_mcw.prx"))
+                say("Music watch in the shell: play music, use the quick menu, send mcw.log");
         }
         if (down & ORBIS_PAD_BUTTON_OPTIONS) {
             say("test-tone.wav written (%d)", writeTestTone());

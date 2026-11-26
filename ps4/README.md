@@ -91,6 +91,70 @@ docker run --rm --user 0 -v "$PWD":/src -w /src openorbisofficial/toolchain:late
 `build-ps4/sc_bgm.bin` is the payload (the module, `sc_bgm.prx`, is inside
 it). The CI builds it with the probes.
 
+## Music watch: what the quick menu sends and expects back
+
+The quick menu's Music section is the shell's, and talks to the system's
+music server through `libSceMusicCoreServerClient` and
+`libSceMusicCoreServerClientJsEx` (`sceMusicCoreServerPlayControl`,
+`GetPlayStatus`, `GetTrackInfo`, ...; names from shadPS4's aerolib). No
+signatures for them are public. `sc_mcw.prx` (ps4/mcw) is loaded into the
+shell and watches them, **changing nothing**: each function is hooked, and
+every call is passed on as it came, then logged with
+
+- its six argument registers and what it returned,
+- for each argument that points to readable data, the first 128 bytes it
+  points to before the call, and the 16-byte rows (of 512) the call
+  changed: the answer it was given,
+- for the rest, the first four stack words, in case it takes more than six
+  arguments.
+
+A getter (`Get...`, `Check...`) the quick menu may ask many times a second
+is logged only when its answer changes, with how many calls gave the same
+answer in between. Every 10 s the log shows how often each was called. A
+callback given to `RegistEventCallback` is hooked too, so the events the
+server sends the shell show up. The `sceCustomMusicCore*` functions a music
+core calls are on the list as well; the shell doesn't have them, so they
+show up only once the module is in a core's process.
+
+### Trying it
+
+1. Install the 0.26 test app. Restart the PS4 if an older watch is loaded
+   (a module loads into the shell only once each boot).
+2. Open the test app and press **UP**. A notification says how many
+   functions it watches.
+3. Play something with the **USB Music Player**. Open the quick menu's
+   Music section, press pause, play, next and previous, and change shuffle
+   and repeat. Note the time of each press.
+4. Send `/data/ShellCompanion/ps4/mcw.log` (and `mcw.1.log`, if it's there).
+
+| File in `/data/ShellCompanion/ps4/` | What |
+|---|---|
+| `mcw.log` | the log; past 8 MB it becomes `mcw.1.log` and a new one starts |
+| `mcw.off` | if it's there when the watch starts, nothing is hooked |
+| `mcw-names.txt` | the functions to hook instead, one a line (`PlayControl` or a full name) |
+| `mcw.quiet` | while it's there, nothing is logged (checked every 10 s) |
+
+### How the hooks work
+
+A hooked function starts with a 5-byte `jmp` to a small entry that our
+module maps within 2 GB of it. The instructions that `jmp` replaced are
+moved to a stub, with their relative addresses recomputed. A thunk keeps
+every argument register (rdi to r9, rax, xmm0 to xmm7) and copies 8 stack
+arguments. It calls the stub, which is the function, and returns rax, rdx
+and xmm0 as the function left them. Memory for the stubs comes from the
+first of these that works: a read/write/execute mapping, as GoldHEN's plugin
+SDK maps its stubs; a read/write one that is then made read/execute; a
+reserved part of the module's own code. The function's code is written after
+`sceKernelMprotect`, or else through GoldHEN's `PROCESS_RW`. The log says
+which was used and lists each function's first 16 bytes. A function whose
+first bytes can't be moved is left alone, and the log says why.
+
+The hook engine and the logger were tested on x86-64 Linux, which uses the
+same calling convention, with shims for the libkernel calls. The tests
+covered rip-relative loads, short and long jumps, calls, 9 integer and 2
+float arguments, a float return, a returned struct, and a callback. The
+console has not run it yet.
+
 ## The probes
 
 The PS4 counterpart of the Vita plugin is being worked out. On the Vita, the

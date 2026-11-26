@@ -42,6 +42,16 @@ ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init $PAGES \
     -o "$OUT/sc_mps.elf" "$OUT/bgm_crt.o" "$OUT/bgm_sys.o" "$OUT/mps.o" -L"$OO/lib" -lkernel
 "$CREATE_FSELF" -in="$OUT/sc_mps.elf" -out="$OUT/sc_mps.oelf" \
     --lib="$OUT/sc_mps.prx" --paid 0x3800000000000011
+# The music watch (ps4/mcw): a third module for the shell, which hooks the
+# shell's calls to the music server and logs them. HDE64 as it is.
+clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$SRC/../mcw/mcw.c" -o "$OUT/mcw.o"
+clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$SRC/../mcw/hook.c" -o "$OUT/mcw_hook.o"
+clang $CFLAGS $MODFLAGS -w -DSC_PRX -c "$SRC/../mcw/hde64.c" -o "$OUT/mcw_hde64.o"
+ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init $PAGES \
+    -o "$OUT/sc_mcw.elf" "$OUT/bgm_crt.o" "$OUT/bgm_sys.o" "$OUT/mcw.o" "$OUT/mcw_hook.o" \
+    "$OUT/mcw_hde64.o" -L"$OO/lib" -lkernel
+"$CREATE_FSELF" -in="$OUT/sc_mcw.elf" -out="$OUT/sc_mcw.oelf" \
+    --lib="$OUT/sc_mcw.prx" --paid 0x3800000000000011
 # The loader: a raw payload, the module inside it.
 clang $CFLAGS $WARN -c "$RT/sys.c" -o "$OUT/bgm_load_sys.o"
 clang $CFLAGS $WARN "-DSC_PRX_PATH=\"$OUT/sc_bgm.prx\"" -c "$SRC/load.c" -o "$OUT/bgm_load.o"
@@ -53,7 +63,7 @@ if objdump -h "$OUT/sc_bgm_raw.elf" | grep -q '\.rela\.dyn'; then
 fi
 objcopy --set-section-flags .bss=alloc,load,contents -O binary -R .rela.dyn \
     "$OUT/sc_bgm_raw.elf" "$OUT/sc_bgm.bin"
-for e in sc_bgm sc_mps; do
+for e in sc_bgm sc_mps sc_mcw; do
     if ! objdump -p "$OUT/$e.elf" | grep -q EH_FRAME; then  # GNU objdump: the image's readelf prints nothing
         echo "bgm: $e.elf has no PT_GNU_EH_FRAME" >&2
         exit 1
