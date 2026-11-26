@@ -42,7 +42,7 @@ static struct {
     uint32_t queryCalls[4];
     FnBgftUnregister unregister, stop, pause;
     uint32_t bitsGoing, bitsWaiting, bitsDone;
-    uint32_t paramGoing, paramDone;  // the task query's param answered for ours (1.01)
+    uint32_t paramGoing, paramWaiting, paramDone;  // the task query's param answered for ours (1.01)
     int haveGoing, haveWaiting, haveDone;
     volatile int count;
     struct {
@@ -89,9 +89,12 @@ static void dllFill(int k, BgftProgress* pr) {
         }
     }
     pr->errorResult = 0;
-    if (st == DLS_GOING && g_dll.haveGoing) pr->bits = g_dll.bitsGoing;
-    else if (st == DLS_DONE && g_dll.haveDone) pr->bits = g_dll.bitsDone;
-    else if (st != DLS_GOING && st != DLS_DONE && g_dll.haveWaiting) pr->bits = g_dll.bitsWaiting;
+    // The low 10 bits only (1.03): the rest is not the state, and the
+    // service's own (varying) bits stay.
+    const uint32_t keep = pr->bits & ~0x3FFu;
+    if (st == DLS_GOING && g_dll.haveGoing) pr->bits = keep | (g_dll.bitsGoing & 0x3FFu);
+    else if (st == DLS_DONE && g_dll.haveDone) pr->bits = keep | (g_dll.bitsDone & 0x3FFu);
+    else if (st != DLS_GOING && st != DLS_DONE && g_dll.haveWaiting) pr->bits = keep | (g_dll.bitsWaiting & 0x3FFu);
     pr->length = pr->lengthTotal = size;
     pr->transferred = pr->transferredTotal = st == DLS_DONE ? size : bytes;
     pr->numIndex = 1;
@@ -193,8 +196,10 @@ void dlListQueryHook(Frame* f) {
                 for (int k = 0; k < count && k < DLL_MAX; k++) {
                     if (g_dll.e[k].task != id || id <= 0) continue;
                     const int i = g_dll.e[k].item;
-                    const int done = i >= 0 && i < g_dls.count && g_dls.item[i].state == DLS_DONE;
-                    const uint32_t prm = done ? g_dll.paramDone : g_dll.paramGoing;
+                    const int st = i >= 0 && i < g_dls.count ? g_dls.item[i].state : DLS_WAITING;
+                    const uint32_t prm = st == DLS_DONE    ? g_dll.paramDone
+                                       : st == DLS_GOING ? g_dll.paramGoing
+                                                         : g_dll.paramWaiting;
                     memcpy((uint8_t*)res + j * 8 + 4, &prm, 4);
                 }
             }
@@ -389,17 +394,29 @@ static void dlListBegin(void) {
     g_dll.count = 0;
     if (sysExists(SC_BGM_DIR "/dl-nolist") || !dllSetup()) return;
     char text[256];
-    g_dll.haveGoing = g_dll.haveWaiting = g_dll.haveDone = 0;
-    g_dll.haveGoing = 1;
-    g_dll.bitsDone = 0x188;  // the PS4's own finished downloads (0.96's log)
-    g_dll.haveDone = 1;
-    g_dll.bitsGoing = 0x18a;  // a real install as it began (1.00's log: ...8a)
-    g_dll.paramGoing = 0x10008261;
-    g_dll.paramDone = 0x10008063;
+    // What ours answer (1.03), from the shell's own declarations
+    // (Sce.Vsh.Orbis.Bgft: TaskProgress, TaskParam and their enums) and
+    // every value logged so far:
+    //   progress bits: state (Stop, Ready, Run, Complete) in 0-1, runstate
+    //     (Standby, Prepare, Download, Install, Complete, ...) in 2-4,
+    //     paused 5, subtype (6 Game, 8 GamePatch, 12 Package) in 6-9;
+    //   query param: type (1 Download) in 0-3, subtype 4-7, state 8-9,
+    //     runstate 14-16, paused 17, an error 26.
+    // The list's look is keyed by (type, state, runstate) for the subtype:
+    // 1.01 answered a game's (0x10008261, subtype 6), and the list, finding
+    // no game for it, said "Cannot download". Ours stay Package (12).
+    g_dll.haveGoing = g_dll.haveWaiting = g_dll.haveDone = 1;
+    g_dll.bitsGoing = 0x30a;    // Package, Run, Download
+    g_dll.bitsWaiting = 0x301;  // Package, Ready, Standby
+    g_dll.bitsDone = 0x313;     // Package, Complete, Complete
+    g_dll.paramGoing = 0x82c1;   // Download, Package, Run, Download
+    g_dll.paramWaiting = 0x1c1;  // Download, Package, Ready, Standby (as registered)
+    g_dll.paramDone = 0x103c1;   // Download, Package, Complete, Complete
     if (readText(SC_BGM_DIR "/dl-list-bits.txt", text, sizeof(text)) > 0) {
         if (dllHex(text, "going", &g_dll.bitsGoing)) g_dll.haveGoing = 1;
-        g_dll.haveWaiting = dllHex(text, "waiting", &g_dll.bitsWaiting);
-        g_dll.haveDone = dllHex(text, "done", &g_dll.bitsDone);
+        dllHex(text, "waiting", &g_dll.bitsWaiting);
+        dllHex(text, "done", &g_dll.bitsDone);
+        dllHex(text, "param-waiting", &g_dll.paramWaiting);
         dllHex(text, "param-going", &g_dll.paramGoing);
         dllHex(text, "param-done", &g_dll.paramDone);
     }

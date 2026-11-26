@@ -102,6 +102,18 @@ service's are, not the managed wrappers 0.85 hooked.
   hook, replaced on the downloads' thread, up to 3 times each). The
   package in the test list was installed already: registering it answered
   `0x80990088`, now taken as done.
+- **1.02 on the PS4:** no placeholder failed, but the list still read
+  "Cannot download", its percent still. The shell's own declarations
+  (dumped earlier, `Sce.Vsh.Orbis.Bgft`) explain the numbers: the progress
+  bits are state (0-1: Stop, Ready, Run, Complete), runstate (2-4:
+  Standby, Prepare, Download, Install, Complete, ...), paused (5) and
+  subtype (6-9: 6 Game, 8 GamePatch, 12 Package); the query's param is
+  type (0-3, 1 Download), subtype (4-7), state (8-9), runstate (14-16),
+  paused (17), with an error flag at 26. Every value logged fits. The
+  list's look is chosen by (type, state, runstate) for the subtype; 1.01
+  made ours games (subtype 6) with no game to show. 1.03 keeps them
+  Package: going `0x30a`/`0x82c1`, waiting `0x301`/`0x1c1`, done
+  `0x313`/`0x103c1` (bits/param), and keeps the service's bits above 10.
 
 ### One module, and the cleanup (0.95)
 
