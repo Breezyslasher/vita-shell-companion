@@ -363,6 +363,12 @@ service's are, not the managed wrappers 0.85 hooked.
   logged: the song stayed paused, and the service, fetching the
   placeholder itself, failed it ("Cannot download"). 1.34: the set-state
   calls resume the song and re-pause the service's task, as Start does.
+- **1.34 on the PS4:** Resume worked (song 2 went on from 1769472 bytes).
+  The list made its row again at the section read after Resume
+  (`GetTaskInfo` for it), as the param's paused bit went and the song
+  above it left section 3. 1.35, a test: with `dl-list-param-nopause`
+  the param's paused bit is never set (paused shows from the progress
+  answers alone), to tell which of the two it was.
 
 ### One module, and the cleanup (0.95)
 

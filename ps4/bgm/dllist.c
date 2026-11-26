@@ -80,6 +80,7 @@ static struct {
     int dlThread;   // the downloads' thread, whose calls are ours
     uint64_t endedUs;  // when the last list ended, 0 if one is going
     int restored;      // its entries are from before a reboot (1.29)
+    int noPausedParam; // dl-list-param-nopause: paused only in the progress answers (1.35, a test)
     volatile int wantPost;  // an item changed state: tell the list (1.19)
     uint32_t infoLogged;
     uint32_t queryCalls[4];
@@ -484,7 +485,8 @@ void dlListQueryHook(Frame* f) {
                     // (1.27: type 1, Game, Complete/Complete, 0x10010361,
                     // so a row made again here is type 1 too and reads
                     // Installed; type 3 has no Complete/Complete entry.)
-                    const uint32_t paused = i >= 0 && i < g_dls.count && g_dls.item[i].paused && st != DLS_DONE ? 0x20000u : 0;
+                    const uint32_t paused = !g_dll.noPausedParam && i >= 0 && i < g_dls.count && g_dls.item[i].paused &&
+                                                    st != DLS_DONE ? 0x20000u : 0;
                     const uint32_t prm = paused | (doneHere ? 0x10010361u
                                        : st == DLS_FAILED || st == DLS_GONE ? 0x40080c1u  // 1097's 0x14008061: error, Stop/Download; Package
                                        : st == DLS_DONE && g_dll.trying ? g_dllTry[i % 6].param
@@ -1025,6 +1027,11 @@ static void dllAnswers(void) {
     char text[256];
     g_dll.haveGoing = g_dll.haveWaiting = g_dll.haveDone = 1;
     g_dll.trying = sysExists(SC_BGM_DIR "/dl-list-try");
+    // A test (1.35): whether the param's paused bit changing is what has
+    // the list make a resumed song's row again (1.34's log: rebuilt at the
+    // section read after Resume, as the song above it left the section).
+    g_dll.noPausedParam = sysExists(SC_BGM_DIR "/dl-list-param-nopause");
+    if (g_dll.noPausedParam) logLine("dllist: dl-list-param-nopause: paused only in the progress answers");
     if (g_dll.trying) logLine("dllist: trying finished answers (dl-list-try): item i gets [A-F][i %% 6]");
     // 1.25, from the list's own code (the debug dump, code4.bin): a row
     // reads "Calculating..." while MapValueArgs.IsCalculating, (SubType 12
