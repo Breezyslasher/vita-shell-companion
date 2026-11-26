@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.9"
+#define APP_VERSION "0.10"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -311,16 +311,21 @@ static void readStatus(void) {
 
 // GoldHEN's PROCESS_PRX_LOAD into SceShellUI, the path as the shell sees
 // it: 1 if it loaded.
-static int shellLoad(const char* path) {
+static int processLoad(const char* process, const char* path) {
     static struct ProcPrxLoad args;
     memset(&args, 0, sizeof(args));
-    strcpy(args.processName, "SceShellUI");
+    strncpy(args.processName, process, sizeof(args.processName) - 1);
     strncpy(args.prxPath, path, sizeof(args.prxPath) - 1);
+    args.res = ~0ULL;  // as ps4-hen-rest sets it
     const long rc = sysCall(500, 6 /* PROCESS_PRX_LOAD */, (long)&args, 0);
     const int ok = rc == 0 && (int32_t)args.res >= 0;
-    say("Shell load %s: 0x%lX, result 0x%lX%s", path, (unsigned long)rc, (unsigned long)args.res,
-        ok ? " - loaded" : "");
+    say("%s load %s: 0x%lX, result 0x%lX%s", process, path, (unsigned long)rc,
+        (unsigned long)args.res, ok ? " - loaded" : "");
     return ok;
+}
+
+static int shellLoad(const char* path) {
+    return processLoad("SceShellUI", path);
 }
 
 static int g_loadedFrom = -1;
@@ -463,11 +468,28 @@ static void loadPlayer(void) {
     if (!helloTried) {
         helloTried = 1;
         selfLoad(PKG_DIR "/hello.prx");
+        // The documented route first: ps4-hen-rest's starter asks for its
+        // module in SceShellCore from /data/GoldHEN/plugins/, and
+        // ps4-thumbgrid-ime's list has /data/GoldHEN/plugins/ and
+        // /user/data/GoldHEN/plugins/ for SceShellUI.
+        mkdir("/data/GoldHEN", 0777);
+        mkdir("/data/GoldHEN/plugins", 0777);
+        const int put = copyFromPackage("hello.prx", "/data/GoldHEN/plugins/sc_hello.prx");
+        say("hello.prx into /data/GoldHEN/plugins: %d", put);
+        processLoad("SceShellCore", "/data/GoldHEN/plugins/sc_hello.prx");
+        if (!shellLoad("/data/GoldHEN/plugins/sc_hello.prx"))
+            shellLoad("/user/data/GoldHEN/plugins/sc_hello.prx");
         say("Test module into the shell: %s", intoShell("hello.prx") ? "loaded" : "refused");
     }
     // Then the player. Loading it into this app is logged, but does not
     // decide: the projects above never load theirs into an app.
     findBuild();
+    if (copyFromPackage("sc_bgm.prx", "/data/GoldHEN/plugins/sc_bgm.prx") == 0 &&
+        (shellLoad("/data/GoldHEN/plugins/sc_bgm.prx") ||
+         shellLoad("/user/data/GoldHEN/plugins/sc_bgm.prx"))) {
+        g_loadedFrom = 5;
+        return;
+    }
     if (intoShell("sc_bgm.prx")) {
         g_loadedFrom = 1;
         return;
