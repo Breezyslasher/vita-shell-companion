@@ -523,6 +523,16 @@ query), B `file://…/b.jpg#` (the fragment), C `file://…/c` (the name
 `c&w=192&h=192`), D `file://…/d.jpg` (the name `d.jpg&w=192&h=192`), E
 `/user/data/…/e.jpg?` (a path, no scheme).
 
+### The tile's picture: a JPEG by the literal name (0.58, 0.59)
+
+Of 0.58's five, only C (`file://…/c`, the file `c&w=192&h=192`) and D
+(`file://…/d.jpg`, the file `d.jpg&w=192&h=192`) were shown: the tile loads
+`image_url` + `&w=192&h=192` as the file's own name, no query or fragment
+dropped and no bare path taken; and it must be a JPEG (0.57's PNG by that
+name was not shown). 0.59 has one playlist again, `image_url`
+`file:///user/data/ShellCompanion/ps4/ebgm/playlist.jpg`, its picture written
+as `ebgm/playlist.jpg&w=192&h=192`.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

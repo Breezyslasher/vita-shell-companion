@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.58"
+#define APP_VERSION "0.59"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -861,14 +861,6 @@ static void draw(void) {
 // first guess, each playlist under several names, as the shell's own strings
 // give only views, section_title and image_url.
 
-// A playlist's fields, as the guesses have them.
-#define PLAYLIST_FIELDS                                                                        \
-    "\"name\":\"Shell Companion queue\",\"title\":\"Shell Companion queue\","               \
-    "\"uri\":\"spotify:user:shellcompanion:playlist:queue\",\"id\":\"queue\","               \
-    "\"type\":\"playlist\",\"description\":\"Music on this PS4\","                            \
-    "\"image_url\":\"file:///user/data/ShellCompanion/ps4/ebgm/playlist\","                     \
-    "\"images\":[],\"total\":2,\"track_count\":2,\"tracks\":{\"total\":2}"
-#define PLAYLIST_GUESS "{" PLAYLIST_FIELDS "}"
 
 static void writeEbgm(void) {
     mkdir(SC_BGM_DIR "/ebgm", 0777);
@@ -880,9 +872,8 @@ static void writeEbgm(void) {
     // The shell reads views[], each view's "name" (the section's title) and
     // its "lists" (0.42's key log), each list's image_url, name and total
     // (0.43's); and accounts_linked (0.44's). The tile loads image_url +
-    // "&w=192&h=192" (0.57: a file:// address with that as a name stayed
-    // blank): five playlists, each its picture a way of its own, to see
-    // which is shown.
+    // "&w=192&h=192" as the file's own name, and only a JPEG (0.58: of five
+    // ways, only C and D were shown; 0.57's PNG by that name was not).
 #define PL(name, url)                                                                          \
     "{\"name\":\"" name "\",\"uri\":\"spotify:user:shellcompanion:playlist:queue\","            \
     "\"type\":\"playlist\",\"image_url\":\"" url "\",\"total\":2}"
@@ -890,9 +881,7 @@ static void writeEbgm(void) {
     static const char views[] =
         "{\"upgrade_scopes_required\":false,\"accounts_linked\":true,"
         "\"views\":[{\"name\":\"Shell Companion\",\"lists\":["
-        PL("A query", EBGM_URL "a.jpg?x=1") "," PL("B fragment", EBGM_URL "b.jpg#") ","
-        PL("C name", EBGM_URL "c") "," PL("D name.jpg", EBGM_URL "d.jpg") ","
-        PL("E path", "/user/data/ShellCompanion/ps4/ebgm/e.jpg?")
+        PL("Shell Companion queue", EBGM_URL "playlist.jpg")
         "]}]}\n";
     writeFile(SC_BGM_DIR "/ebgm/recommended_views.json", views, sizeof(views) - 1);
     // A track chosen reads its id and token (0.55: id missing; the login's
@@ -911,7 +900,7 @@ static void writeEbgm(void) {
     "{\"name\":\"" title "\",\"title\":\"" title "\",\"uri\":\"" uri "\",\"id\":\"" n "\","          \
     "\"artists\":[{\"name\":\"" artist "\"}],\"artist\":\"" artist "\","                           \
     "\"album\":{\"name\":\"Shell Companion\"},\"explicit\":false,\"is_playable\":true,"           \
-    "\"duration_ms\":" ms ",\"image_url\":\"file:///user/data/ShellCompanion/ps4/ebgm/playlist\"}"
+    "\"duration_ms\":" ms ",\"image_url\":\"file:///user/data/ShellCompanion/ps4/ebgm/playlist.jpg\"}"
     static const char tracks[] =
         "{\"total\":2,\"offset\":0,\"limit\":15,\"track_list\":["
         TRACK_GUESS("0", "Your song", "Shell Companion", "spotify:track:shellcompanion0", "281000") ","
@@ -919,17 +908,10 @@ static void writeEbgm(void) {
         "]}\n";
     writeFile(SC_BGM_DIR "/ebgm/playlist_tracks.json", tracks, sizeof(tracks) - 1);
     // The playlist's picture: this app's icon.
-    copyFromPackage("sce_sys/icon0.png", SC_BGM_DIR "/ebgm/playlist.png");
     // The tile asks for image_url + "&w=192&h=192" (PlayListPanelItem.
-    // UpdatePlayList: string.Format("&w={0}&h={0}", 192f)). The five tests'
-    // pictures, JPEG, as each would be looked for.
-    static const char* const pics[] = {"a.jpg", "b.jpg", "c&w=192&h=192", "d.jpg&w=192&h=192",
-                                       "e.jpg", "playlist&w=192&h=192"};
-    for (size_t i = 0; i < sizeof(pics) / sizeof(pics[0]); i++) {
-        char dest[160];
-        snprintf(dest, sizeof(dest), SC_BGM_DIR "/ebgm/%s", pics[i]);
-        copyFromPackage("playlist.jpg", dest);
-    }
+    // UpdatePlayList: string.Format("&w={0}&h={0}", 192f)) as a file's name,
+    // a JPEG (0.58).
+    copyFromPackage("playlist.jpg", SC_BGM_DIR "/ebgm/playlist.jpg&w=192&h=192");
 }
 
 // ---- the app ----
