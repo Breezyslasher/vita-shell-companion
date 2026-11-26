@@ -222,6 +222,17 @@ announced as `CUSA01780` (0.35), but only for a second: 0.35's R3 removed
 the music server's while it showed "Sign in" (no GetSpTrackInfo, no
 GetCoreInfo of its own), which suggests the sign-in check comes first.
 
+### The Music section shows our player too (0.36, as CUSA01780)
+
+With `CUSA01780` in `mcw-fake.txt` (Spotify's title, as it turns out: the
+quick menu then listed our player as "Spotify", with its icon), the Music
+section showed Spotify's player panel for our track: its title, artist,
+time and buttons (play/pause, previous, next, volume, shuffle, repeat, and
+R3 "+", Spotify's add to library), above its "Sign in to PlayStation
+Network" message, which stays. The sign-in check guards Spotify's own part
+(playlists); the player panel reads the music server, as the music entry
+does. The cover did not show there.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
