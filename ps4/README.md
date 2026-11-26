@@ -715,11 +715,13 @@ The watch hooks the Music panel's global key handler
 key handled. That way □ doesn't also open the volume and △ doesn't also
 pause. The pick-up mode is the list control's own
 (`ListPanelBase.BeginItemMoveMode`, the one the home screen uses to move
-tiles). When the track is put down (`ListPanelBase.DecideMoveItem`), its
-starting row (`OrigMoveTargetIndex`) and target row (`MoveTargetIndex`)
-become one `move=<from>:<to>` command. 0.67 used each `OnItemMoved` instead,
-but after the first step those read (-1, row), because the held track is out
-of the list while it moves. When the move mode ends (`EndItemMoveMode`), or after a removal,
+tiles). The watch notes the row where the track was picked up, follows each step
+(`ListPanelBase.OnItemMoved(from, to)`, where `to` is the held track's row),
+and when the move mode ends (`EndItemMoveMode`) sends one
+`move=<from>:<to>` command, unless ○ put it back (`RollbackMoveTarget`).
+0.67 sent every step, and 0.68 sent every `DecideMoveItem`. The list calls
+both on each step, and after the first step they read (-1, row), because the
+held track is out of the list while it moves. When the move mode ends (`EndItemMoveMode`), or after a removal,
 the list asks for the queue again (`TrackListPanel.StartQuery`). The watch
 holds that request until the player's `queue_rev` (status.txt) shows the
 edits made, for up to 1.5 s.

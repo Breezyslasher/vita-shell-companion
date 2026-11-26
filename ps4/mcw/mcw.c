@@ -1092,7 +1092,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 18
+#define MONO_HOOKS 19
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -1336,12 +1336,15 @@ static struct {
     uint32_t panel;             // the TrackListPanel last seen (weak)
     uint32_t moving;            // the ListPanel in move mode, ours (weak)
     int moveOffset;             // its focus index less the track's place
+    int startRow, lastRow;      // where the track was picked up, and is now (0.69)
+    int cancelled;              // ○: put back
     void *fKey, *fKeyEvent, *fHandled;           // KeyEventArgs
     void *fListPanel, *fPlayList, *fTrackIndex;  // TrackListPanelItem, TrackListPanel, TrackListMenuData
     void *listFocused, *menuData, *startQuery;   // TrackListPanel
     void* getList;                               // LoadingListPanel.get_ListPanel
     void *focusIndex, *isMoving, *beginMove, *withTarget, *endOnBack, *decide;  // ListPanelBase
     void *moveTarget, *origTarget;               // its MoveTargetIndex, OrigMoveTargetIndex (0.68)
+    void* endMove;                               // its EndItemMoveMode (0.69)
 } g_qk;
 
 // The track's place in the queue, from its uri (spotify:track:sc<n>): -1 if none.
@@ -1595,7 +1598,7 @@ static void qkKey(Frame* f) {
     uint8_t yes = 1;
     if (qkBool(g_qk.isMoving, list)) {
         // □ puts the track down; △ does nothing meanwhile.
-        if (key == KEY_SQUARE) rowCall(g_qk.decide, list, NULL);
+        if (key == KEY_SQUARE) rowCall(g_qk.endMove, list, NULL);  // as X does
         g_mono.set(args, g_qk.fHandled, &yes);
         return;
     }
@@ -1618,6 +1621,8 @@ static void qkKey(Frame* f) {
             if (g_qk.moving && g_row.freeHandle) g_row.freeHandle(g_qk.moving);
             g_qk.moving = g_row.weak(list, 0);
             g_qk.moveOffset = at - place;
+            g_qk.startRow = g_qk.lastRow = at;
+            g_qk.cancelled = 0;
             say("queue: track %d (row %d) picked up", place, at);
         } else {
             fmt(cmd, sizeof(cmd), "remove=%d\n", place);
@@ -1644,23 +1649,23 @@ static int qkIndex(void* method, void* list) {
 static void qkMoved(Frame* f) {
     void* list = (void*)(uintptr_t)f->gpr[0];
     if (!g_qk.moving || g_row.target(g_qk.moving) != list) return;
-    say("queue: OnItemMoved(%d, %d); target row %d, from row %d", (int)f->gpr[1], (int)f->gpr[2],
-        qkIndex(g_qk.moveTarget, list), qkIndex(g_qk.origTarget, list));
+    if ((int)f->gpr[2] >= 0) g_qk.lastRow = (int)f->gpr[2];
+    say("queue: OnItemMoved(%d, %d): the track at row %d", (int)f->gpr[1], (int)f->gpr[2], g_qk.lastRow);
 }
 
-// ListPanelBase.DecideMoveItem(), before: the track put down (X, or our □).
-// Its first row and the row it is put down at, to the player as one move.
-// ○ rolls it back instead, and comes nowhere near here.
+// ListPanelBase.DecideMoveItem(), before: called for each step of a move
+// (0.68 took it for the put-down: after the first step its rows read -1).
+// Logged only; RollbackMoveTarget (○) marks the move put back.
 static void qkDecide(Frame* f) {
     void* list = (void*)(uintptr_t)f->gpr[0];
     if (!g_qk.moving || g_row.target(g_qk.moving) != list) return;
-    const int fromRow = qkIndex(g_qk.origTarget, list), toRow = qkIndex(g_qk.moveTarget, list);
-    const int from = fromRow - g_qk.moveOffset, to = toRow - g_qk.moveOffset;
-    say("queue: put down: rows %d to %d, places %d to %d", fromRow, toRow, from, to);
-    if (fromRow < 0 || toRow < 0 || from < 0 || from == to) return;
-    char cmd[48];
-    fmt(cmd, sizeof(cmd), "move=%d:%d\n", from, to < 0 ? 0 : to);
-    sendEdit(cmd);
+    if (f->hook->json == 15) {
+        g_qk.cancelled = 1;
+        say("queue: move put back (RollbackMoveTarget)");
+        return;
+    }
+    say("queue: DecideMoveItem: target row %d, from row %d", qkIndex(g_qk.moveTarget, list),
+        qkIndex(g_qk.origTarget, list));
 }
 
 // ListPanelBase.EndItemMoveMode(), after: our move done; the queue again.
@@ -1669,7 +1674,14 @@ static void qkMoveEnded(Frame* f) {
     if (!g_qk.moving || g_row.target(g_qk.moving) != list) return;
     if (g_row.freeHandle) g_row.freeHandle(g_qk.moving);
     g_qk.moving = 0;
-    say("queue: move mode ended");
+    const int from = g_qk.startRow - g_qk.moveOffset, to = g_qk.lastRow - g_qk.moveOffset;
+    say("queue: move mode ended: rows %d to %d, places %d to %d%s", g_qk.startRow, g_qk.lastRow, from,
+        to, g_qk.cancelled ? ", put back" : "");
+    if (!g_qk.cancelled && from >= 0 && to >= 0 && from != to) {
+        char cmd[48];
+        fmt(cmd, sizeof(cmd), "move=%d:%d\n", from, to);
+        sendEdit(cmd);
+    }
     qkRequery(g_qk.panel ? g_row.target(g_qk.panel) : NULL);
 }
 
@@ -1699,6 +1711,7 @@ static void qkSetup(void* pui, void* app, FnMonoClass cls) {
         g_qk.decide = m(lpb, "DecideMoveItem", 0);
         g_qk.moveTarget = m(lpb, "get_MoveTargetIndex", 0);
         g_qk.origTarget = m(lpb, "get_OrigMoveTargetIndex", 0);
+        g_qk.endMove = m(lpb, "EndItemMoveMode", 0);
     }
     if (llp) g_qk.getList = m(llp, "get_ListPanel", 0);
     if (tlp) {
@@ -1711,7 +1724,7 @@ static void qkSetup(void* pui, void* app, FnMonoClass cls) {
     if (data) g_qk.fTrackIndex = g_mono.fieldByName(data, "TrackIndex");
     g_qk.ready = g_row.ready && g_mono.set && g_qk.fKey && g_qk.fKeyEvent && g_qk.fHandled &&
                  g_qk.focusIndex && g_qk.isMoving && g_qk.beginMove && g_qk.withTarget &&
-                 g_qk.endOnBack && g_qk.decide && g_qk.moveTarget && g_qk.origTarget && g_qk.getList && g_qk.listFocused &&
+                 g_qk.endOnBack && g_qk.decide && g_qk.moveTarget && g_qk.origTarget && g_qk.endMove && g_qk.getList && g_qk.listFocused &&
                  g_qk.menuData && g_qk.startQuery && g_qk.fPlayList && g_qk.fListPanel &&
                  g_qk.fTrackIndex;
     say("queue: keys %s (KeyEventArgs %p, ListPanelBase %p, LoadingListPanel %p, TrackListPanel %p)",
@@ -2236,6 +2249,8 @@ static void monoHooks(void) {
          "ListPanelBase.EndItemMoveMode"},
         {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ListPanelBase", "DecideMoveItem", 0, 14,
          "ListPanelBase.DecideMoveItem"},
+        {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ListPanelBase", "RollbackMoveTarget", 0, 15,
+         "ListPanelBase.RollbackMoveTarget"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
@@ -2313,7 +2328,7 @@ void mcwPre(Frame* f) {
         qkKey(f);  // a key, before the Music panel's handler sees it (0.67)
         return;
     }
-    if (h->json == 14) {
+    if (h->json == 14 || h->json == 15) {
         qkDecide(f);  // a track put down, before the list does it (0.68)
         return;
     }
