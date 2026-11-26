@@ -223,6 +223,14 @@ service's are, not the managed wrappers 0.85 hooked.
   extraData. The JSON is built in code that wasn't dumped. `ndb-probe`
   (`ps4/bgm/ndbprobe.c`) copies the database to `code/`, writes the
   wrapper's memory there, and logs every `sendJSON`; nothing is written.
+- **1.17 on the PS4:** neither the database (`/system_data/priv/mms`,
+  `/system_data/common/mms`, `/user/system_data/priv/mms`: not found) nor
+  the wrapper (not loaded; not at `/system/common/lib`, `/system/priv/lib`,
+  `/system/vsh/sce_module`) was found. The shell's paths are built from
+  `SystemRandomWord` (`CommonMmsPath`, `PrivilegeMmsPath`): 1.18 asks
+  `sceKernelGetFsSandboxRandomWord` and tries `/<word>/priv/mms`,
+  `/<word>/common/mms` and `/<word>/{common,priv}/lib`, listing those
+  folders (and `/system_data`, `/system/vsh/sce_module`) in the log.
 
 ### One module, and the cleanup (0.95)
 
