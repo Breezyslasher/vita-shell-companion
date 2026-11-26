@@ -6,21 +6,6 @@
 #
 #   docker run --rm --user 0 -v "$PWD":/src -w /src openorbisofficial/toolchain:latest sh ps4/bgm/build.sh
 set -eu
-# Global symbols with no type (link.x's __text_start, __data_relro_start
-# and the like, prx_crt's __dso_handle) made local before create-fself,
-# which exports every global: GoldHEN's own plugins, which load where ours
-# were refused (ENOEXEC), export only functions and objects.
-localize() {
-    args=""
-    for s in $(objdump -t "$1" | awk 'NF==5 && $2=="g" {print $5}'); do
-        args="$args --localize-symbol=$s"
-    done
-    [ -z "$args" ] || objcopy $args "$1"
-    if objdump -t "$1" | awk 'NF==5 && $2=="g"' | grep -q .; then
-        echo "$1: global symbols with no type remain" >&2
-        exit 1
-    fi
-}
 OO=${OO_PS4_TOOLCHAIN:?OO_PS4_TOOLCHAIN is not set}
 SRC=$(dirname "$0")
 RT=$SRC/../probe
@@ -47,7 +32,6 @@ PAGES="-z max-page-size=0x4000 -z common-page-size=0x4000"
 ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init $PAGES \
     -o "$OUT/sc_bgm.elf" "$OUT/bgm_crt.o" "$OUT/bgm_sys.o" "$OUT/bgm.o" "$OUT/bgm_mp3.o" \
     -L"$OO/lib" -lkernel
-localize "$OUT/sc_bgm.elf"
 CREATE_FSELF=${CREATE_FSELF:-$OUT/create-fself}
 "$CREATE_FSELF" -in="$OUT/sc_bgm.elf" -out="$OUT/sc_bgm.oelf" \
     --lib="$OUT/sc_bgm.prx" --paid 0x3800000000000011
