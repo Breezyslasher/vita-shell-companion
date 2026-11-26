@@ -35,6 +35,13 @@ ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init $PAGES \
 CREATE_FSELF=${CREATE_FSELF:-$OUT/create-fself}
 "$CREATE_FSELF" -in="$OUT/sc_bgm.elf" -out="$OUT/sc_bgm.oelf" \
     --lib="$OUT/sc_bgm.prx" --paid 0x3800000000000011
+# The music service probe (ps4/mps/mps.c): a second module for the shell,
+# built the same way.
+clang $CFLAGS $MODFLAGS $WARN -DSC_PRX -c "$SRC/../mps/mps.c" -o "$OUT/mps.o"
+ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init $PAGES \
+    -o "$OUT/sc_mps.elf" "$OUT/bgm_crt.o" "$OUT/bgm_sys.o" "$OUT/mps.o" -L"$OO/lib" -lkernel
+"$CREATE_FSELF" -in="$OUT/sc_mps.elf" -out="$OUT/sc_mps.oelf" \
+    --lib="$OUT/sc_mps.prx" --paid 0x3800000000000011
 # The loader: a raw payload, the module inside it.
 clang $CFLAGS $WARN -c "$RT/sys.c" -o "$OUT/bgm_load_sys.o"
 clang $CFLAGS $WARN "-DSC_PRX_PATH=\"$OUT/sc_bgm.prx\"" -c "$SRC/load.c" -o "$OUT/bgm_load.o"
@@ -46,7 +53,7 @@ if objdump -h "$OUT/sc_bgm_raw.elf" | grep -q '\.rela\.dyn'; then
 fi
 objcopy --set-section-flags .bss=alloc,load,contents -O binary -R .rela.dyn \
     "$OUT/sc_bgm_raw.elf" "$OUT/sc_bgm.bin"
-for e in sc_bgm; do
+for e in sc_bgm sc_mps; do
     if ! objdump -p "$OUT/$e.elf" | grep -q EH_FRAME; then  # GNU objdump: the image's readelf prints nothing
         echo "bgm: $e.elf has no PT_GNU_EH_FRAME" >&2
         exit 1

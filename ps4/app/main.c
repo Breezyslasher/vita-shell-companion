@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.18"
+#define APP_VERSION "0.19"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -93,6 +93,7 @@ int scePadReadState(int handle, OrbisPadData* data);
 #define ORBIS_PAD_BUTTON_OPTIONS 0x0008
 #define ORBIS_PAD_BUTTON_RIGHT 0x0020
 #define ORBIS_PAD_BUTTON_LEFT 0x0080
+#define ORBIS_PAD_BUTTON_L2 0x0100
 #define ORBIS_PAD_BUTTON_L1 0x0400
 #define ORBIS_PAD_BUTTON_R1 0x0800
 #define ORBIS_PAD_BUTTON_TRIANGLE 0x1000
@@ -693,6 +694,8 @@ static void draw(void) {
     y += LINE;
     text(x, y, FG, "OPTIONS  write a test tone into music/ again");
     y += LINE;
+    text(x, y, FG, "L2     try the PS4's own music service (quick menu test)");
+    y += LINE;
     text(x, y, DIM, "Leave with the PS button: the music should keep playing.");
     y += LINE * 2;
 
@@ -780,6 +783,15 @@ int main(void) {
             writeFile(SC_BGM_PORT, t, strlen(t));
             sendCommand("reload\nplay\n");
             say("Port type %d: restarting the queue", g_portType);
+        }
+        if (down & ORBIS_PAD_BUTTON_L2) {
+            // The music service probe (ps4/mps), into the shell: our player
+            // stopped first, so that only the service is heard.
+            sendCommand("stop\n");
+            mkdir("/user/data/GoldHEN/plugins", 0777);
+            if (copyFromPackage("sc_mps.prx", "/user/data/GoldHEN/plugins/sc_mps.prx") == 0 &&
+                shellLoad("/user/data/GoldHEN/plugins/sc_mps.prx"))
+                say("Music service probe in the shell: open the quick menu when it says so");
         }
         if (down & ORBIS_PAD_BUTTON_OPTIONS) {
             say("test-tone.wav written (%d)", writeTestTone());
