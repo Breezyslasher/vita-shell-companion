@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.14"
+#define APP_VERSION "0.15"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -190,7 +190,12 @@ static int writeFile(const char* path, const void* data, size_t size) {
     const size_t wrote = fwrite(data, 1, size, f);
     fclose(f);
     if (wrote != size) return -1;
-    return rename(tmp, path);
+    if (rename(tmp, path) != 0) return -1;
+    // Read, write and execute for all, as ps4-hen-rest creates the module it
+    // has SceShellUI load (sceKernelOpen(path, 0x601, 0777)): fopen made
+    // them 0666, and the shell answered EACCES wherever it could see them.
+    chmod(path, 0777);
+    return 0;
 }
 
 static int readFile(const char* path, char* out, size_t cap) {
@@ -752,8 +757,9 @@ int main(void) {
         if (down & ORBIS_PAD_BUTTON_R1) sendCommand("next\n");
         if (down & ORBIS_PAD_BUTTON_L1) sendCommand("prev\n");
         if (down & (ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT)) {
-            // MAIN 0, BGM 1, VOICE 2, PERSONAL 3, PADSPK 4, AUX 127, 14 ...
-            static const int types[] = {0, 1, 2, 3, 14, 127};
+            // MAIN 0, BGM 1, VOICE 2: heard on a PS4 (11.50) from the player
+            // in this app; 3 (PERSONAL), 14 and 127 (AUX) were not.
+            static const int types[] = {0, 1, 2};
             const int nTypes = (int)(sizeof(types) / sizeof(types[0]));
             int at = 0;
             for (int i = 0; i < nTypes; i++)
