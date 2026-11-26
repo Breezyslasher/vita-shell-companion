@@ -21,9 +21,10 @@
 #include <unistd.h>
 
 #include "../bgm/bgm.h"
+#include "../client/shell_companion.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.80"
+#define APP_VERSION "0.81"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -595,12 +596,18 @@ static int startInApp(void) {
 // see that the call can work at all; then the copy in this app's package,
 // a place modules are allowed to come from; then the rest.
 static void loadPlayer(void) {
-    readStatus();
-    if (g_status.running) {
-        sendCommand("reload\nplay\n");
+    say("-- loading, app " APP_VERSION " --");
+    // The client library (ps4/client, 0.81): the player and the music watch
+    // loaded unless running, then the queue played.
+    char what[512];
+    const int rc = scOpen(what, sizeof(what));
+    say("scOpen: %d: %s", rc, what);
+    if (scPlayerRunning()) {
+        g_loadedFrom = 5;
+        scMusicPlay();
         return;
     }
-    say("-- loading, app " APP_VERSION " --");
+    say("The client library could not load the player: the app's own ways next");
     // Where the shell took it on a PS4 (GoldHEN 2.4b18.12, 11.50), once the
     // file was 0777: /user/data/GoldHEN/plugins/ (ps4-thumbgrid-ime's list).
     mkdir("/user/data/GoldHEN", 0777);
@@ -1142,6 +1149,7 @@ int main(void) {
 
     // Out of the sandbox, to reach /data. GoldHEN gives this to homebrew.
     const long jbrc = sysCall(500, 2 /* JAILBREAK */, (long)&g_jb, 0);
+    scInit(SC_TITLE_ID, "Shell Companion BGM Test");
 
     mkdir("/data/ShellCompanion", 0777);
     mkdir(SC_BGM_DIR, 0777);
@@ -1251,10 +1259,11 @@ int main(void) {
             // The music watch (ps4/mcw): hooks the shell's calls to the music
             // server, passes each on unchanged, and logs it to mcw.log. Once
             // in the shell it stays until the PS4 restarts.
-            mkdir("/user/data/GoldHEN/plugins", 0777);
-            if (copyFromPackage("sc_mcw.prx", "/user/data/GoldHEN/plugins/sc_mcw.prx") == 0 &&
-                shellLoad("/user/data/GoldHEN/plugins/sc_mcw.prx"))
-                say("Music watch in the shell: play music, use the quick menu, send mcw.log");
+            // Through the client library (0.81), which loads it only if it
+            // is not there yet: a second copy would hook the shell twice.
+            char what[512];
+            const int rc = scOpen(what, sizeof(what));
+            say("scOpen: %d: %s", rc, what);
         }
         if (down & ORBIS_PAD_BUTTON_OPTIONS) {
             say("test-tone.wav written (%d)", writeTestTone());

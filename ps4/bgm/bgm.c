@@ -66,6 +66,10 @@ static int g_q[MAX_TRACKS];
 static int g_count;
 static int g_index;
 static int g_queueRev;  // counts the queue's changes, in status.txt (queue_rev)
+// Where in the first track to begin (queue.txt's "#position <ms>", the
+// client library's ScQueue.positionMs), and where the music was when an app
+// took it back (the "takeback" command), for status.txt's pos_ms (0.81).
+static uint64_t g_seekMs, g_heldPosMs;
 // A streamed track's tags as queue.txt gives them (0.72): URL, then title,
 // artist, album and a cover's URL, tab-separated; "" where not given.
 #define GIVEN_TEXT 160
@@ -841,6 +845,7 @@ static void writeLibrary(void);
 
 static void loadQueue(void) {
     static char text[MAX_TRACKS * 96];
+    g_seekMs = 0;
     g_libCount = 0;
     g_count = 0;
     g_index = 0;
@@ -852,7 +857,11 @@ static void loadQueue(void) {
             while (end < n && text[end] != '\n' && text[end] != '\r') end++;
             const char* line = text + at;
             const int len = end - at;
-            if (len > 7 && !memcmp(line, "#start ", 7)) {
+            if (len > 10 && !memcmp(line, "#position ", 10)) {
+                g_seekMs = 0;
+                for (int i = 10; i < len && line[i] >= '0' && line[i] <= '9'; i++)
+                    g_seekMs = g_seekMs * 10 + (uint64_t)(line[i] - '0');
+            } else if (len > 7 && !memcmp(line, "#start ", 7)) {
                 for (int i = 7; i < len && line[i] >= '0' && line[i] <= '9'; i++)
                     start = start * 10 + (line[i] - '0');
             } else if (len > 0 && (line[0] == '/' || isUrl(line))) {
@@ -1130,9 +1139,12 @@ static void libRead(int i) {
     memcpy(keepCover, g_meta.cover, sizeof(keepCover));
     if (tag) id3Read(tag, got);
     else memset(&g_meta, 0, sizeof(g_meta));
-    fmt(g_lib[i].title, LIB_TEXT, "%s", g_meta.title);
-    fmt(g_lib[i].artist, LIB_TEXT, "%s", g_meta.artist[0] ? g_meta.artist : "Unknown artist");
-    fmt(g_lib[i].album, LIB_TEXT, "%s", g_meta.album[0] ? g_meta.album : "Unknown album");
+    // An app's own title, artist and album over the file's tags (0.81).
+    fmt(g_lib[i].title, LIB_TEXT, "%s", g_given[i].title[0] ? g_given[i].title : g_meta.title);
+    fmt(g_lib[i].artist, LIB_TEXT, "%s",
+        g_given[i].artist[0] ? g_given[i].artist : g_meta.artist[0] ? g_meta.artist : "Unknown artist");
+    fmt(g_lib[i].album, LIB_TEXT, "%s",
+        g_given[i].album[0] ? g_given[i].album : g_meta.album[0] ? g_meta.album : "Unknown album");
     if (!g_lib[i].title[0]) {  // the file's name, without its type
         fmt(g_lib[i].title, LIB_TEXT, "%s", baseName(path));
         for (char* q = g_lib[i].title + strlen(g_lib[i].title); q > g_lib[i].title; q--)
@@ -1165,6 +1177,13 @@ static void libRead(int i) {
     }
     // The track's own cover, for its row in a track list (the music watch
     // draws it there, 0.62): trackart<n>-<rev>.jpg or .png.
+    if (!kind && g_given[i].cover[0]) {
+        // No cover in the file: the app's, by its URL (0.81).
+        if (a < g_nAlbums && !g_albums[a].art && g_albums[a].url < 0) g_albums[a].url = i;
+        char urlPath[96];
+        fmt(urlPath, sizeof(urlPath), LIB_DIR "/trackart%d-%d.url", i, g_artRev);
+        writeText(urlPath, g_given[i].cover);
+    }
     if (kind) {
         char artPath[96];
         fmt(artPath, sizeof(artPath), LIB_DIR "/trackart%d-%d.%s", i, g_artRev, artExt(kind));
@@ -1427,7 +1446,7 @@ static uint64_t g_lastStatus;
 
 static void writeStatus(void) {
     static char text[4096];
-    const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : 0;
+    const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : g_heldPosMs;
     fmt(text, sizeof(text),
         "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\ndur_ms=%lu\nfile=%s\nbeat_ms=%lu\n"
         "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\nvolume=%d\nrepeat=%d\nshuffle=%d\ncover=%s\n"
@@ -1482,6 +1501,17 @@ static int portOpen(void) {
 static int openTrack(void) {
     for (; g_index < g_count; g_index++) {
         if (srcOpen(curPath())) {
+            g_heldPosMs = 0;
+            if (g_seekMs && g_src.hz) {
+                // Into it as far as queue.txt's #position says: decoded and
+                // passed over (0.81).
+                const uint64_t want = g_seekMs * (uint64_t)g_src.hz / 1000u;
+                int16_t skip[2];
+                while (g_src.framesRead < want && srcFrame(skip)) {
+                }
+                logLine("began %lu ms into it", (unsigned long)(g_src.framesRead * 1000u / (uint64_t)g_src.hz));
+            }
+            g_seekMs = 0;
             rsStart();
             const int lib = g_q[g_index];
             if (isUrl(curPath())) {
@@ -1534,6 +1564,12 @@ static void runCommand(const char* text, int n) {
         if (!openTrack()) stop("nothing after it would open");
     } else if (IS("stop")) {
         stop("asked");
+    } else if (IS("takeback")) {
+        // An app takes the music back (the client library's
+        // scMusicTakeBack, 0.81): where it was kept for status.txt, so the
+        // app goes on from there.
+        g_heldPosMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : g_heldPosMs;
+        stop("taken back by the app");
     } else if (IS("reload")) {
         // The queue again, from its start; playing if it was. The port
         // too, as port.txt may have changed.

@@ -850,6 +850,52 @@ Our tracks had none, so every pair matched and the title was not redrawn.
 The pictures and the track played were right, since they come from our
 hooks and the row's `uri`. Each track now has `"id":"sc<n>"`.
 
+### Client library (`ps4/client/`, 0.81)
+
+What an app links to hand its music to the shell, as `vita/client` does on
+the Vita. It's plain C with libc only, Apache-2.0, in
+`shell_companion.h`/`.c`. The app carries `sc_bgm.prx` and `sc_mcw.prx` at
+its package's root.
+
+```c
+scInit("ABCD00001", "My App");
+char what[256];
+scOpen(what, sizeof(what));           // the player and the watch into SceShellUI
+ScTrack t[] = {{.url = "https://…/a.mp3", .title = "A", .artist = "Me", .album = "X",
+                .coverUrl = "https://…/a.jpg"},
+               {.local = "/data/MyApp/b.mp3"}};
+ScQueue q = {.index = 0, .positionMs = 12000};
+scWriteQueue(&q, t, 2);
+scMusicPlay();                        // as the app goes
+…
+scMusicTakeBack();                    // as it comes back: stopped, the place kept
+ScQueueStatus st;
+scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
+```
+
+- **`scOpen`** jailbreaks the app (GoldHEN) if `/data` can't be written. It
+  writes the Music section's account and session answers (`ebgm/`), then
+  loads each module that isn't running: the player if `status.txt`'s
+  `beat_ms` is over 3 s old, the watch if `mcw-beat.txt`'s is (the watch
+  writes it every second). A second copy of a module would hook the shell
+  twice, and a module loads only once a boot. Each module is copied from
+  the package to `/data/GoldHEN/plugins/` (0777) and loaded with
+  `PROCESS_PRX_LOAD`. The copy already there is used if the package has
+  none.
+- **`scWriteQueue`** writes `queue.txt`: `#start`, `#position`, then a line
+  a track, `path or URL<tab>title<tab>artist<tab>album<tab>cover URL`.
+  `/data/` paths become `/user/data/`, as the shell sees them. An app's
+  title, artist and album override a local file's tags, and its cover URL
+  is used where the file has no cover.
+- **`scMusicPlay`** sends `reload` and `play`. **`scMusicTakeBack`** sends
+  `takeback`: the player stops and keeps its place, so `status.txt` then
+  reads `state=stopped` with `pos_ms` where it was. **`scCommand`** sends
+  any of the player's commands.
+- The player begins `#position` ms into the `#start` track, by decoding up
+  to it.
+
+The test app (0.81) loads both modules with `scOpen`, on X and on UP.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our

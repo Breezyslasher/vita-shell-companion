@@ -30,7 +30,10 @@ OUT="$OUT" sh "$SRC/../bgm/build.sh"
 clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -Wall -Wextra -Werror \
     -isysroot "$OO" -isystem "$OO/include" "-DSC_PRX_PATH=\"$OUT/sc_bgm.prx\"" "-DSC_TITLE_ID=\"$TITLE_ID\"" \
     -c "$SRC/main.c" -o "$OUT/app.o"
-ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -o "$OUT/app.elf" "$OUT/app.o" \
+# The client library (ps4/client), as an app links it.
+clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -Wall -Wextra -Werror \
+    -isysroot "$OO" -isystem "$OO/include" -c "$SRC/../client/shell_companion.c" -o "$OUT/client.o"
+ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -o "$OUT/app.elf" "$OUT/app.o" "$OUT/client.o" \
     -L"$OO/lib" -lc -lkernel -lSceVideoOut -lScePad -lSceUserService -lSceSysmodule -lSceSystemService "$OO/lib/crt1.o"
 
 PKG=$OUT/pkg

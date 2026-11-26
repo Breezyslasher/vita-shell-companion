@@ -3004,10 +3004,23 @@ static void* watchMain(void* arg) {
     uint64_t lastSummary = sysNowUs();
     uint32_t lastCalls[MAX_HOOKS];
     memset(lastCalls, 0, sizeof(lastCalls));
+    uint64_t lastBeat = 0;
     for (;;) {
         sysSleepMs(200);
         fakeRefresh();
         const uint64_t now = sysNowUs();
+        if (now - lastBeat >= 1000000u) {
+            // Alive, for the client library (scOpen loads the watch only
+            // when this is old: a second copy would hook everything twice).
+            lastBeat = now;
+            char beat[48];
+            const int bn = fmt(beat, sizeof(beat), "beat_ms=%lu\n", (unsigned long)(now / 1000u));
+            const int bfd = sysOpen(SC_BGM_DIR "/mcw-beat.txt", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+            if (bfd >= 0) {
+                sysWrite(bfd, beat, (size_t)bn);
+                sysClose(bfd);
+            }
+        }
         if (now - lastSummary >= 10000000u) {
             lastSummary = now;
             g_quiet = sysExists(SC_BGM_DIR "/mcw.quiet");
