@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.3"
+#define APP_VERSION "0.4"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -114,14 +114,22 @@ extern const uint8_t g_prxEnd[];
 
 // ---- system calls: GoldHEN's (500) and the clock the module uses ----
 
+// The fourth argument (r10) is 0, as sys_dynlib_load_prx takes four:
+// 0.2 and 0.3 left it as it was, so their loads into the app were wrong.
 __attribute__((noinline)) static long sysCall(long num, long a, long b, long c) {
     long rax;
+    register long r10 __asm__("r10") = 0;
+    register long r8 __asm__("r8") = 0;
+    register long r9 __asm__("r9") = 0;
     __asm__ volatile("syscall; jnc 1f; negq %%rax; 1:"
-                     : "=a"(rax), "+D"(a), "+S"(b), "+d"(c)
+                     : "=a"(rax), "+D"(a), "+S"(b), "+d"(c), "+r"(r10), "+r"(r8), "+r"(r9)
                      : "a"(num)
-                     : "rcx", "r8", "r9", "r10", "r11", "cc", "memory");
+                     : "rcx", "r11", "cc", "memory");
     return rax;
 }
+
+int sceKernelLoadStartModule(const char* path, size_t args, const void* argp, uint32_t flags,
+                             const void* opt, int* res);
 
 // The monotonic clock, in ms, as the module's heartbeat has it.
 static uint64_t nowMs(void) {
@@ -358,6 +366,28 @@ static int fromPackage(void) {
     return ok;
 }
 
+// Starts the player inside this app, the way a module is meant to be
+// started (sceKernelLoadStartModule), when the shell will not have it: it
+// plays while the app is open, which shows whether the module and its
+// audio work at all. 1 if it started.
+static int g_inApp;
+static int startInApp(void) {
+    if (g_inApp) return 1;
+    static const char* const paths[2] = {"/mnt/sandbox/pfsmnt/SCMP00001-app0/sc_bgm.prx",
+                                          "/app0/sc_bgm.prx"};
+    for (int i = 0; i < 2; i++) {
+        int res = 0;
+        const int h = sceKernelLoadStartModule(paths[i], 0, NULL, 0, NULL, &res);
+        say("Start in this app %s: 0x%08X, module_start 0x%X", paths[i], (unsigned)h, res);
+        if (h >= 0) {
+            g_inApp = 1;
+            say("Playing inside this app (not the shell): stops when the app closes");
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // The first runs on a PS4 (11.50, GoldHEN) had the shell answer ENOENT
 // (0x80020002) for /data/... and EACCES (0x8002000D) for /user/data/...,
 // /system_tmp and its own sandbox, and this app EACCES (-13) loading it
@@ -371,7 +401,11 @@ static void loadPlayer(void) {
         return;
     }
     say("-- loading, app " APP_VERSION " --");
-    shellLoad("/system/common/lib/libSceAudioOut.sprx");  // the control
+    // Controls: a system library the shell has, by path and by name; and an
+    // OpenOrbis module from this package, into this app.
+    shellLoad("/system/common/lib/libSceAudioOut.sprx");
+    shellLoad("libSceAudioOut.sprx");
+    selfLoad("/mnt/sandbox/pfsmnt/SCMP00001-app0/sce_module/libSceFios2.prx");
 
     if (fromPackage()) {
         g_loadedFrom = 4;
@@ -391,6 +425,7 @@ static void loadPlayer(void) {
         return;
     }
     say("The shell would not load it from any path: send app.log");
+    startInApp();
 }
 
 // ---- the screen: two frame buffers, drawn by the CPU ----
@@ -517,7 +552,8 @@ static void draw(void) {
     text(x, y, ACCENT, "Shell Companion - PS4 background music test " APP_VERSION);
     y += LINE * 2;
     if (g_status.running) {
-        textf(x, y, GOOD, "Player: running in the shell (%s)", g_status.state);
+        textf(x, y, GOOD, "Player: running %s (%s)", g_inApp ? "INSIDE THIS APP" : "in the shell",
+              g_status.state);
         y += LINE;
         textf(x, y, FG, "Track %d of %d   %u:%02u", g_status.count ? g_status.index + 1 : 0,
               g_status.count, g_status.posMs / 60000, g_status.posMs / 1000 % 60);
