@@ -314,6 +314,7 @@ static struct {
     volatile uint32_t state;  // 2 playing, 3 paused
     volatile uint64_t durS, posS;
     volatile uint32_t index, count;
+    volatile uint32_t volume;  // 0 to 32768, as the quick menu sets it
     volatile uint32_t owed;  // events owed: 1 << type
     char title[16];
     // The track, under a lock: the watch's thread writes, the shell's read.
@@ -388,6 +389,8 @@ static void fakeRefresh(void) {
             g_fake.index = (uint32_t)toU64(v);
             statusField(text, "count", v, sizeof(v));
             g_fake.count = (uint32_t)toU64(v);
+            statusField(text, "volume", v, sizeof(v));
+            if (v[0]) g_fake.volume = (uint32_t)toU64(v);
             statusField(text, "file", v, sizeof(v));
             if (!g_fake.active || !eq(v, g_fake.file)) {
                 lock(&g_fake.lock);
@@ -504,7 +507,7 @@ static void fakeApply(Frame* f) {
         put32At(p, 0x24, g_fake.index);  // current track
         put32At(p, 0x28, g_fake.index);  // current play index
         put32At(p, 0x2C, g_fake.count);
-        put32At(p, 0x30, 0x8000);        // volume, 0 dB
+        put32At(p, 0x30, g_fake.volume ? g_fake.volume : 0x8000);  // volume, 0x8000 0 dB
         // mute, repeat, auto play, BGM status, shuffle, the GUID: 0
         put32At(p, 0x58, g_fake.index + 1 < g_fake.count ? 0 : 1);  // 0 can skip next
         put32At(p, 0x5C, 0);                                          // can skip previous
@@ -549,6 +552,16 @@ static void fakeApply(Frame* f) {
         if (send) sendPlayer(send);
         owe(EV_PLAY_STATUS);
         if (track == TRACK_NEXT || track == TRACK_PREV) owe(EV_TRACK_INFO);
+        f->retRax = 0;
+    } else if (eq(h->name, "SetAudioVolume")) {
+        // (level): 0 to 0x8000, 0 dB; the quick menu's slider sends ten a second.
+        uint32_t level = (uint32_t)f->gpr[0];
+        if (level > 0x8000) level = 0x8000;
+        char cmd[32];
+        fmt(cmd, sizeof(cmd), "volume=%u\n", level);
+        sendPlayer(cmd);
+        g_fake.volume = level ? level : 1;  // 0 here means "not known": 1 is silent enough
+        owe(EV_PLAY_STATUS);
         f->retRax = 0;
     } else if (eq(h->name, "SetShuffle") || eq(h->name, "SetRepeatMode")) {
         say("fake: %s(%lu): not ours yet", h->name, f->gpr[0]);

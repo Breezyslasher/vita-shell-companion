@@ -60,6 +60,9 @@ static char g_tracks[MAX_TRACKS][MAX_PATH];
 static int g_count;
 static int g_index;
 static int g_state = ST_STOPPED;
+// The volume, 0 to 32768 (0 dB): the quick menu's, through the music watch
+// (volume=<n> as cmd).
+static int32_t g_volume = 32768;
 
 // ---- a source: a whole file in memory, decoded a frame at a time ----
 
@@ -511,10 +514,10 @@ static void writeStatus(void) {
     const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : 0;
     fmt(text, sizeof(text),
         "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\ndur_ms=%lu\nfile=%s\nbeat_ms=%lu\n"
-        "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\n",
+        "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\nvolume=%d\n",
         SC_BGM_PROTOCOL, stateName(g_state), g_index, g_count, (uint64_t)posMs, g_src.durMs,
         g_count ? g_tracks[g_index] : "", (uint64_t)(sysNowUs() / 1000u), g_meta.title,
-        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen);
+        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen, (int)g_volume);
     writeText(SC_BGM_STATUS, text);
     g_lastStatus = sysNowUs();
 }
@@ -523,6 +526,13 @@ static void writeStatus(void) {
 
 static int g_port = -1;
 static int g_portType;
+
+static void applyVolume(void) {
+    if (!g_aoVolume || g_port < 0) return;
+    int32_t vol[8];
+    for (int i = 0; i < 8; i++) vol[i] = g_volume;
+    g_aoVolume(g_port, 0xFF, vol);
+}
 static int16_t g_out[GRAIN * 2];
 
 static void portClose(void) {
@@ -544,11 +554,7 @@ static int portOpen(void) {
         g_port = -1;
         return 0;
     }
-    if (g_aoVolume) {
-        int32_t vol[8];
-        for (int i = 0; i < 8; i++) vol[i] = 32768;  // 0 dB
-        g_aoVolume(g_port, 0xFF, vol);
-    }
+    applyVolume();
     return 1;
 }
 
@@ -609,6 +615,11 @@ static void runCommand(const char* text, int n) {
         stop("reloading");
         loadQueue();
         if (was != ST_STOPPED && openTrack()) g_state = ST_PLAYING;
+    } else if (n > 7 && !memcmp(text, "volume=", 7)) {
+        int32_t v = 0;
+        for (int i = 7; i < n && text[i] >= '0' && text[i] <= '9'; i++) v = v * 10 + (text[i] - '0');
+        g_volume = v > 32768 ? 32768 : v;
+        applyVolume();
     } else if (IS("quit")) {
         stop("asked to quit");
         g_quit = 1;

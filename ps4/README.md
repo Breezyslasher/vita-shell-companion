@@ -187,6 +187,20 @@ started. **`GetPlayStartCondition(titleId, out*)`**: called from the
 Library's option menu with a game's title (`CUSA01780`): `out` `00 01 01 00`,
 whether music may play on in that game, it seems.
 
+### It works: our player in the quick menu (0.33, 11.50)
+
+With the watch answering as a core (R3), the quick menu showed a music
+entry for our player with the MP3's title, artist and cover, and its
+buttons worked: pause and play (`PlayControl` 0xFFFFFFFE, commands 3 and 1),
+next (0xFFFFFFFC) and previous (0xFFFFFFFD), each reaching our player.
+While the test app is open its own entry shows as well; the music entry is
+our player's, which plays on in the shell when the app is closed.
+
+Volume: the entry's slider calls `SetAudioVolume(level)`, 0 to 0x8000
+(0 dB), ten times a second; the server refused it (0x80FD0005) as there is no
+real core. From 0.34 the watch sends it to our player (`volume=<level>` as
+`cmd`, applied to its audio port) and reports it in GetPlayStatus.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
