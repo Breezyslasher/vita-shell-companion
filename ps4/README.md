@@ -190,6 +190,23 @@ service's are, not the managed wrappers 0.85 hooked.
   answered finished. 1.14 answers a finished one as going with every byte
   there (0 s left) until it has been left out of a section 3 answer, then
   as finished.
+- **1.15, the gaps closed:**
+  - *Failed* (gone, or out of tries): answered as package 1097 failed
+    (1.05's log) — Stop/Download, error `0x80990033` (what the service
+    gives a placeholder it fails), param `0x40080c1` (error bit 26) — and
+    moved from section 3 into section 5, which no longer drops these.
+  - *Deleted from the list* (triangle): a progress call answering
+    `0x80990019` (as our own removals do), or the list's unregister call,
+    and the entry is no longer ours: no answers, not put back in section 9.
+  - *The list's buttons*: the service's start, resume, pause, stop and
+    unregister are hooked; a call for ours from another thread than the
+    downloads' is logged; start or resume (the service would fetch it, and
+    fail) is answered with a pause.
+  - *Icon*: the client library writes `app=<title id>` in downloads.txt;
+    placeholders are registered with `/user/appmeta/<id>/icon0.png`.
+  - *After the list*: entries removed 30 min after it ends (`dl-list-keep`
+    keeps them till the next list), so a reboot without the module doesn't
+    leave paused tasks showing.
 
 ### One module, and the cleanup (0.95)
 

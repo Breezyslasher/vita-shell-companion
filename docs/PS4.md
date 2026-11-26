@@ -212,6 +212,7 @@ Switches (an empty file of that name in the folder):
 |---|---|
 | `mcw-verbose` | log every call the music watch sees (mcw.log grows fast) |
 | `dl-nolist` | no entries in Notifications > Downloads for a list's files (an experiment, 0.96) |
+| `dl-list-keep` | keep finished entries in Notifications > Downloads until the next list (else removed 30 min after the list ends) |
 | `dl-list-bits.txt` | `going=0x…`, `waiting=0x…`, `done=0x…`: the state bits those entries are given |
 | `mcw-norowart` | no covers beside tracks |
 | `mcw-noqueuekeys` | no □/△ in track lists |

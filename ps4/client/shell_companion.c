@@ -440,6 +440,9 @@ int scWriteDownloads(int notify, const char* headers, const ScDownload* items, u
     size_t at = (size_t)snprintf(out, cap, "notify=%d\nheaders=", notify ? 1 : 0);
     at = putEncoded(out, at, cap, headers);
     out[at++] = '\n';
+    // The app's title id: its icon beside its files in Notifications >
+    // Downloads (1.15).
+    if (g_titleId[0]) at += (size_t)snprintf(out + at, cap - at, "app=%s\n", g_titleId);
     for (uint32_t i = 0; i < count; i++) {
         const ScDownload* d = &items[i];
         if (!d->kind) continue;

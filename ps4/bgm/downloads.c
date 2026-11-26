@@ -38,6 +38,7 @@ static struct {
     volatile int start, takeBack;  // asked for (runCommand), seen by dlMain
     volatile int running;
     int notify;
+    char app[16];  // the app's title id (app=, 1.15), for its icon
     char headers[2048];
     int count;
     struct {
@@ -58,6 +59,7 @@ static uint8_t g_dlBuf[64 * 1024];
 
 static void dllRepair(void);  // dllist.c (1.02)
 static void dlListLeftovers(void);  // dllist.c (1.04)
+static void dlListIdle(void);        // dllist.c (1.15)
 
 // %XX back to its byte.
 static void dlDecode(char* s) {
@@ -97,6 +99,7 @@ static int dlRead(void) {
     g_dls.count = 0;
     g_dls.notify = 1;
     g_dls.headers[0] = 0;
+    g_dls.app[0] = 0;
     if (n <= 0) return 0;
     for (int at = 0; at < n;) {
         int end = at;
@@ -105,6 +108,8 @@ static int dlRead(void) {
         char* line = text + at;
         if (!memcmp(line, "notify=", 7)) {
             g_dls.notify = line[7] != '0';
+        } else if (!memcmp(line, "app=", 4)) {
+            fmt(g_dls.app, sizeof(g_dls.app), "%s", line + 4);
         } else if (!memcmp(line, "headers=", 8)) {
             fmt(g_dls.headers, sizeof(g_dls.headers), "%s", line + 8);
             dlDecode(g_dls.headers);
@@ -458,7 +463,10 @@ static void* dlMain(void* arg) {
     (void)arg;
     dlListLeftovers();
     for (;;) {
-        while (!g_dls.start) sysSleepMs(200);
+        while (!g_dls.start) {
+            sysSleepMs(200);
+            dlListIdle();
+        }
         g_dls.start = 0;
         g_dls.takeBack = 0;
         if (!dlRead()) {

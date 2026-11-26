@@ -2736,6 +2736,7 @@ void mcwPre(Frame* f) {
 void dlListHook(Frame* f);
 void dlListQueryHook(Frame* f);
 void dlListInfoHook(Frame* f);
+void dlListCtlHook(Frame* f);
 
 // A native function hooked for the player, under the install lock.
 int mcwHookNative(Hook* h, void* fn, const char** why) {
@@ -2758,6 +2759,10 @@ void mcwPost(Frame* f) {
     }
     if (f->hook->json == 20) {
         dlListInfoHook(f);
+        return;
+    }
+    if (f->hook->json == 21) {
+        dlListCtlHook(f);
         return;
     }
 #endif

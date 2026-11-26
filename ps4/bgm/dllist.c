@@ -72,6 +72,9 @@ static struct {
     Hook hooks[2];
     Hook query[4];  // the list's task queries (0.98)
     Hook info[8];   // its task info calls, logged only (1.11)
+    Hook ctl[5];    // start, resume, pause, stop, unregister: the list's buttons (1.15)
+    int dlThread;   // the downloads' thread, whose calls are ours
+    uint64_t endedUs;  // when the last list ended, 0 if one is going
     uint32_t infoLogged;
     uint32_t queryCalls[4];
     FnBgftUnregister unregister, stop, pause;
@@ -114,6 +117,19 @@ static void dllFill(int k, BgftProgress* pr) {
     // again. So it answers going, every byte there, until it has been left
     // out of a section 3 answer (and put in section 9's).
     int st = it->state;
+    if (st == DLS_FAILED || st == DLS_GONE) {
+        // Failed for good (1.15): as package 1097, which the service failed
+        // (1.05's log): Stop/Download, its error, in section 5. The error
+        // the service gives a placeholder it fails, 0x80990033.
+        pr->errorResult = (int32_t)0x80990033;
+        pr->bits = (pr->bits & ~0x3FFu) | 0x308u;
+        pr->length = pr->lengthTotal = it->size ? it->size : it->bytes + 1;
+        pr->transferred = pr->transferredTotal = it->bytes;
+        pr->numIndex = pr->numTotal = 1;
+        pr->preparingPercent = 0;
+        pr->restSec = pr->restSecTotal = 0xFFFFFFFFu;
+        return;
+    }
     const int moved = g_dll.e[k].movedOut;
     if (st == DLS_DONE && !moved) st = DLS_GOING;
     const uint64_t bytes = it->state == DLS_DONE && !moved ? (it->bytes ? it->bytes : it->size) : it->bytes;
@@ -169,8 +185,15 @@ void dlListHook(Frame* f) {
         if (g_dll.e[k].task != task || task <= 0) continue;
         const uint32_t was = pr->bits;
         const int32_t err = pr->errorResult;
-        if (err && !g_dll.e[k].failed) g_dll.e[k].failed = 1;  // replaced by dllRepair (1.02)
         const int rc = (int)(int32_t)f->retRax;
+        if (rc == (int)0x80990019) {
+            // Not there (1.15): deleted from the list (triangle), as our own
+            // removals answer (0x80990019). No longer ours to answer for.
+            logLine("dllist: task %d (item %d) is gone (0x80990019): deleted from the list", task, g_dll.e[k].item);
+            g_dll.e[k].task = 0;
+            return;
+        }
+        if (err && !g_dll.e[k].failed) g_dll.e[k].failed = 1;  // replaced by dllRepair (1.02)
         dllFill(k, pr);
         // TaskProgress's last field, percentTotal (a float after
         // localCopyPercent, 0x40), once real tasks have shown it is there.
@@ -239,6 +262,15 @@ void dlListHook(Frame* f) {
             tail[2], tail[3], n, scePthreadGetthreadid());
 }
 
+// The section an item of ours belongs in (1.15), as the PS4's own move
+// (1.00, 1.05: going in 3, finished first in 9, failed in 5).
+static int dllSection(int k) {
+    const int i = g_dll.e[k].item;
+    if (g_dll.e[k].task <= 0 || i < 0 || i >= g_dls.count) return 0;
+    const int st = g_dls.item[i].state;
+    return st == DLS_DONE ? 9 : st == DLS_FAILED || st == DLS_GONE ? 5 : 3;
+}
+
 // After one of the service's task queries (0.98), logged only: its results
 // are {int taskId; uint param} pairs, each section's logged when they
 // change. (0.98-0.99 cleared a "failed" flag, 0x200, on ours wherever a
@@ -283,7 +315,7 @@ void dlListQueryHook(Frame* f) {
                 memcpy(&id, res + j * 8, 4);
                 int mine = 0;
                 for (int k = 0; k < count && k < DLL_MAX; k++)
-                    if (g_dll.e[k].task == id && id > 0) {
+                    if (g_dll.e[k].task == id && id > 0 && dllSection(k) != 5) {
                         mine = 1;
                         g_dll.e[k].failed = 1;
                     }
@@ -304,7 +336,7 @@ void dlListQueryHook(Frame* f) {
         // Download with every byte). The list builds its rows per section:
         // ours, finished but still in section 3, read oddly whatever they
         // answered.
-        if (h == &g_dll.query[1] && (f->gpr[2] == 3 || f->gpr[2] == 9) && count && cnt <= 960 &&
+        if (h == &g_dll.query[1] && (f->gpr[2] == 3 || f->gpr[2] == 5 || f->gpr[2] == 9) && count && cnt <= 960 &&
             (hookProt(num) & 2)) {
             const uint32_t max = (uint32_t)f->gpr[1] < 960 ? (uint32_t)f->gpr[1] : 960;
             if (f->gpr[2] == 3 && cnt && hookReadable(res, (size_t)cnt * 8) == (size_t)cnt * 8 && (hookProt(res) & 2)) {
@@ -315,11 +347,12 @@ void dlListQueryHook(Frame* f) {
                     int out = 0;
                     for (int k = 0; k < count && k < DLL_MAX; k++) {
                         const int i = g_dll.e[k].item;
-                        if (g_dll.e[k].task == id && id > 0 && i >= 0 && i < g_dls.count && g_dls.item[i].state == DLS_DONE) {
+                        (void)i;
+                        if (g_dll.e[k].task == id && id > 0 && dllSection(k) != 3) {
                             out = 1;
                             if (!g_dll.e[k].movedOut) {
                                 g_dll.e[k].movedOut = 1;
-                                logLine("dllist: task %d finished: out of section 3, into section 9", id);
+                                logLine("dllist: task %d out of section 3, into section %d", id, dllSection(k));
                             }
                         }
                     }
@@ -332,14 +365,14 @@ void dlListQueryHook(Frame* f) {
                     *(uint32_t*)(uintptr_t)f->gpr[3] = w;
                     cnt = w;
                 }
-            } else if (f->gpr[2] == 9) {
-                // Ours finished, newest first, before the PS4's own.
+            } else if (f->gpr[2] == 9 || f->gpr[2] == 5) {
+                // Ours finished (9) or failed (5), newest first, before the
+                // PS4's own.
+                const int want = (int)f->gpr[2];
                 int32_t add[DLL_MAX];
                 uint32_t n = 0;
                 for (int k = count - 1; k >= 0; k--) {
-                    const int i = g_dll.e[k].item;
-                    if (k >= DLL_MAX || g_dll.e[k].task <= 0 || i < 0 || i >= g_dls.count || g_dls.item[i].state != DLS_DONE)
-                        continue;
+                    if (k >= DLL_MAX || dllSection(k) != want) continue;
                     int there = 0;
                     for (uint32_t j = 0; j < cnt && hookReadable(res + j * 8, 8) == 8; j++) {
                         int32_t id;
@@ -369,7 +402,8 @@ void dlListQueryHook(Frame* f) {
                     if (g_dll.e[k].task != id || id <= 0) continue;
                     const int i = g_dll.e[k].item;
                     const int st = i >= 0 && i < g_dls.count ? g_dls.item[i].state : DLS_WAITING;
-                    const uint32_t prm = st == DLS_DONE && g_dll.trying ? g_dllTry[i % 6].param
+                    const uint32_t prm = st == DLS_FAILED || st == DLS_GONE ? 0x40080c1u  // 1097's 0x14008061: error, Stop/Download; Package
+                                       : st == DLS_DONE && g_dll.trying ? g_dllTry[i % 6].param
                                        : st != DLS_DONE && st != DLS_GOING && g_dll.trying ? g_dllTryWait[i % 6].param
                                        : st == DLS_DONE    ? g_dll.paramDone
                                        : st == DLS_GOING ? g_dll.paramGoing
@@ -433,6 +467,28 @@ void dlListInfoHook(Frame* f) {
     logLine("dllist: %s(%d, %lx, %lx)%s = 0x%08X, a2 -> %s%lx  [thread %d]", f->hook->name, task,
             (unsigned long)f->gpr[1], (unsigned long)f->gpr[2], ours ? " [ours]" : "", (unsigned)f->retRax,
             have ? "" : "(not read) ", (unsigned long)out, scePthreadGetthreadid());
+}
+
+// The list's buttons (1.15): the service's start, resume, pause, stop and
+// unregister, after a call for one of ours not made by the downloads'
+// thread. Start or resume would have the service fetch it itself, which it
+// can't (0.92-0.94): paused again at once. Unregister (triangle, delete):
+// no longer ours. Pause and stop: logged; the downloads go on.
+void dlListCtlHook(Frame* f) {
+    const int32_t task = (int32_t)f->gpr[0];
+    if (task <= 0 || scePthreadGetthreadid() == g_dll.dlThread) return;
+    for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
+        if (g_dll.e[k].task != task) continue;
+        const char* name = f->hook->name;
+        logLine("dllist: %s(%d) [ours, item %d] from the list = 0x%08X  [thread %d]", name, task, g_dll.e[k].item,
+                (unsigned)f->retRax, scePthreadGetthreadid());
+        if (hasText(name, "Unregister")) {
+            g_dll.e[k].task = 0;
+        } else if ((hasText(name, "Start") || hasText(name, "Resume")) && g_dll.pause) {
+            logLine("dllist: task %d paused again: 0x%08X", task, (unsigned)g_dll.pause(task));
+        }
+        return;
+    }
 }
 
 static int dllHex(const char* text, const char* key, uint32_t* out) {
@@ -515,6 +571,23 @@ static int dllSetup(void) {
         const int rc = mcwHookNative(h, fn, &why);
         logLine("dllist: %s %p: %s%s", inames[i], fn, rc == 0 ? "hooked (logged only)" : "not hooked: ", rc == 0 ? "" : why);
     }
+    // The list's buttons (1.15).
+    static const char* const cnames[5] = {"sceBgftServiceDownloadStartTask", "sceBgftServiceDownloadResumeTask",
+                                          "sceBgftServiceDownloadPauseTask", "sceBgftServiceDownloadStopTask",
+                                          "sceBgftServiceIntDownloadUnregisterTask"};
+    for (int i = 0; i < 5; i++) {
+        void* fn = anySym(lib, cnames[i]);
+        if (!fn) {
+            logLine("dllist: %s: not found", cnames[i]);
+            continue;
+        }
+        Hook* h = &g_dll.ctl[i];
+        h->name = cnames[i] + 10;
+        h->json = 21;
+        const char* why = "";
+        const int rc = mcwHookNative(h, fn, &why);
+        logLine("dllist: %s %p: %s%s", cnames[i], fn, rc == 0 ? "hooked" : "not hooked: ", rc == 0 ? "" : why);
+    }
     // Left from a crash or an earlier boot.
     char text[1024];
     const int n = readText(DLL_TASKS, text, sizeof(text));
@@ -554,7 +627,11 @@ static int32_t dllRegister(int i) {
     if (g_dll.trying) fmt(name, sizeof(name), "[%c] %s", g_dllTry[i % 6].letter, it->title[0] ? it->title : it->id);
     else fmt(name, sizeof(name), "%s", it->title[0] ? it->title : it->id);
     p.contentName = name;
-    p.iconPath = "";
+    // The app's own icon (1.15; the list's app= line, from the client
+    // library), so its rows aren't a "?".
+    char icon[96] = "";
+    if (g_dls.app[0]) fmt(icon, sizeof(icon), "/user/appmeta/%s/icon0.png", g_dls.app);
+    p.iconPath = icon[0] && sysExists(icon) ? icon : "";
     p.playgoScenarioId = "0";
     p.option = 0x10000;
     p.packageType = "";
@@ -588,7 +665,7 @@ static int32_t dllRegister(int i) {
 static void dllRepair(void) {
     int changed = 0;
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
-        if (!g_dll.e[k].failed) continue;
+        if (!g_dll.e[k].failed || g_dll.e[k].task <= 0 || dllSection(k) == 5) continue;
         if (g_dll.e[k].tries >= 3) continue;
         g_dll.e[k].tries++;
         const int32_t old = g_dll.e[k].task;
@@ -609,6 +686,8 @@ static void dllRemoveAll(void);
 
 // A list beginning: a placeholder for each of its url and pages items.
 static void dlListBegin(void) {
+    g_dll.dlThread = scePthreadGetthreadid();
+    g_dll.endedUs = 0;
     dllRemoveAll();  // the last list's, shown finished till now
     if (sysExists(SC_BGM_DIR "/dl-nolist") || !dllSetup()) return;
     char text[256];
@@ -687,6 +766,19 @@ static void dllRemoveAll(void) {
 // at the next boot's first start of the module (dlListLeftovers).
 static void dlListEnd(void) {
     if (g_dls.takeBack) dllRemoveAll();
+    else g_dll.endedUs = sysNowUs();
+}
+
+// While no list is going (dlMain's wait): the last list's placeholders go
+// 30 minutes after it ended (1.15), unless dl-list-keep is there. Without
+// the module (after a reboot) they would show the service's own state, a
+// paused task, until the app's next start removed them.
+static void dlListIdle(void) {
+    if (!g_dll.endedUs || !g_dll.count || sysNowUs() - g_dll.endedUs < 30ull * 60 * 1000000) return;
+    g_dll.endedUs = 0;
+    if (sysExists(SC_BGM_DIR "/dl-list-keep")) return;
+    logLine("dllist: the last list ended 30 min ago: its entries removed");
+    dllRemoveAll();
 }
 
 // At the module's start: any placeholders left from an earlier boot (or a
