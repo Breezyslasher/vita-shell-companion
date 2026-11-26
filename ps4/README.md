@@ -690,6 +690,9 @@ shell's own `ImageBox.LoadAsync(uri, action, options)`, keeps the
 to our loads' options (`ImageOptions.set_AssetManager`). It logs each of the
 shell's first 12 loads with its address and manager's name.
 
+0.66 works: the track row shows its cover at its left, the title and artist
+beside it (photo, 2026-11-26).
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our
