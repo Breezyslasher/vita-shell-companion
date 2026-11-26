@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.42"
+#define APP_VERSION "0.43"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -869,18 +869,15 @@ static void draw(void) {
 static void writeEbgm(void) {
     mkdir(SC_BGM_DIR "/ebgm", 0777);
     if (access(SC_BGM_DIR "/ebgm/keep", F_OK) == 0) return;
+    // The shell reads it as {"spotify": {...}} (0.42's key log).
     static const char profile[] =
-        "{\"partner\":\"spotify\",\"subscriptionType\":\"PREMIUM\",\"legalCountry\":\"US\"}\n";
+        "{\"spotify\":{\"subscriptionType\":\"PREMIUM\",\"legalCountry\":\"US\"}}\n";
     writeFile(SC_BGM_DIR "/ebgm/me_partner_profile.json", profile, sizeof(profile) - 1);
-    // 0.40's, each view a section with its playlists inside, showed "No
-    // playlists.": the shell's strings have section_title before views, so
-    // each view may be a playlist itself, with its section's title. This
-    // one is both.
+    // The shell reads views[], each view's "name" (the section's title) and
+    // its "lists" (0.42's key log); a list's own keys are the next to learn.
     static const char views[] =
-        "{\"upgrade_scopes_required\":false,\"views\":[{\"section_title\":\"Shell Companion\","
-        PLAYLIST_FIELDS ","
-        "\"items\":[" PLAYLIST_GUESS "],\"playlists\":[" PLAYLIST_GUESS "],"
-        "\"content\":{\"items\":[" PLAYLIST_GUESS "]}}]}\n";
+        "{\"upgrade_scopes_required\":false,\"views\":[{\"name\":\"Shell Companion\","
+        "\"section_title\":\"Shell Companion\",\"lists\":[" PLAYLIST_GUESS "]}]}\n";
     writeFile(SC_BGM_DIR "/ebgm/recommended_views.json", views, sizeof(views) - 1);
 }
 

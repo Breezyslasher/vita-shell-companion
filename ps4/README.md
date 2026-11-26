@@ -323,6 +323,21 @@ after it answers one of the Music section's requests logs each key asked for
 (`json: Item("views") = …`, `json: ContainsKey("…") = yes|no`). An empty
 `mcw-nojson` file turns this off.
 
+### The keys, from the shell (0.42)
+
+Mono's API worked in the shell: the root domain, the thread attached,
+`Sce.PlayStation.Json`'s `JsonObject` and its four methods' code, all hooked.
+Reading our answers, the shell asked for:
+
+- the profile: `RootObject` (the parser's own wrapper), then `spotify`
+  (missing: its fields belong under it)
+- the views: `RootObject`, `views` (there), each view's `name` (there) and
+  `lists` (missing: where its playlists go), then `upgrade_scopes_required`
+
+0.43 answers `{"spotify": {"subscriptionType": "PREMIUM", "legalCountry":
+"US"}}` and `{"views": [{"name": "Shell Companion", "lists": [ ... ]}],
+"upgrade_scopes_required": false}`; a list's own keys come next.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
