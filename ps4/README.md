@@ -67,6 +67,15 @@ service's are, not the managed wrappers 0.85 hooked.
   our tasks' pairs, logs their first calls, and pauses each placeholder as
   it is registered (`dl-list-nopause` not to), logging its bits before and
   after.
+- **0.98 on the PS4:** paused, a placeholder is no longer failed: bits
+  `0x302`/`0x301` when registered, `0x32a`/`0x322` just paused, then
+  `0x328`/`0x320`, error 0. Shown: answered `0x320` (its own) "Preparing to
+  download… (0%)"; `0x30a` (going) and `0x188` (done) "Cannot download".
+  The task query is `sceBgftServiceIntDownloadQueryTaskSection(?, 960,
+  section, &count, results)`. 0.99 logs each change of a placeholder's
+  bits (the service's and ours) and the query's results holding ours, and
+  the test app takes a package on the console (`/data/...pkg`) in
+  `test-downloads.txt`, so a real install's states are logged beside them.
 
 ### One module, and the cleanup (0.95)
 

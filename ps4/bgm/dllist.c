@@ -50,6 +50,8 @@ static struct {
         int item;
         uint64_t t0, b0;  // when it began to come, and its bytes then
         uint32_t logged;
+        uint32_t lastWas, lastSaid;  // the service's bits and ours, last logged (0.99)
+        uint64_t lastParam;          // its param in the last query logged (0.99)
     } e[DLL_MAX];
     struct {
         int32_t task;
@@ -109,7 +111,11 @@ void dlListHook(Frame* f) {
         const int rc = (int)(int32_t)f->retRax;
         dllFill(k, pr);
         f->retRax = 0;
-        if (g_dll.e[k].logged++ < 3 || g_dll.e[k].logged % 200 == 0)
+        // Whenever the service's bits or ours change (0.99), and every 200th.
+        const int changed = !g_dll.e[k].logged || was != g_dll.e[k].lastWas || pr->bits != g_dll.e[k].lastSaid;
+        g_dll.e[k].lastWas = was;
+        g_dll.e[k].lastSaid = pr->bits;
+        if (changed || ++g_dll.e[k].logged % 200 == 0)
             logLine("dllist: %s(%d) [ours, item %d] was 0x%08X bits 0x%x error 0x%08X; answered bits 0x%x, %lu of %lu, "
                     "%u s left  [call %u, thread %d]",
                     f->hook->name, task, g_dll.e[k].item, (unsigned)rc, was, (unsigned)err, pr->bits,
@@ -162,6 +168,44 @@ void dlListQueryHook(Frame* f) {
                 (unsigned long)f->gpr[3], (unsigned long)f->gpr[4], (unsigned)f->retRax, n,
                 scePthreadGetthreadid());
     const int count = g_dll.count;
+    // Its results (0.99): (?, max, section, &count, results) as 0.98's log
+    // reads, {int task; uint param} pairs. Logged when they hold one of ours
+    // whose param changed, and the first 3 that hold any.
+    {
+        static uint32_t shownAny;
+        const uint32_t* num = (const uint32_t*)(uintptr_t)f->gpr[3];
+        const uint8_t* res = (const uint8_t*)(uintptr_t)f->gpr[4];
+        uint32_t cnt = 0;
+        if (hookReadable(num, 4) == 4) cnt = *num;
+        if (cnt && cnt <= 960 && hookReadable(res, 8) == 8) {
+            int ours = 0;
+            for (uint32_t j = 0; j < cnt && j < 960 && hookReadable(res + j * 8, 8) == 8; j++) {
+                int32_t id;
+                uint32_t prm;
+                memcpy(&id, res + j * 8, 4);
+                memcpy(&prm, res + j * 8 + 4, 4);
+                for (int k = 0; k < count && k < DLL_MAX; k++)
+                    if (g_dll.e[k].task == id && g_dll.e[k].lastParam != (uint64_t)prm + 1) {
+                        g_dll.e[k].lastParam = (uint64_t)prm + 1;
+                        ours = 1;
+                    }
+            }
+            if (ours || shownAny < 3) {
+                shownAny++;
+                char line[400];
+                int at = fmt(line, sizeof(line), "dllist: %s section %lu: %u task(s):", h->name,
+                             (unsigned long)f->gpr[2], cnt);
+                for (uint32_t j = 0; j < cnt && j < 14 && hookReadable(res + j * 8, 8) == 8; j++) {
+                    int32_t id;
+                    uint32_t prm;
+                    memcpy(&id, res + j * 8, 4);
+                    memcpy(&prm, res + j * 8 + 4, 4);
+                    at += fmt(line + at, sizeof(line) - at, " %d:%x", id, prm);
+                }
+                logLine("%s", line);
+            }
+        }
+    }
     if (!count) return;
     for (int a = 0; a < 6; a++) {
         uint8_t* p = (uint8_t*)(uintptr_t)f->gpr[a];

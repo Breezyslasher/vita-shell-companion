@@ -406,7 +406,10 @@ static int pkgItem(int i) {
     __typeof__(g_dls.item[0])* it = &g_dls.item[i];
     it->state = DLS_GOING;
     dlStatus();
-    const int32_t task = pkgRegister(it->arg[0], it->arg[1], it->title);
+    // A path the app gave (/data/...) is /user/data/... in the shell (0.99).
+    char where[MAX_PATH];
+    fmt(where, sizeof(where), "%s%s", !memcmp(it->arg[0], "/data/", 6) ? "/user" : "", it->arg[0]);
+    const int32_t task = pkgRegister(where, it->arg[1], it->title);
     if (task < 0) return task == -2 || task == -3 ? GET_GONE : GET_RETRY;
     it->task = task;
     dlStatus();

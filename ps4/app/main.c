@@ -24,7 +24,7 @@
 #include "../client/shell_companion.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.98"
+#define APP_VERSION "0.99"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -642,7 +642,8 @@ static void testDownloads(void) {
     while (f && n < 16 && fgets(line, sizeof(line), f)) {
         size_t len = strlen(line);
         while (len && (line[len - 1] == '\n' || line[len - 1] == '\r' || line[len - 1] == ' ')) line[--len] = 0;
-        if (strncmp(line, "http", 4)) continue;
+        // A URL, or a package on the console (0.99: /data/....pkg).
+        if (strncmp(line, "http", 4) && line[0] != '/') continue;
         snprintf(urls[n], sizeof(urls[n]), "%s", line);
         const char* name = strrchr(line, '/');
         snprintf(files[n], sizeof(files[n]), "/data/ShellCompanion/ps4/downloads/%s", name ? name + 1 : "file");
