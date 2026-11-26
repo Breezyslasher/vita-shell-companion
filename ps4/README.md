@@ -118,7 +118,8 @@ show up only once the module is in a core's process.
 
 ### Trying it
 
-1. Install the 0.26 test app. Restart the PS4 if an older watch is loaded
+1. Install the 0.27 test app (0.26 hooked nothing: its module list hid the
+   system libraries). Restart the PS4 if an older watch is loaded
    (a module loads into the shell only once each boot).
 2. Open the test app and press **UP**. A notification says how many
    functions it watches.

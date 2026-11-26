@@ -34,6 +34,9 @@ int sceKernelLoadStartModule(const char* path, size_t args, const void* argp, ui
 int sceKernelDlsym(int handle, const char* symbol, void** addr);
 const char* sceKernelGetFsSandboxRandomWord(void);
 int sceKernelGetModuleList(int* handles, size_t size, size_t* available);
+// The same, system libraries too: on a PS4 (11.50) the shell's
+// sceKernelGetModuleList gave eboot.bin alone.
+int sceKernelGetModuleListInternal(int* handles, size_t size, size_t* available);
 int scePthreadGetthreadid(void);
 
 typedef struct {
@@ -347,11 +350,13 @@ static int g_nMods;
 static int findModules(int logAll) {
     static int handles[512];
     size_t count = 0;
-    const int rc = sceKernelGetModuleList(handles, 512, &count);
-    if (rc != 0) {
-        if (logAll) say("sceKernelGetModuleList: 0x%08X", (unsigned)rc);
-        return 0;
+    int rc = sceKernelGetModuleListInternal(handles, 512, &count);
+    if (logAll) say("sceKernelGetModuleListInternal: 0x%08X, %u", (unsigned)rc, (unsigned)count);
+    if (rc != 0 || count <= 1) {
+        rc = sceKernelGetModuleList(handles, 512, &count);
+        if (logAll) say("sceKernelGetModuleList: 0x%08X, %u", (unsigned)rc, (unsigned)count);
     }
+    if (rc != 0) return 0;
     if (logAll) say("%u modules in the shell:", (unsigned)count);
     g_nMods = 0;
     static ModuleInfo info;
@@ -372,6 +377,10 @@ static int findModules(int logAll) {
     return g_nMods;
 }
 
+// A library by its path in the shell's sandbox, added to the music
+// libraries. One the shell has loaded already comes back as its handle
+// (0x122 for libSceMusicCoreServerClient on a PS4, 11.50): the same code
+// the shell calls.
 static void loadModule(const char* name) {
     char path[160];
     const char* word = sceKernelGetFsSandboxRandomWord();
@@ -379,6 +388,13 @@ static void loadModule(const char* name) {
     int res = 0;
     const int h = sceKernelLoadStartModule(path, 0, NULL, 0, NULL, &res);
     say("loaded %s: 0x%08X (start 0x%X)", path, (unsigned)h, (unsigned)res);
+    if (h < 0) return;
+    for (int i = 0; i < g_nMods; i++)
+        if (g_mods[i] == h) return;
+    if (g_nMods >= MAX_MODULES) return;
+    g_mods[g_nMods] = h;
+    fmt(g_modNames[g_nMods], sizeof(g_modNames[0]), "%s", name);
+    g_nMods++;
 }
 
 // The names to hook: mcw-names.txt's, else the default list. A short name
@@ -498,19 +514,12 @@ static void* watchMain(void* arg) {
         return NULL;
     }
     readNames();
-    // The music server's client libraries, once the shell has them.
-    int tries = 0;
-    while (!findModules(tries == 0) && tries < 60) {
-        drain();
-        sysSleepMs(1000);
-        tries++;
-    }
-    if (!g_nMods) {
-        say("no music library in the shell after 60 s: loading them");
-        loadModule("libSceMusicCoreServerClient.sprx");
-        loadModule("libSceMusicCoreServerClientJsEx.sprx");
-        findModules(0);
-    }
+    // The music server's client libraries: those the list shows, then each
+    // by its path, which gives the shell's own handle if it has it.
+    findModules(1);
+    drain();
+    loadModule("libSceMusicCoreServerClient.sprx");
+    loadModule("libSceMusicCoreServerClientJsEx.sprx");
     for (int i = 0; i < g_nMods; i++)
         say("music library: 0x%08X %s", (unsigned)g_mods[i], g_modNames[i]);
     drain();
