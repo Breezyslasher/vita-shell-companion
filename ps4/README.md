@@ -76,6 +76,15 @@ service's are, not the managed wrappers 0.85 hooked.
   bits (the service's and ours) and the query's results holding ours, and
   the test app takes a package on the console (`/data/...pkg`) in
   `test-downloads.txt`, so a real install's states are logged beside them.
+- **0.99 on the PS4:** the list kept asking for our three every second, and
+  got our bytes and time left. Their query results (section 3, the list's
+  current downloads): `1070:280c1 1071:200c1 1072:200c1`, no `0x200`.
+  0.98's clearing found a "match" elsewhere (`a3 +0x408`, the value
+  `0xFFFFFFFF` after it) and changed memory that wasn't the results: 1.00
+  only reads the queries, logging each section when it changes. Each
+  placeholder's line was logged at every call (a counter only counted in
+  the branch not taken); fixed. No package ran: the list was the default
+  one.
 
 ### One module, and the cleanup (0.95)
 

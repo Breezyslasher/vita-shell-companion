@@ -40,7 +40,6 @@ static struct {
     Hook hooks[2];
     Hook query[4];  // the list's task queries (0.98)
     uint32_t queryCalls[4];
-    uint32_t cleared;
     FnBgftUnregister unregister, stop, pause;
     uint32_t bitsGoing, bitsWaiting, bitsDone;
     int haveGoing, haveWaiting, haveDone;
@@ -112,10 +111,11 @@ void dlListHook(Frame* f) {
         dllFill(k, pr);
         f->retRax = 0;
         // Whenever the service's bits or ours change (0.99), and every 200th.
-        const int changed = !g_dll.e[k].logged || was != g_dll.e[k].lastWas || pr->bits != g_dll.e[k].lastSaid;
+        const uint32_t seen = g_dll.e[k].logged++;
+        const int changed = !seen || was != g_dll.e[k].lastWas || pr->bits != g_dll.e[k].lastSaid;
         g_dll.e[k].lastWas = was;
         g_dll.e[k].lastSaid = pr->bits;
-        if (changed || ++g_dll.e[k].logged % 200 == 0)
+        if (changed || seen % 200 == 0)
             logLine("dllist: %s(%d) [ours, item %d] was 0x%08X bits 0x%x error 0x%08X; answered bits 0x%x, %lu of %lu, "
                     "%u s left  [call %u, thread %d]",
                     f->hook->name, task, g_dll.e[k].item, (unsigned)rc, was, (unsigned)err, pr->bits,
@@ -151,12 +151,11 @@ void dlListHook(Frame* f) {
             scePthreadGetthreadid());
 }
 
-// After one of the service's task queries (0.98): its results are
-// {int taskId; uint param} pairs, param's 0x200 a failed task (0.85's log:
-// the failed probe tasks 0x10008263, the others 0x10008063). That flag,
-// which the service sets on a placeholder, is what the list shows as
-// "Cannot download" (0.97). Cleared for ours, wherever a pair of ours is
-// found in memory an argument points to.
+// After one of the service's task queries (0.98), logged only: its results
+// are {int taskId; uint param} pairs, each section's logged when they
+// change. (0.98-0.99 cleared a "failed" flag, 0x200, on ours wherever a
+// pair was found in memory an argument pointed to; 0.99's log showed the
+// flag isn't set in these results, and the match it found was not them.)
 void dlListQueryHook(Frame* f) {
     const Hook* h = f->hook;
     int q = 0;
@@ -173,6 +172,7 @@ void dlListQueryHook(Frame* f) {
     // whose param changed, and the first 3 that hold any.
     {
         static uint32_t shownAny;
+        static uint64_t lastHash[16];
         const uint32_t* num = (const uint32_t*)(uintptr_t)f->gpr[3];
         const uint8_t* res = (const uint8_t*)(uintptr_t)f->gpr[4];
         uint32_t cnt = 0;
@@ -190,7 +190,13 @@ void dlListQueryHook(Frame* f) {
                         ours = 1;
                     }
             }
-            if (ours || shownAny < 3) {
+            uint64_t hash = 1469598103934665603ull;
+            for (uint32_t j = 0; j < cnt && j < 960 && hookReadable(res + j * 8, 8) == 8; j++)
+                for (int b = 0; b < 8; b++) hash = (hash ^ res[j * 8 + b]) * 1099511628211ull;
+            const uint32_t sec = (uint32_t)f->gpr[2] & 15;
+            const int differs = hash != lastHash[sec];
+            lastHash[sec] = hash;
+            if ((ours || differs) && shownAny < 200) {
                 shownAny++;
                 char line[400];
                 int at = fmt(line, sizeof(line), "dllist: %s section %lu: %u task(s):", h->name,
@@ -206,28 +212,7 @@ void dlListQueryHook(Frame* f) {
             }
         }
     }
-    if (!count) return;
-    for (int a = 0; a < 6; a++) {
-        uint8_t* p = (uint8_t*)(uintptr_t)f->gpr[a];
-        if ((uintptr_t)p < 0x10000 || ((uintptr_t)p & 3) || hookReadable(p, 8) != 8 || !(hookProt(p) & 2) ||
-            (hookProt(p) & 4))
-            continue;
-        const size_t len = hookReadable(p, 256 * 8);
-        for (size_t at = 0; at + 8 <= len; at += 8) {
-            int32_t id;
-            uint32_t prm;
-            memcpy(&id, p + at, 4);
-            memcpy(&prm, p + at + 4, 4);
-            if (id <= 0 || !(prm & 0x200)) continue;
-            for (int k = 0; k < count && k < DLL_MAX; k++)
-                if (g_dll.e[k].task == id) {
-                    prm &= ~0x200u;
-                    memcpy(p + at + 4, &prm, 4);
-                    if (g_dll.cleared++ < 6)
-                        logLine("dllist: %s: task %d (a%d +0x%x) param now 0x%08X", h->name, id, a, (unsigned)at, prm);
-                }
-        }
-    }
+    (void)count;  // read only (1.00): 0.98 cleared a flag in memory an argument pointed to, which was not the results
 }
 
 static int dllHex(const char* text, const char* key, uint32_t* out) {
