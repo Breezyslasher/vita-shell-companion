@@ -430,6 +430,10 @@ guess was wrong. The code instead:
 0.50 dumps the nested classes too (`code/methods2.map`, `code/code2.bin`),
 and logs `TrackListPanel.OnQueryFinish(errorCode, list)` and
 `TrackListMenuPanel.OnTotalChanged(total, errorCode)` as they are called.
+On a PS4 it took the shell down twice at a generic nested class,
+`ControlPanel/<>c__DisplayClass41_0`1` (each instance has its own code; the
+class none), the second time though its constructor was in `skip.txt`. From
+0.51 generic classes (a `` ` `` in the name) and generic methods are skipped.
 
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 

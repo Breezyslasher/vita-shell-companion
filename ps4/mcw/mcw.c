@@ -1146,6 +1146,13 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
     for (int k = 0; k < nClasses; k++) {
         void* klass = classes[k];
         dumpPut(map, "class %s %p", names[k], klass);
+        // A generic class (`1 in its name) has no code of its own, only each
+        // instance's: asking for it aborted the runtime on a PS4 (0.50, at
+        // ControlPanel/<>c__DisplayClass41_0`1:.ctor).
+        if (contains(names[k], "`")) {
+            dumpPut(map, "skipclass %s (generic)", names[k]);
+            continue;
+        }
         void* iter = NULL;
         void* f;
         while (g_dump.fieldOffset && g_mono.fields && (f = g_mono.fields(klass, &iter)))
@@ -1161,6 +1168,14 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
             // abstract 0x400, pinvoke 0x2000; internal call 0x1000, runtime 0x3
             if ((flags & 0x2400) || (iflags & 0x1003)) {
                 dumpPut(map, "skip %s (flags 0x%x, 0x%x)", full, flags, iflags);
+                continue;
+            }
+            // A generic method: Name<T> (...) or a ` in it.
+            const char* paren = full;
+            while (*paren && *paren != '(') paren++;
+            const int generic = contains(full, "`") || (paren > full + 1 && paren[-2] == '>');
+            if (generic) {
+                dumpPut(map, "skip %s (generic)", full);
                 continue;
             }
             if (contains(skips, full)) {
