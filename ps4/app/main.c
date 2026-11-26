@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.40"
+#define APP_VERSION "0.41"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -858,11 +858,13 @@ static void draw(void) {
 // first guess, each playlist under several names, as the shell's own strings
 // give only views, section_title and image_url.
 
-#define PLAYLIST_GUESS                                                                         \
-    "{\"name\":\"Shell Companion queue\",\"title\":\"Shell Companion queue\","                 \
-    "\"uri\":\"spotify:user:shellcompanion:playlist:queue\",\"id\":\"queue\","                 \
-    "\"type\":\"playlist\",\"description\":\"Music on this PS4\",\"image_url\":\"\","          \
-    "\"images\":[],\"total\":2,\"track_count\":2,\"tracks\":{\"total\":2}}"
+// A playlist's fields, as the guesses have them.
+#define PLAYLIST_FIELDS                                                                        \
+    "\"name\":\"Shell Companion queue\",\"title\":\"Shell Companion queue\","               \
+    "\"uri\":\"spotify:user:shellcompanion:playlist:queue\",\"id\":\"queue\","               \
+    "\"type\":\"playlist\",\"description\":\"Music on this PS4\",\"image_url\":\"\","        \
+    "\"images\":[],\"total\":2,\"track_count\":2,\"tracks\":{\"total\":2}"
+#define PLAYLIST_GUESS "{" PLAYLIST_FIELDS "}"
 
 static void writeEbgm(void) {
     mkdir(SC_BGM_DIR "/ebgm", 0777);
@@ -870,9 +872,13 @@ static void writeEbgm(void) {
     static const char profile[] =
         "{\"partner\":\"spotify\",\"subscriptionType\":\"PREMIUM\",\"legalCountry\":\"US\"}\n";
     writeFile(SC_BGM_DIR "/ebgm/me_partner_profile.json", profile, sizeof(profile) - 1);
+    // 0.40's, each view a section with its playlists inside, showed "No
+    // playlists.": the shell's strings have section_title before views, so
+    // each view may be a playlist itself, with its section's title. This
+    // one is both.
     static const char views[] =
         "{\"upgrade_scopes_required\":false,\"views\":[{\"section_title\":\"Shell Companion\","
-        "\"title\":\"Shell Companion\",\"id\":\"shellcompanion\","
+        PLAYLIST_FIELDS ","
         "\"items\":[" PLAYLIST_GUESS "],\"playlists\":[" PLAYLIST_GUESS "],"
         "\"content\":{\"items\":[" PLAYLIST_GUESS "]}}]}\n";
     writeFile(SC_BGM_DIR "/ebgm/recommended_views.json", views, sizeof(views) - 1);

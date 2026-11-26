@@ -301,6 +301,15 @@ and the test app writes a first guess at the views each time it starts
 (unless `ebgm/keep` is there): one section, "Shell Companion", with one
 playlist under several key names (`items`, `playlists`, `content.items`).
 
+### Past "Sign in" (0.40)
+
+With the profile and a views answer, the Music section no longer asked to
+sign in: it showed Spotify's player panel for our track, its cover now
+shown (0.37's cover file), and below it "No playlists.": all 939 bytes of
+the views were read and nothing else was asked. 0.41's guess makes each view
+a playlist itself, with its section's title (the shell's strings have
+`section_title` before `views`), the nested lists kept inside it too.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
