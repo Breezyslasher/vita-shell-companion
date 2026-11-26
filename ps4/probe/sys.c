@@ -162,7 +162,7 @@ void* libSym(int handle, const char* symbol) {
 
 // A function of libkernel, from the module loaded under either name, else
 // from any loaded module that has it.
-static void* kernelSym(const char* symbol) {
+__attribute__((unused)) static void* kernelSym(const char* symbol) {
     static int kernel;
     if (!kernel) kernel = libLoad("libkernel.sprx");
     if (!kernel) kernel = libLoad("libkernel_sys.sprx");
@@ -297,10 +297,24 @@ typedef struct {
     char unk[1024];
 } NotifyRequest;
 
+#ifdef SC_PRX
+// In a module the system's loader links these, from libkernel, as GoldHEN's
+// plugins have them. Found by name at run time instead (kernelSym), the
+// player's thread was never made: scePthreadCreate did not come back.
+int sceKernelSendNotificationRequest(int device, void* req, size_t size, int blocking);
+int scePthreadCreate(void* thread, const void* attr, void* (*fn)(void*), void* arg,
+                     const char* name);
+int sceKernelGetSystemSwVersion(void* out);
+#endif
+
 void notify(const char* f, ...) {
     typedef int (*Send)(int, NotifyRequest*, size_t, int);
     static Send send;
+#ifdef SC_PRX
+    if (!send) send = (Send)sceKernelSendNotificationRequest;
+#else
     if (!send) send = (Send)kernelSym("sceKernelSendNotificationRequest");
+#endif
     static NotifyRequest req;
     memset(&req, 0, sizeof(req));
     req.targetId = -1;
@@ -314,7 +328,11 @@ void notify(const char* f, ...) {
 
 int threadStart(void* (*fn)(void*), void* arg, const char* name) {
     typedef int (*Create)(void* thread, const void* attr, void* (*)(void*), void*, const char*);
+#ifdef SC_PRX
+    Create create = (Create)scePthreadCreate;
+#else
     Create create = (Create)kernelSym("scePthreadCreate");
+#endif
     static uint64_t thread;
     return create ? create(&thread, NULL, fn, arg, name) : -1;
 }
@@ -328,7 +346,11 @@ void firmware(char* out, size_t cap) {
     typedef int (*Get)(void*);
     memset(&v, 0, sizeof(v));
     v.size = sizeof(v);
+#ifdef SC_PRX
+    Get get = (Get)sceKernelGetSystemSwVersion;
+#else
     Get get = (Get)kernelSym("sceKernelGetSystemSwVersion");
+#endif
     const int rc = get ? get(&v) : -1;
     if (rc < 0)
         fmt(out, cap, "unknown (0x%08X)", (unsigned)rc);

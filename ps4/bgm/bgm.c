@@ -30,6 +30,15 @@ typedef int32_t (*FnClose)(int32_t handle);
 typedef int32_t (*FnSetVolume)(int32_t handle, int32_t flag, int32_t* vol);
 typedef int32_t (*FnInit)(void);
 
+// libSceAudioOut, linked by the system's loader (-lSceAudioOut), as
+// GoldHEN's plugins link what they use.
+int32_t sceAudioOutInit(void);
+int32_t sceAudioOutOpen(int32_t user, int32_t type, int32_t index, uint32_t len, uint32_t freq,
+                        uint32_t param);
+int32_t sceAudioOutOutput(int32_t handle, const void* p);
+int32_t sceAudioOutClose(int32_t handle);
+int32_t sceAudioOutSetVolume(int32_t handle, int32_t flag, int32_t* vol);
+
 static FnOpen g_aoOpen;
 static FnOutput g_aoOutput;
 static FnClose g_aoClose;
@@ -496,12 +505,12 @@ static void command(void) {
 
 static void* player(void* arg) {
     (void)arg;
-    const int lib = libLoad("libSceAudioOut.sprx");
-    FnInit init = (FnInit)libSym(lib, "sceAudioOutInit");
-    g_aoOpen = (FnOpen)libSym(lib, "sceAudioOutOpen");
-    g_aoOutput = (FnOutput)libSym(lib, "sceAudioOutOutput");
-    g_aoClose = (FnClose)libSym(lib, "sceAudioOutClose");
-    g_aoVolume = (FnSetVolume)libSym(lib, "sceAudioOutSetVolume");
+    const int lib = 0;
+    FnInit init = sceAudioOutInit;
+    g_aoOpen = sceAudioOutOpen;
+    g_aoOutput = sceAudioOutOutput;
+    g_aoClose = sceAudioOutClose;
+    g_aoVolume = sceAudioOutSetVolume;
     if (!init || !g_aoOpen || !g_aoOutput || !g_aoClose) {
         logLine("libSceAudioOut 0x%X: its functions are missing", lib);
         notify("Background music: no audio library");

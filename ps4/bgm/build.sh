@@ -31,7 +31,7 @@ clang $CFLAGS $MODFLAGS -w -DSC_PRX -c "$SRC/mp3.c" -o "$OUT/bgm_mp3.o"  # minim
 PAGES="-z max-page-size=0x4000 -z common-page-size=0x4000"
 ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -e _init $PAGES \
     -o "$OUT/sc_bgm.elf" "$OUT/bgm_crt.o" "$OUT/bgm_sys.o" "$OUT/bgm.o" "$OUT/bgm_mp3.o" \
-    -L"$OO/lib" -lkernel
+    -L"$OO/lib" -lkernel -lSceAudioOut
 CREATE_FSELF=${CREATE_FSELF:-$OUT/create-fself}
 "$CREATE_FSELF" -in="$OUT/sc_bgm.elf" -out="$OUT/sc_bgm.oelf" \
     --lib="$OUT/sc_bgm.prx" --paid 0x3800000000000011
