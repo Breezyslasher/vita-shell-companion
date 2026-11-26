@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.1"
+#define APP_VERSION "0.2"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -301,24 +301,84 @@ static void readStatus(void) {
 
 // ---- loading the module into the shell ----
 
+// Copies the module to path: 0, or -1.
+static int putModule(const char* path) {
+    return writeFile(path, g_prxStart, (size_t)(g_prxEnd - g_prxStart));
+}
+
+// GoldHEN's PROCESS_PRX_LOAD into SceShellUI, the path as the shell sees
+// it: 1 if it loaded.
+static int shellLoad(const char* path) {
+    static struct ProcPrxLoad args;
+    memset(&args, 0, sizeof(args));
+    strcpy(args.processName, "SceShellUI");
+    strncpy(args.prxPath, path, sizeof(args.prxPath) - 1);
+    const long rc = sysCall(500, 6 /* PROCESS_PRX_LOAD */, (long)&args, 0);
+    const int ok = rc == 0 && (int32_t)args.res >= 0;
+    say("Shell load %s: 0x%lX, result 0x%lX%s", path, (unsigned long)rc, (unsigned long)args.res,
+        ok ? " - loaded" : "");
+    return ok;
+}
+
+static int g_loadedFrom = -1;
+
+// The first run on a PS4 (11.50, GoldHEN) had the shell answer
+// 0x80020002, ENOENT, for /data/...: the path is looked up in the shell,
+// whose root is its sandbox. So other paths are tried, each logged.
 static void loadPlayer(void) {
     readStatus();
     if (g_status.running) {
         sendCommand("reload\nplay\n");
         return;
     }
-    const size_t size = (size_t)(g_prxEnd - g_prxStart);
-    if (writeFile(SC_BGM_PRX, g_prxStart, size) != 0) {
+    if (putModule(SC_BGM_PRX) != 0) {
         say("Could not write %s (is the app jailbroken?)", SC_BGM_PRX);
         return;
     }
-    static struct ProcPrxLoad args;
-    memset(&args, 0, sizeof(args));
-    strcpy(args.processName, "SceShellUI");
-    strcpy(args.prxPath, SC_BGM_PRX);
-    const long rc = sysCall(500, 6 /* PROCESS_PRX_LOAD */, (long)&args, 0);
-    say("Loaded into the shell: 0x%lX, result 0x%lX", (unsigned long)rc,
-        (unsigned long)args.res);
+    // Is the module itself loadable? Into this app, loaded but not started
+    // (sys_dynlib_load_prx), then unloaded.
+    int handle = 0;
+    const long rcSelf = sysCall(594, (long)SC_BGM_PRX, 0, (long)&handle);
+    say("Load into this app (not started): 0x%lX, handle 0x%X", (unsigned long)rcSelf, handle);
+    if (rcSelf == 0 && handle > 0) sysCall(595 /* sys_dynlib_unload_prx */, handle, 0, 0);
+
+    // 0: /data, 1: /user/data (what /data is), 2: /system_tmp, then the
+    // shell's sandbox (its root, and by its full path).
+    if (shellLoad(SC_BGM_PRX)) {
+        g_loadedFrom = 0;
+        return;
+    }
+    if (shellLoad("/user" SC_BGM_PRX)) {
+        g_loadedFrom = 1;
+        return;
+    }
+    if (putModule("/system_tmp/sc_bgm.prx") == 0 && shellLoad("/system_tmp/sc_bgm.prx")) {
+        g_loadedFrom = 2;
+        return;
+    }
+    DIR* d = opendir("/mnt/sandbox");
+    if (!d) {
+        say("No /mnt/sandbox to look in");
+        return;
+    }
+    struct dirent* e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        if (g_log) fprintf(g_log, "  sandbox: %s\n", e->d_name);
+        if (strncmp(e->d_name, "NPXS20001", 9)) continue;  // SceShellUI's
+        char path[160];
+        snprintf(path, sizeof(path), "/mnt/sandbox/%s/sc_bgm.prx", e->d_name);
+        if (putModule(path) != 0) {
+            say("Could not write %s", path);
+            continue;
+        }
+        if (shellLoad("/sc_bgm.prx") || shellLoad(path)) {
+            g_loadedFrom = 3;
+            break;
+        }
+    }
+    closedir(d);
+    if (g_loadedFrom < 0) say("The shell would not load it from any path: send app.log");
 }
 
 // ---- the screen: two frame buffers, drawn by the CPU ----
