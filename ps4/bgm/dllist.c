@@ -27,6 +27,7 @@
 #include "../mcw/hook.h"
 
 int mcwHookNative(Hook* h, void* fn, const char** why);  // mcw.c, under its install lock
+int mcwDbNotifyPost(void);  // mcw.c (1.19): the list told its table changed
 int scePthreadGetthreadid(void);
 
 #define DLL_MAX 64
@@ -75,6 +76,7 @@ static struct {
     Hook ctl[5];    // start, resume, pause, stop, unregister: the list's buttons (1.15)
     int dlThread;   // the downloads' thread, whose calls are ours
     uint64_t endedUs;  // when the last list ended, 0 if one is going
+    volatile int wantPost;  // an item changed state: tell the list (1.19)
     uint32_t infoLogged;
     uint32_t queryCalls[4];
     FnBgftUnregister unregister, stop, pause;
@@ -181,6 +183,11 @@ void dlListHook(Frame* f) {
     const int32_t task = (int32_t)f->gpr[0];
     BgftProgress* pr = (BgftProgress*)(uintptr_t)f->gpr[1];
     const uint32_t n = __atomic_add_fetch(&g_dll.calls, 1, __ATOMIC_RELAXED);
+    // An item of ours changed state: the list told, as the service's own
+    // writes tell it, so it asks for its sections again now, not when it
+    // next happens to (1.19: 1.15's re-read 48 s after). Here, on the list's
+    // own thread, a thread Mono knows.
+    if (__atomic_exchange_n(&g_dll.wantPost, 0, __ATOMIC_ACQ_REL)) mcwDbNotifyPost();
     if (!pr || hookReadable(pr, 0x38) != 0x38 || !(hookProt(pr) & 2)) return;
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
         if (g_dll.e[k].task != task || task <= 0) continue;
@@ -397,6 +404,7 @@ void dlListQueryHook(Frame* f) {
                         for (int k = 0; k < count && k < DLL_MAX; k++)
                             if (g_dll.e[k].task == add[j] && !g_dll.e[k].shownIn) {
                                 g_dll.e[k].shownIn = want;
+                                g_dll.wantPost = 1;  // and asked again, to leave section 3 (1.19)
                                 logLine("dllist: task %d put in section %d", add[j], want);
                             }
                     }
@@ -677,6 +685,21 @@ static int32_t dllRegister(int i) {
 // fails at once doesn't come back for ever.
 static void dllRepair(void) {
     int changed = 0;
+    // A state changed since last seen (1.19): the list to be told.
+    static int last[DLL_MAX];
+    static int lastCount = -1;
+    if (lastCount != g_dll.count) {
+        for (int k = 0; k < DLL_MAX; k++) last[k] = -1;
+        lastCount = g_dll.count;
+    }
+    for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
+        const int i = g_dll.e[k].item;
+        const int st = i >= 0 && i < g_dls.count ? g_dls.item[i].state : -1;
+        if (st != last[k]) {
+            if (last[k] >= 0) g_dll.wantPost = 1;
+            last[k] = st;
+        }
+    }
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
         if (!g_dll.e[k].failed || g_dll.e[k].task <= 0 || dllSection(k) == 5) continue;
         if (g_dll.e[k].tries >= 3) continue;

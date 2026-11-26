@@ -231,6 +231,18 @@ service's are, not the managed wrappers 0.85 hooked.
   `sceKernelGetFsSandboxRandomWord` and tries `/<word>/priv/mms`,
   `/<word>/common/mms` and `/<word>/{common,priv}/lib`, listing those
   folders (and `/system_data`, `/system/vsh/sce_module`) in the log.
+- **1.18 on the PS4:** the word was `iJ2BOzyrBQ`; `notification.db` is in
+  `/<word>/priv/mms/` (copied). Its one table, `notification`: a finished
+  download's row is `group_type` 5, `item_type` DOWNLOAD, `item_id`
+  `<task, 8 hex>-<tick>`, subject `[[{"subject_id":32}],[{"subject":...}]]`,
+  `action_uri` `psdownload:play?taskid=..&type=3&subtype=6&errorcode=0&
+  state=2&runstate=2&...`, `vf_id` DL1. The wrapper library is not in the
+  shell's lib folders. But the change event the list waits for is managed
+  and public: `Sce.Vsh.Accessor.Db.Notify.DbNotify` has static `Send`,
+  `Post`, `GlobalSend`, `GlobalPost(dbPath, tableName)`. 1.19 calls
+  `DbNotify.Post(NotificationDbAccessor.GetDbPath(), "item")` (and
+  `"notification"`) when one of ours changes state, from the list's own
+  thread (in the progress hook), logged in mcw.log as `dbnotify:`.
 
 ### One module, and the cleanup (0.95)
 

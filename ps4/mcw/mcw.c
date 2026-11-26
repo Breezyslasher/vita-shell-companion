@@ -2216,6 +2216,51 @@ static void monoLog(Frame* f) {
     }
 }
 
+#ifdef SC_COMPANION
+// The Downloads list told that its table changed (1.19), as the download
+// service's own writes tell it: Sce.Vsh.Accessor.Db.Notify.DbNotify.Post
+// (dbPath, tableName), static, which posts the "database updated" event the
+// list's accessor (Sce.Vsh.Orbis.Bgft.NotificationDbAccessor, a
+// DbItemAccessor) registered for with RegistDbEventCallback. Its path from
+// that accessor's own GetDbPath(), its table its TableName, "item" (and the
+// file's one table, "notification", too). Nothing is written to the
+// database. On a thread of the shell's (the list's, in a hook): 1 if posted.
+int mcwDbNotifyPost(void) {
+    static int tried;
+    static void *post, *getPath;
+    static char path[160];
+    if (!g_setupAgain.imageLoaded || !g_setupAgain.classFromName || !g_mono.methodByName || !g_mono.invoke ||
+        !g_row.stringNew || !g_setupAgain.domain)
+        return 0;
+    if (!tried) {
+        tried = 1;
+        void* nimg = ((FnMonoName)g_setupAgain.imageLoaded)("Sce.Vsh.Accessor.Db.Notify");
+        void* ncls = nimg ? ((FnMonoClass)g_setupAgain.classFromName)(nimg, "Sce.Vsh.Accessor.Db.Notify", "DbNotify") : NULL;
+        post = ncls ? g_mono.methodByName(ncls, "Post", 2) : NULL;
+        void* bimg = ((FnMonoName)g_setupAgain.imageLoaded)("Sce.Vsh.Orbis.BgftAccessor");
+        void* bcls = bimg ? ((FnMonoClass)g_setupAgain.classFromName)(bimg, "Sce.Vsh.Orbis.Bgft", "NotificationDbAccessor") : NULL;
+        getPath = bcls ? g_mono.methodByName(bcls, "GetDbPath", 0) : NULL;
+        void* exc = NULL;
+        void* str = getPath ? g_mono.invoke(getPath, NULL, NULL, &exc) : NULL;
+        if (str && !exc) monoText((uint64_t)(uintptr_t)str, path, sizeof(path));
+        say("dbnotify: DbNotify %p, Post %p; NotificationDbAccessor %p, GetDbPath %p = \"%s\"%s", ncls, post, bcls,
+            getPath, path, exc ? " (an exception)" : "");
+    }
+    if (!post || !path[0]) return 0;
+    static const char* const tables[2] = {"item", "notification"};
+    int ok = 0;
+    for (int t = 0; t < 2; t++) {
+        void* args[2] = {g_row.stringNew(g_setupAgain.domain, path), g_row.stringNew(g_setupAgain.domain, tables[t])};
+        void* exc = NULL;
+        g_mono.invoke(post, NULL, args, &exc);
+        if (!exc) ok = 1;
+        say("dbnotify: Post(\"%s\", \"%s\")%s  [thread %d]", path, tables[t], exc ? ": an exception" : "",
+            scePthreadGetthreadid());
+    }
+    return ok;
+}
+#endif
+
 // ── The Music section's own code, for reading (0.49) ─────────────────────────
 //
 // Its C# is compiled away (full AOT): what decides "Download Spotify", and
