@@ -435,6 +435,22 @@ On a PS4 it took the shell down twice at a generic nested class,
 class none), the second time though its constructor was in `skip.txt`. From
 0.51 generic classes (a `` ` `` in the name) and generic methods are skipped.
 
+### Why the track list fails: Spotify's app isn't installed (0.51's dump)
+
+0.51's dump (381 methods, nested classes too; one generic class still took
+the shell down once, then was skipped) and log: the track list's query ends
+with 0x80BA0028 (`OnTotalChanged(0, 0x80BA0028)`). Its task,
+`TrackListPanel/<>c__DisplayClass25_0:<StartQuery>b__0`, before any request:
+
+1. `ApplicationMonitor.Util.AppInfo.IsInstalled(<a title>)`: false →
+   0x80BA0028 ("Download Spotify")
+2. `PlayStationMusicContext.IsValidAppVer(true)`: false → 0x80BA0029
+3. `UT.Get<bool>(<the profile's JSON>, <a key>)`: false → 0x80BA0027
+
+0.52 hooks `IsInstalled(string titleId)` (a static method of the nested class
+`ApplicationMonitor/Util/AppInfo`) and answers true for `CUSA01780` while
+`ebgm/` is there, logging each title it is asked about.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

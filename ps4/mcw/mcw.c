@@ -857,7 +857,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 9
+#define MONO_HOOKS 10
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -979,6 +979,16 @@ static void monoLog(Frame* f) {
                 g_forceApp && ver < APPVER_SAID ? ", made 9.99" : "", f->seq,
                 scePthreadGetthreadid());
         }
+    } else if (h->json == 6) {
+        // IsInstalled(string titleId), static: the title in rdi.
+        char title[40];
+        monoText(f->gpr[0], title, sizeof(title));
+        const int was = (int)(f->retRax & 0xFF);
+        const int ours = g_forceApp && !was && eq(title, "CUSA01780");
+        if (ours) f->retRax = (f->retRax & ~(uint64_t)0xFF) | 1;
+        if (f->seq <= 40)
+            say("mono: IsInstalled(\"%s\") = %d%s  [#%u, thread %d]", title, was,
+                ours ? ", answered 1" : "", f->seq, scePthreadGetthreadid());
     } else if (h->json == 5) {
         if (f->seq <= 50)
             say("mono: %s: %d (0x%X), 0x%X  [#%u, thread %d]", h->name, (int32_t)f->gpr[1],
@@ -1311,10 +1321,40 @@ static void monoHooks(void) {
          5, "TrackListPanel.OnQueryFinish(errorCode, list)"},
         {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuPanel",
          "OnTotalChanged", 2, 5, "TrackListMenuPanel.OnTotalChanged(total, errorCode)"},
+        // The track list's query first asks whether Spotify's app is
+        // installed, 0x80BA0028 ("Download Spotify") if not (0.51's dump,
+        // TrackListPanel/<>c__DisplayClass25_0:<StartQuery>b__0 at +0x23c):
+        // answered true for CUSA01780 while ebgm/ is there.
+        {"app", "Sce.Vsh.ShellUI.AppSystem", "ApplicationMonitor/Util/AppInfo", "IsInstalled", 1, 6,
+         "AppInfo.IsInstalled"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
         void* klass = image ? ((FnMonoClass)classFromName)(image, want[i].ns, want[i].klass) : NULL;
+        if (!klass && image && contains(want[i].klass, "/")) {
+            // Outer/Inner/...: the outer class, then each nested one by name.
+            char path[128];
+            fmt(path, sizeof(path), "%s", want[i].klass);
+            char* part = path;
+            char* slash = path;
+            while (*slash && *slash != '/') slash++;
+            *slash = 0;
+            klass = ((FnMonoClass)classFromName)(image, want[i].ns, part);
+            part = slash + 1;
+            while (klass && *part && g_dump.nested && g_dump.className) {
+                char* end = part;
+                while (*end && *end != '/') end++;
+                const char c = *end;
+                *end = 0;
+                void* iter = NULL;
+                void* n;
+                void* found = NULL;
+                while (!found && (n = g_dump.nested(klass, &iter)))
+                    if (eq(g_dump.className(n), part)) found = n;
+                klass = found;
+                part = c ? end + 1 : end;
+            }
+        }
         void* m = klass ? ((FnMonoMethod)methodFromName)(klass, want[i].method, want[i].args) : NULL;
         void* code = m ? ((FnMonoPtr)compile)(m) : NULL;
         Hook* h = &g_monoHooks[i];
@@ -1379,7 +1419,7 @@ void mcwPre(Frame* f) {
 
 void mcwPost(Frame* f) {
     if (f->hook->json) {
-        if (!g_quiet || f->hook->json == 2) monoLog(f);
+        if (!g_quiet || f->hook->json == 2 || f->hook->json == 6) monoLog(f);
         return;
     }
     fakeApply(f);
