@@ -824,6 +824,18 @@ place if it is there, else where it is in the list (the nearest), else, for
 the queue, put after the one playing. bgm.log says when the place held
 another track.
 
+### Track lists answered a page at a time (0.78)
+
+The shell asks for a list's tracks a page at a time
+(`playlist/tracks?...&offset=0&limit=15`). Up to 0.77 the watch answered every
+request with the whole file. With 17 tracks the shell kept 15, and its rows
+past them showed the list's first tracks again over their real places. A row
+labelled "Celebration" (track 2) was really place 15, and played the test
+tone. The watch now reads the whole list (up to 1 MB) and answers with only
+the tracks asked for (`offset`, `limit`), the `total` counting all of them,
+so the shell asks for the next page as the list scrolls. This also lifts the
+64 KB limit an answer had, which a long list would have passed.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our

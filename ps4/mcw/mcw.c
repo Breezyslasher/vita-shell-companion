@@ -596,6 +596,7 @@ static int contains(const char* s, const char* part);
 #define EBGM_DIR SC_BGM_DIR "/ebgm"
 #define EBGM_SLOTS 16
 #define EBGM_MAX (64u * 1024u)
+#define TRACKS_MAX (1024u * 1024u)  // a track list file, whole (0.78)
 
 typedef struct {
     int64_t id;     // the request's, 0 for a free slot
@@ -725,6 +726,75 @@ static int ebgmLibrary(const char* sub, int64_t id) {
     return 1;
 }
 
+// A query's number (name=<n>) in path, or -1.
+static int queryInt(const char* path, const char* name) {
+    const size_t n = strlen(name);
+    for (const char* p = path; *p; p++)
+        if ((p == path || p[-1] == '?' || p[-1] == '&') && !memcmp(p, name, n) && p[n] == '=') {
+            int v = 0;
+            for (p += n + 1; *p >= '0' && *p <= '9'; p++) v = v * 10 + (*p - '0');
+            return v;
+        }
+    return -1;
+}
+
+// The page asked for of a track list (0.78): its tracks from offset, limit
+// of them, the total all of them. 0.77 and before gave every track whatever
+// was asked: the shell, asking for 15, kept 15, and its rows past them
+// showed the list's first tracks again, a row labelled Celebration playing
+// the test tone. Into out; its length, or 0 if in is not such a list.
+static size_t tracksPage(const char* in, size_t n, int offset, int limit, char* out, size_t cap) {
+    const char* key = "\"track_list\":[";
+    const size_t kn = strlen(key);
+    size_t at = 0;
+    while (at + kn <= n && memcmp(in + at, key, kn)) at++;
+    if (at + kn > n) return 0;
+    at += kn;
+    // The header is written last, its total counted first. Items: each a {...} at the array's top, strings minded.
+    int count = 0, kept = 0;
+    char* body = out + 128;  // room before it for the header
+    size_t bo = 0;
+    while (at < n) {
+        while (at < n && (in[at] == ' ' || in[at] == ',' || in[at] == '\n' || in[at] == '\r')) at++;
+        if (at >= n || in[at] != '{') break;
+        const size_t start = at;
+        int depth = 0, str = 0;
+        for (; at < n; at++) {
+            const char c = in[at];
+            if (str) {
+                if (c == '\\') at++;
+                else if (c == '"') str = 0;
+            } else if (c == '"') {
+                str = 1;
+            } else if (c == '{' || c == '[') {
+                depth++;
+            } else if (c == '}' || c == ']') {
+                if (--depth == 0) {
+                    at++;
+                    break;
+                }
+            }
+        }
+        if (count >= offset && kept < limit) {
+            const size_t len = at - start;
+            if (128 + bo + len + 8 >= cap) break;
+            if (kept) body[bo++] = ',';
+            memcpy(body + bo, in + start, len);
+            bo += len;
+            kept++;
+        }
+        count++;
+    }
+    char head[128];
+    const int hn = fmt(head, sizeof(head), "{\"total\":%d,\"offset\":%d,\"limit\":%d,\"track_list\":[",
+                       count, offset, limit);
+    memmove(out + hn, body, bo);
+    memcpy(out, head, (size_t)hn);
+    const size_t o = (size_t)hn + bo;
+    memcpy(out + o, "]}\n", 3);
+    return o + 3;
+}
+
 static void ebgmCreated(Frame* f) {
     if ((int32_t)f->retRax < 0) return;
     const char* group = (const char*)(uintptr_t)f->gpr[1];
@@ -788,7 +858,20 @@ static void ebgmCreated(Frame* f) {
         if (!g_ebgm[i].id) r = &g_ebgm[i];
     if (r && g_ebgmPool) {
         r->body = g_ebgmPool + (size_t)(r - g_ebgm) * EBGM_MAX;
-        const int n = sysRead(fd, r->body, EBGM_MAX);
+        // A track list: read whole, and only the page asked for answered.
+        static char* whole;
+        if (!whole) whole = (char*)sysMap(TRACKS_MAX);
+        const int pageOffset = queryInt(path, "offset"), pageLimit = queryInt(path, "limit");
+        size_t paged = 0;
+        if (which == 1 && name[0][0] && whole && pageLimit > 0) {
+            size_t got = 0;
+            int k;
+            while (got < TRACKS_MAX && (k = sysRead(fd, whole + got, TRACKS_MAX - got)) > 0) got += (size_t)k;
+            paged = tracksPage(whole, got, pageOffset < 0 ? 0 : pageOffset, pageLimit, r->body, EBGM_MAX);
+            if (paged) say("ebgm: tracks %d to %d of the list asked for", pageOffset, pageOffset + pageLimit - 1);
+            else sysSeek(fd, 0, 0);
+        }
+        const int n = paged ? (int)paged : sysRead(fd, r->body, EBGM_MAX);
         r->len = n > 0 ? (uint32_t)n : 0;
         r->off = 0;
         r->id = *idp;
