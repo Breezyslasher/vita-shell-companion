@@ -76,6 +76,7 @@ static void dlListLeftovers(void);  // dllist.c (1.04)
 static void dlListIdle(void);        // dllist.c (1.15)
 static void dlListForget(void);      // dllist.c (1.29)
 static int dlListShown(void);        // dllist.c (1.31)
+static void dlListCheck(void);       // dllist.c (1.32)
 
 // %XX back to its byte.
 static void dlDecode(char* s) {
@@ -499,6 +500,7 @@ static void dlItem(int i) {
 // first waiting; -2 if only paused ones are left (wait), -1 if none.
 static int dlNext(void) {
     int first = -1, paused = 0;
+    dlListCheck();  // deleted from the list since (1.32)
     for (int i = 0; i < g_dls.count; i++) {
         __typeof__(g_dls.item[0])* it = &g_dls.item[i];
         if (it->state != DLS_WAITING) continue;

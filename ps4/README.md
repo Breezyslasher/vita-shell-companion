@@ -343,6 +343,13 @@ service's are, not the managed wrappers 0.85 hooked.
   shown. The summary at the end stays ("Downloads done", or how many
   failed). Without the rows (`dl-nolist`, or the hooks not in), all as
   before.
+- **1.31 on the PS4:** "Cancel and Delete" on one song took every song's
+  row off the list (songs 2, 3 and 6 gone at once; 4 and 5, not asked for
+  again, were fetched). All had the title id `SCMP00001`, and a game's
+  Cancel and Delete goes by title id (`CancelAndDelete` looks the app up
+  with `GetItemByTitleId`). 1.32: each placeholder a title id of its own
+  (`SCDLnnnnn`, no app's), and before each item the module asks the
+  service about every one of its tasks, so one deleted is seen at once.
 
 ### One module, and the cleanup (0.95)
 

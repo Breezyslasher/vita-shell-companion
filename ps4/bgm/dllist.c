@@ -894,7 +894,14 @@ static int32_t dllRegister(int i) {
     __typeof__(g_dls.item[0])* it = &g_dls.item[i];
     // A content id of its own each time: XXYYYY-TITLEID_00-<16 letters and digits>.
     char id[40];
-    fmt(id, sizeof(id), "IV0000-SCMP00001_00-SCDL%03u%09lu", serial++ % 1000,
+    // A title id of its own too (1.32): 1.31's all had SCMP00001, and
+    // "Cancel and Delete" on one (a game's, by title id: CancelAndDelete
+    // looks the app up with GetItemByTitleId) took every one of them off
+    // the list. SCDLnnnnn, no app's: the serial from the clock so a reboot
+    // doesn't start it again.
+    if (!serial) serial = (uint32_t)(sysNowUs() / 1000u);
+    const uint32_t n = serial++;
+    fmt(id, sizeof(id), "IV0000-SCDL%05u_00-SCDL%03u%09lu", n % 100000u, n % 1000u,
         (unsigned long)(sysNowUs() / 1000u % 1000000000u));
     BgftParam p;
     memset(&p, 0, sizeof(p));
@@ -1108,6 +1115,20 @@ static void dlListIdle(void) {
     if (sysExists(SC_BGM_DIR "/dl-list-keep")) return;
     logLine("dllist: the last list ended 30 min ago: its entries removed");
     dllRemoveAll();
+}
+
+// Before each item (1.32): ours asked for, so one deleted from the list is
+// seen (the progress hook's 0x80990019) even if the list hasn't asked for
+// it since: 1.31's songs 4 and 5 went with song 3's delete and were fetched.
+static void dlListCheck(void) {
+    if (!g_bgft.progress) return;
+    for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
+        const int32_t t = g_dll.e[k].task;
+        if (t <= 0) continue;
+        BgftProgress pr;
+        memset(&pr, 0, sizeof(pr));
+        g_bgft.progress(t, &pr);
+    }
 }
 
 // The list's items have rows in Notifications > Downloads (1.31): song
