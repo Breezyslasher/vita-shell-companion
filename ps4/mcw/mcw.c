@@ -1033,7 +1033,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 13
+#define MONO_HOOKS 14
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -1161,6 +1161,11 @@ static struct {
     void *options, *optCtor, *optConvert;        // ImageOptions
     void *fFormat, *fResize, *fUpdated;          // its fields (0.63)
     void *setCache, *globalCache;                // its Cache, ImageObject.GlobalCache (0.65)
+    void *getManager, *setManager;               // its AssetManager (0.66)
+    FnMonoWeak strong;                           // mono_gchandle_new
+    uint32_t manager;                            // the shell's own loads' AssetManager
+    void* managerName;                           // AssetManager.name
+    int ourLoad;                                 // in our own LoadAsync call
     void *setX, *setY, *setW, *setH, *getX, *setVisible;  // UINode
     void* appendChild;                           // Widget
     void* jsonItem;                              // JsonObject.get_Item
@@ -1219,6 +1224,15 @@ static void* rowOptions(void) {
     if (g_row.fUpdated) {
         uint8_t yes = 1;
         g_mono.set(o, g_row.fUpdated, &yes);
+    }
+    // The AssetManager the shell's own loads use: 0.65's, the default one,
+    // failed "AssetManager(SceUIDefaultAssetManager) is out of memory".
+    if (g_row.manager && g_row.setManager) {
+        void* mgr = g_row.target(g_row.manager);
+        if (mgr) {
+            void* args[1] = {mgr};
+            rowCall(g_row.setManager, o, args);
+        }
     }
     // The shell gives every load a cache; 0.63's had none, and failed.
     if (g_row.setCache && g_row.globalCache) {
@@ -1327,7 +1341,9 @@ static void rowArt(Frame* f) {
             char url[160];
             fmt(url, sizeof(url), "file://%s", path);
             void* args[3] = {g_row.stringNew(g_row.domain, url), NULL, rowOptions()};
+            g_row.ourLoad = 1;
             rowCall(g_row.loadAsync, img, args);
+            g_row.ourLoad = 0;
             g_rows[e].idx = idx;
         }
         rowShow(img, 1);
@@ -1396,6 +1412,28 @@ static void rowLoaded(Frame* f) {
     }
 }
 
+// The shell's own ImageBox.LoadAsync(uri, action, options), before: its
+// options' AssetManager kept, the first seen, for our loads (0.66).
+static void rowShellLoad(Frame* f) {
+    void* opt = (void*)(uintptr_t)f->gpr[3];
+    static int said;
+    if (g_row.ourLoad || !opt || !g_row.getManager || !g_row.strong) return;
+    void* mgr = rowCall(g_row.getManager, opt, NULL);
+    char uri[160], name[80];
+    monoText(f->gpr[1], uri, sizeof(uri));
+    name[0] = 0;
+    if (mgr && g_row.managerName) {
+        void* n = monoGet(mgr, g_row.managerName);
+        if (n) monoText((uint64_t)(uintptr_t)n, name, sizeof(name));
+    }
+    if (said < 12) {
+        said++;
+        say("rowart: shell's LoadAsync(\"%s\"): AssetManager %p \"%s\"%s", uri, mgr, name,
+            mgr && !g_row.manager ? ", kept for ours" : "");
+    }
+    if (mgr && !g_row.manager) g_row.manager = g_row.strong(mgr, 0);
+}
+
 // Mono's functions and the classes' methods, once (on the watch's thread,
 // attached).
 static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* classFromName) {
@@ -1449,6 +1487,13 @@ static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* class
         if (ou == 0x74) g_row.fUpdated = fu;
         if (g_row.optCtor) g_row.options = opts;
         g_row.setCache = m(opts, "set_Cache", 1);
+        g_row.getManager = m(opts, "get_AssetManager", 0);
+        g_row.setManager = m(opts, "set_AssetManager", 1);
+        void* am = cls(pui, "Sce.PlayStation.PUI", "AssetManager");
+        g_row.managerName = am ? g_mono.fieldByName(am, "name") : NULL;
+        if (!sceKernelDlsym((int)(intptr_t)mono, "mono_gchandle_new", &p)) g_row.strong = (FnMonoWeak)p;
+        say("rowart: ImageOptions.get/set_AssetManager %p %p, AssetManager.name %p, gchandle_new %p",
+            g_row.getManager, g_row.setManager, g_row.managerName, (void*)g_row.strong);
         void* io = cls(pui, "Sce.PlayStation.PUI", "ImageObject");
         g_row.globalCache = io ? m(io, "get_GlobalCache", 0) : NULL;
         say("rowart: ImageOptions.set_Cache %p, ImageObject.get_GlobalCache %p", g_row.setCache,
@@ -1532,6 +1577,8 @@ static void monoLog(Frame* f) {
         rowArt(f);
     } else if (h->json == 9) {
         rowLoaded(f);
+    } else if (h->json == 10) {
+        rowShellLoad(f);
     } else if (h->json == 5) {
         if (f->seq <= 50)
             say("mono: %s: %d (0x%X), 0x%X  [#%u, thread %d]", h->name, (int32_t)f->gpr[1],
@@ -1886,6 +1933,9 @@ static void monoHooks(void) {
         // An ImageBox's load finished: what came of ours (0.64, rowLoaded).
         {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ImageBox", "HandleLoadCompleted", 3, 9,
          "ImageBox.HandleLoadCompleted"},
+        // The shell's own loads: their AssetManager, for ours (0.66, rowShellLoad).
+        {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ImageBox", "LoadAsync", 3, 10,
+         "ImageBox.LoadAsync"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
@@ -1979,7 +2029,7 @@ void mcwPre(Frame* f) {
 void mcwPost(Frame* f) {
     if (f->hook->json) {
         if (!g_quiet || f->hook->json == 2 || f->hook->json == 6 || f->hook->json == 7 ||
-            f->hook->json == 8 || f->hook->json == 9)
+            f->hook->json == 8 || f->hook->json == 9 || f->hook->json == 10)
             monoLog(f);
         return;
     }

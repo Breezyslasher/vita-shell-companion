@@ -682,6 +682,14 @@ with an error text 1164 characters long. 0.65 logs that text in full
 (`ImageObject.GlobalCache`, through `ImageOptions.set_Cache`). Our loads had
 no cache; the shell's always have one.
 
+0.65's error was `System.OutOfMemoryException: AssetManager(SceUIDefaultAssetManager)
+is out of memory`, raised in `AssetManager.Register`. The picture was read
+and decoded, but the default asset manager has no room. 0.66 hooks the
+shell's own `ImageBox.LoadAsync(uri, action, options)`, keeps the
+`AssetManager` of the first of those (with a strong GC handle), and gives it
+to our loads' options (`ImageOptions.set_AssetManager`). It logs each of the
+shell's first 12 loads with its address and manager's name.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our
