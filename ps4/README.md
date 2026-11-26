@@ -242,6 +242,32 @@ The Music section's panel loads its cover by address alone
 each track's cover to a file of its own (`cover-<n>.jpg` or `.png`, a new name
 each track, the last removed) and both panels are given that file.
 
+### Where the Music section's lists come from
+
+The shell's string table (its app.exe's `#US` heap: the strings the
+compiled-away method bodies used) has the Music section's requests, all to
+Sony's PSN web API through `sceNpWebApi*`, so all needing a signed-in PSN
+account:
+
+- `/v1/ebgm/me/partner/profile?partner=spotify` (`subscriptionType`,
+  `legalCountry`, `PREMIUM`)
+- `/v1/ebgm/recommended/views/{0}` (`views`, `section_title`, `image_url`
+  with `&w={0}&h={0}`, `playlists`): the sections and their playlists
+- `/v1/ebgm/{0}/tracks?uri={1}` and `?context_uri={1}&track_uri={2}`, with
+  `&offset={0}&limit={1}` (`track_list`, `artists`, `explicit`,
+  `is_playable`): a playlist's tracks
+- `/v1/ebgm/nowplaying/tracks?context_uri={0}&track_uri={1}`
+- `/v1/ebgm/users/me/library/contains|save|delete/{0}`: R3's "add to your
+  music"
+- `/socialnetwork/api/v1/sp/sessionlink` (`token`, `track_uri`,
+  `context_uri`, `track_index`, `start_view`)
+
+A choice is played through the music server: `PlaySpUri(loginInfo, playUri,
+trackIndex, startView, shuffle)`, which the watch hooks. Our own lists
+there would mean answering those requests, and first getting past the
+sign-in check; 0.38 watches `sceNpGetState` and the rest, and the web API's
+calls, to see what that check asks.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

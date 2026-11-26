@@ -88,10 +88,19 @@ static const char* const g_defaultNames[] = {
     "sceCustomMusicCoreSetSystemAudioVolume", "sceCustomMusicCoreGetHdcpStatus",
     "sceCustomMusicCorePostEvent", "sceCustomMusicCoreSendEvent",
     "sceCustomMusicCoreSendMulticastEvent", "sceCustomMusicCoreSendSpMessage",
+    // PSN (0.38): what the Music section asks before it shows "Sign in to
+    // PlayStation Network", and the web API it gets Spotify's lists from
+    // (/v1/ebgm/...). Watched only.
+    "sceNpGetState", "sceNpGetAccountIdA", "sceNpGetOnlineId", "sceNpGetNpReachabilityState",
+    "sceNpCheckNpAvailability", "sceNpCheckNpAvailabilityA", "sceNpHasSignedUp",
+    "sceNpIsPlusMember", "sceNpWebApiCreateContext", "sceNpWebApiCreateContextA",
+    "sceNpWebApiCreateRequest", "sceNpWebApiAddHttpRequestHeader", "sceNpWebApiSendRequest",
+    "sceNpWebApiSendRequest2", "sceNpWebApiGetHttpStatusCode", "sceNpWebApiReadData",
+    "sceNpWebApiDeleteRequest",
 };
 #define N_DEFAULT (int)(sizeof(g_defaultNames) / sizeof(g_defaultNames[0]))
 
-#define MAX_HOOKS 72
+#define MAX_HOOKS 96
 #define MAX_CALLBACKS 8
 static Hook g_hooks[MAX_HOOKS];
 static char g_names[MAX_HOOKS][80];
@@ -902,7 +911,7 @@ static int contains(const char* s, const char* part) {
     return 0;
 }
 
-#define MAX_MODULES 8
+#define MAX_MODULES 16
 static int g_mods[MAX_MODULES];
 static char g_modNames[MAX_MODULES][64];
 static int g_nMods;
@@ -930,7 +939,9 @@ static int findModules(int logAll) {
         if (logAll)
             say("  0x%08X %s at %p", (unsigned)handles[i], info.name,
                 info.segmentCount ? info.segment[0].address : NULL);
-        if (contains(info.name, "Music") && g_nMods < MAX_MODULES) {
+        if ((contains(info.name, "Music") || contains(info.name, "libSceNpManager") ||
+             contains(info.name, "libSceNpWebApi")) &&
+            g_nMods < MAX_MODULES) {
             g_mods[g_nMods] = handles[i];
             fmt(g_modNames[g_nMods], sizeof(g_modNames[0]), "%s", info.name);
             g_nMods++;
@@ -1004,6 +1015,10 @@ static void readNames(void) {
 
 static int isGetter(const char* name) {
     if (contains(name, "BgmOutput")) return 1;  // once an audio buffer
+    // PSN's: any that only asks (sceNpGetState, sceNpWebApiReadData, ...)
+    if (name[0] == 's' && name[3] == 'N' && name[4] == 'p')
+        return contains(name, "Get") || contains(name, "Check") || contains(name, "Read") ||
+               contains(name, "IsPlus") || contains(name, "HasSigned");
     const char* s = name;
     if (contains(s, "sceMusicCoreServer")) s += 18;
     return (s[0] == 'G' && s[1] == 'e' && s[2] == 't') ||
