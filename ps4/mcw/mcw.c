@@ -2576,7 +2576,20 @@ static void monoHooks(void) {
         {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "DownloadItemAccessor", "GetTotalCount", 0, 17,
          "DownloadItemAccessor.GetTotalCount"},
     };
+    // The download service's (kind 17), logged only when asked (0.87): with a
+    // download going, Notifications > Downloads crashed the shell under
+    // 0.85's hooks. mcw-bgftlog for all but DownloadGetProgress, which
+    // aligns its stack for AVX; mcw-bgftprogress for that one too.
+    const int bgftLogOn = sysExists(SC_BGM_DIR "/mcw-bgftlog") || sysExists(SC_BGM_DIR "/mcw-bgftprogress");
+    const int bgftProgressOn = sysExists(SC_BGM_DIR "/mcw-bgftprogress");
+    say("bgft: logging %s", bgftProgressOn ? "on, DownloadGetProgress too" : bgftLogOn ? "on, not DownloadGetProgress"
+                                                                                       : "off (mcw-bgftlog, mcw-bgftprogress)");
     for (int i = 0; i < MONO_HOOKS; i++) {
+        if (want[i].kind == 17 &&
+            (!bgftLogOn || (contains(want[i].name, "DownloadGetProgress") && !bgftProgressOn))) {
+            g_monoHooks[i].name = want[i].name;
+            continue;
+        }
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
         void* klass = image ? ((FnMonoClass)classFromName)(image, want[i].ns, want[i].klass) : NULL;
         if (!klass && image && contains(want[i].klass, "/")) {

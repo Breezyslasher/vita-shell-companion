@@ -942,7 +942,11 @@ have overflowed it.
   rest seconds, `percentTotal`). A task of ours there means adding it to
   `DownloadQueryTask`'s answer and answering the others for its id. 0.85
   only logs those calls (`bgft:` lines in mcw.log), to see a real task's
-  values first.
+  values first. With a download going, opening Notifications > Downloads
+  under those hooks crashed the shell. Since 0.87 they are off unless
+  `mcw-bgftlog` (all but `DownloadGetProgress`) or `mcw-bgftprogress` (that
+  one too, the suspect: it aligns its stack to 32 bytes for AVX) is in the
+  player's folder.
 
 ### Large queues (0.84)
 
