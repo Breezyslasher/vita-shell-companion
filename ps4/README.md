@@ -273,6 +273,20 @@ service's are, not the managed wrappers 0.85 hooked.
   DownloadItemBase, DownloadProgressBar, ..., BgftWrapper, TaskParam,
   DownloadItemAccessor2) to `code/methods4.map` and `code/code4.bin`, each
   method's calls named and the strings it loads (`str` lines), to read.
+- **What the dump showed (1.25):** the row's labels are fixed per display
+  state (`<.cctor>b__51_NN`: one always "msg_calculating", another always
+  "msg_time_until_download_complete" and the times). The state is chosen
+  with `MapValueArgs.IsCalculating() = (SubType == 12 || SubType == 6) &&
+  AppDataSize == 0`. `AppDataSize` is written in three places, all for Game
+  downloads only (type 1, subtype 6): `DownloadTaskInfo.GetDownloadTaskInfo`,
+  `UpdateTaskInfo` (a copy of it), and the polling task (`UpdateProgress`'s
+  `b__0`), which asks `DownloadGetApplicationDataSize(taskId)` and then
+  takes the row's subtype from the progress answer. So a Package task always
+  reads "Calculating...". `GetVisualData` has configs for subtypes 5-12
+  only (Music, 2, none). 1.25: going and waiting ones are Game (1098's and
+  1093's values), the service's app data size call (its names tried,
+  logged) is answered with the song's size, finished ones stay Package in
+  section 9.
 
 ### One module, and the cleanup (0.95)
 

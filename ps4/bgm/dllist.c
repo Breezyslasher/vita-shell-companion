@@ -74,6 +74,8 @@ static struct {
     Hook query[4];  // the list's task queries (0.98)
     Hook info[8];   // its task info calls, logged only (1.11)
     Hook ctl[5];    // start, resume, pause, stop, unregister: the list's buttons (1.15)
+    Hook appSize[3];  // the service's app data size call (1.25)
+    uint32_t appSizeLogged;
     int dlThread;   // the downloads' thread, whose calls are ours
     uint64_t endedUs;  // when the last list ended, 0 if one is going
     volatile int wantPost;  // an item changed state: tell the list (1.19)
@@ -524,6 +526,32 @@ void dlListCtlHook(Frame* f) {
     }
 }
 
+// After the service's app data size call (taskId, out size), kind 23
+// (1.25): for ours, the song's size, so the list's row (Game) has an
+// AppDataSize and isn't "Calculating...". Logged: its first calls.
+void dlListAppSizeHook(Frame* f) {
+    const int32_t task = (int32_t)f->gpr[0];
+    uint64_t* out = (uint64_t*)(uintptr_t)f->gpr[1];
+    for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
+        if (g_dll.e[k].task != task || task <= 0) continue;
+        const int i = g_dll.e[k].item;
+        if (i < 0 || i >= g_dls.count) return;
+        const uint64_t size = g_dls.item[i].size ? g_dls.item[i].size : g_dls.item[i].bytes + 1;
+        const int rc = (int)(int32_t)f->retRax;
+        if (out && hookReadable(out, 8) == 8 && (hookProt(out) & 2)) {
+            *out = size;
+            f->retRax = 0;
+        }
+        if (g_dll.appSizeLogged++ < 12)
+            logLine("dllist: %s(%d) [ours, item %d] was 0x%08X: answered %lu  [thread %d]", f->hook->name, task, i,
+                    (unsigned)rc, (unsigned long)size, scePthreadGetthreadid());
+        return;
+    }
+    if (g_dll.appSizeLogged++ < 12)
+        logLine("dllist: %s(%d) = 0x%08X, %lu  [thread %d]", f->hook->name, task, (unsigned)f->retRax,
+                (unsigned long)(out && hookReadable(out, 8) == 8 ? *out : 0), scePthreadGetthreadid());
+}
+
 static int dllHex(const char* text, const char* key, uint32_t* out) {
     char v[24];
     statusFieldBgm(text, key, v, sizeof(v));
@@ -603,6 +631,24 @@ static int dllSetup(void) {
         const char* why = "";
         const int rc = mcwHookNative(h, fn, &why);
         logLine("dllist: %s %p: %s%s", inames[i], fn, rc == 0 ? "hooked (logged only)" : "not hooked: ", rc == 0 ? "" : why);
+    }
+    // The service's app data size call (1.25): whichever of these names
+    // libSceBgft has, as BgftWrapper's other calls are its Int functions.
+    static const char* const anames[3] = {"sceBgftServiceIntDownloadGetApplicationDataSize",
+                                          "sceBgftServiceDownloadGetApplicationDataSize",
+                                          "sceBgftServiceIntDownloadGetAppDataSize"};
+    for (int i = 0; i < 3; i++) {
+        void* fn = anySym(lib, anames[i]);
+        if (!fn) {
+            logLine("dllist: %s: not found", anames[i]);
+            continue;
+        }
+        Hook* h = &g_dll.appSize[i];
+        h->name = anames[i] + 10;
+        h->json = 23;
+        const char* why = "";
+        const int rc = mcwHookNative(h, fn, &why);
+        logLine("dllist: %s %p: %s%s", anames[i], fn, rc == 0 ? "hooked" : "not hooked: ", rc == 0 ? "" : why);
     }
     // The list's buttons (1.15).
     static const char* const cnames[5] = {"sceBgftServiceDownloadStartTask", "sceBgftServiceDownloadResumeTask",
@@ -787,8 +833,18 @@ static void dlListBegin(void) {
     g_dll.haveGoing = g_dll.haveWaiting = g_dll.haveDone = 1;
     g_dll.trying = sysExists(SC_BGM_DIR "/dl-list-try");
     if (g_dll.trying) logLine("dllist: trying finished answers (dl-list-try): item i gets [A-F][i %% 6]");
-    g_dll.bitsGoing = 0x30a;    // Package, Run, Download
-    g_dll.bitsWaiting = 0x301;  // Package, Ready, Standby
+    // 1.25, from the list's own code (the debug dump, code4.bin): a row
+    // reads "Calculating..." while MapValueArgs.IsCalculating, (SubType 12
+    // Package or 6 Game) and AppDataSize 0; and AppDataSize is set only for
+    // Game downloads (type 1, subtype 6), by DownloadGetApplicationDataSize
+    // (task info, and each progress poll, its subtype from our progress
+    // bits). So going and waiting ones are Game, with the values the PS4's
+    // own game tasks had (1.04/1.05: 1093 registered 0x10000161, 1098 going
+    // 0x10008261 / ...8a), and the app data size call answered with the
+    // song's size (dllAppSizeHook). Finished ones stay Package in section 9
+    // (1.08's: the music-note icon, no warning).
+    g_dll.bitsGoing = 0x18a;    // Game, Run, Download (package 1098)
+    g_dll.bitsWaiting = 0x181;  // Game, Ready, Standby
     // Done (1.09, from 1.08's side-by-side try, dl-list-try): Complete/
     // Complete with the param's type 3, as the PS4's own finished downloads
     // have (0x...63), shows the music-note icon and no warning. (Complete/
@@ -800,8 +856,8 @@ static void dlListBegin(void) {
     // byte, the param's type 3 (0x...63). (1.07 answered these in section 3:
     // the music-note icon, no warning.)
     g_dll.bitsDone = 0x308;     // Package, Stop, Download
-    g_dll.paramGoing = 0x82c1;   // Download, Package, Run, Download
-    g_dll.paramWaiting = 0x1c1;  // Download, Package, Ready, Standby (as registered)
+    g_dll.paramGoing = 0x10008261;    // as package 1098 going
+    g_dll.paramWaiting = 0x10000161;  // as package 1093 just registered
     g_dll.paramDone = 0x80c3;    // type 3, Package, Stop, Download (as 0x10008063)
     if (readText(SC_BGM_DIR "/dl-list-bits.txt", text, sizeof(text)) > 0) {
         if (dllHex(text, "going", &g_dll.bitsGoing)) g_dll.haveGoing = 1;
