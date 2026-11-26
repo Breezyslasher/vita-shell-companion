@@ -143,6 +143,13 @@ service's are, not the managed wrappers 0.85 hooked.
   counted them "Waiting: 2". 1.07: with `dl-list-try`, item i is answered,
   once done, with one of six candidates (`g_dllTry`), its letter in its
   title, to see them side by side.
+- **1.07 on the PS4** (without `dl-list-try`, so 1.06's answers): the
+  songs had music-note icons, the finished ones no text. Notifications'
+  summary read "Cannot download" (Downloading 1, Waiting 5) until it was
+  opened again: placeholder 1106 was failed by the service as it was
+  registered, sat in section 5 (the failed ones) until replaced 5 s later,
+  and the summary keeps its counts from when it is shown. 1.08 takes ours
+  out of section 5's results (and marks them for replacing).
 
 ### One module, and the cleanup (0.95)
 

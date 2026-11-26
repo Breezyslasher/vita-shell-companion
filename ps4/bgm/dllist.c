@@ -239,6 +239,35 @@ void dlListQueryHook(Frame* f) {
         // PS4's own installs 0x10008261 while going, 0x10008063 done; ours
         // 0x200c1, 0x280c1, 0x40280c1 failed), in the results themselves:
         // count pairs at the fifth argument, as every section logged shows.
+        // Section 5 holds the failed tasks (every failed placeholder was
+        // there, and only those): ours are taken out of it (1.08), so the
+        // Notifications summary never counts one the service failed as an
+        // error ("Cannot download" until it was opened again); dllRepair
+        // replaces it within seconds. Only in the section query, whose
+        // count is the fourth argument.
+        if (h == &g_dll.query[1] && f->gpr[2] == 5 && cnt && cnt <= 960 && count &&
+            hookReadable(res, (size_t)cnt * 8) == (size_t)cnt * 8 && (hookProt(res) & 2) && (hookProt(num) & 2)) {
+            uint32_t w = 0;
+            for (uint32_t j = 0; j < cnt; j++) {
+                int32_t id;
+                memcpy(&id, res + j * 8, 4);
+                int mine = 0;
+                for (int k = 0; k < count && k < DLL_MAX; k++)
+                    if (g_dll.e[k].task == id && id > 0) {
+                        mine = 1;
+                        g_dll.e[k].failed = 1;
+                    }
+                if (!mine) {
+                    if (w != j) memmove((uint8_t*)res + w * 8, res + j * 8, 8);
+                    w++;
+                }
+            }
+            if (w != cnt) {
+                logLine("dllist: section 5: %u of ours taken out of the failed ones", cnt - w);
+                *(uint32_t*)(uintptr_t)f->gpr[3] = w;
+                cnt = w;
+            }
+        }
         if (cnt && cnt <= 960 && count && hookReadable(res, (size_t)cnt * 8) == (size_t)cnt * 8 &&
             (hookProt(res) & 2)) {
             for (uint32_t j = 0; j < cnt; j++) {
