@@ -328,6 +328,15 @@ service's are, not the managed wrappers 0.85 hooked.
     being written, the next one goes, and it answers paused (bit 5, param
     bit 17): "Paused". Resume and Download Now make it the next one.
     Status `paused` while paused.
+- **1.29 on the PS4:** Pause worked (the list calls
+  `sceBgftServiceIntDownloadPauseTask`): "Paused", the next song went; the
+  service failed the paused placeholder 5 s on (0x80990033) and it was
+  replaced, paused still. Deleting songs 2-5 cancelled them. Song 6, also
+  deleted, was fetched and came back finished: its task info said
+  0x80990019 but no progress call came. At boot the old tasks were not
+  there (0x80990019; the new ones numbered from 1102).
+- **1.30:** a task info answer of 0x80990019 for one of ours counts as
+  deleted too; a removal answered 0x80990019 is not tried again.
 
 ### One module, and the cleanup (0.95)
 

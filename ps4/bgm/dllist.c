@@ -207,6 +207,21 @@ static void dllFill(int k, BgftProgress* pr) {
     pr->restSec = pr->restSecTotal = st == DLS_DONE ? 0 : rest;
 }
 
+static void dllSave(void);
+
+// One of ours gone from the service (0x80990019): deleted from the list
+// (triangle). Not fetched any more if not done (1.29: 1.28 fetched a
+// deleted song), and no longer ours to answer for.
+static void dllGone(int k, const char* seenBy) {
+    const int32_t task = g_dll.e[k].task;
+    if (task <= 0) return;
+    g_dll.e[k].task = 0;
+    const int di = g_dll.e[k].item;
+    logLine("dllist: task %d (item %d) is gone (0x80990019, %s): deleted from the list", task, di, seenBy);
+    if (di >= 0 && di < g_dls.count && g_dls.item[di].state != DLS_DONE) g_dls.item[di].cancel = 1;
+    dllSave();
+}
+
 // After the service's progress call (taskId, progress), on the caller's
 // thread, the shell's list among them (mcw.c's thunk, kind 18).
 void dlListHook(Frame* f) {
@@ -229,13 +244,7 @@ void dlListHook(Frame* f) {
         if (rc == (int)0x80990019) {
             // Not there (1.15): deleted from the list (triangle), as our own
             // removals answer (0x80990019). No longer ours to answer for.
-            logLine("dllist: task %d (item %d) is gone (0x80990019): deleted from the list", task, g_dll.e[k].item);
-            {
-                // Not fetched any more (1.29: 1.28 fetched a deleted song).
-                const int di = g_dll.e[k].item;
-                if (di >= 0 && di < g_dls.count && g_dls.item[di].state != DLS_DONE) g_dls.item[di].cancel = 1;
-            }
-            g_dll.e[k].task = 0;
+            dllGone(k, "progress");
             return;
         }
         if (err && !g_dll.e[k].failed) g_dll.e[k].failed = 1;  // replaced by dllRepair (1.02)
@@ -531,7 +540,13 @@ void dlListInfoHook(Frame* f) {
     const int32_t task = (int32_t)f->gpr[0];
     int ours = 0;
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++)
-        if (g_dll.e[k].task == task && task > 0) ours = 1;
+        if (g_dll.e[k].task == task && task > 0) {
+            ours = 1;
+            // Gone (1.30): 1.29's song 6 was deleted from the list, its task
+            // info said 0x80990019 at 27.2 s, and no progress call came
+            // before it was done and put back in section 9.
+            if ((int)(int32_t)f->retRax == (int)0x80990019) dllGone(k, "task info");
+        }
     const uint32_t n = __atomic_add_fetch(&g_dll.infoLogged, 1, __ATOMIC_RELAXED);
     if (!(ours ? n <= 400 : n <= 30)) return;
     uint64_t out = 0;
@@ -635,7 +650,6 @@ static void dllUnregister(int32_t task) {
             (unsigned)rc);
 }
 
-static void dllSave(void);
 
 // Removals the service refused (0x80990019 early in a boot, 1.28's log),
 // tried again every 10 s from dlListIdle, up to 30 times (1.29).
@@ -647,8 +661,12 @@ static struct {
 
 static void dllUnregisterLater(int32_t task) {
     const int rc = g_dll.unregister ? g_dll.unregister(task) : -1;
-    logLine("dllist: task %d from before removed: 0x%08X%s", task, (unsigned)rc, rc < 0 ? ", tried again later" : "");
-    if (rc < 0 && g_dllLater.n < DLL_MAX) g_dllLater.task[g_dllLater.n++] = task;
+    // 0x80990019: not there (1.29's boot: every old task, the new ones
+    // numbered from 1102), nothing to try again.
+    const int again = rc < 0 && rc != (int)0x80990019;
+    logLine("dllist: task %d from before removed: 0x%08X%s", task, (unsigned)rc,
+            again ? ", tried again later" : rc < 0 ? " (not there)" : "");
+    if (again && g_dllLater.n < DLL_MAX) g_dllLater.task[g_dllLater.n++] = task;
 }
 
 static void dllLaterIdle(void) {
@@ -658,7 +676,7 @@ static void dllLaterIdle(void) {
     int w = 0;
     for (int j = 0; j < g_dllLater.n; j++) {
         const int rc = g_dll.unregister ? g_dll.unregister(g_dllLater.task[j]) : -1;
-        if (rc < 0 && !last) g_dllLater.task[w++] = g_dllLater.task[j];
+        if (rc < 0 && rc != (int)0x80990019 && !last) g_dllLater.task[w++] = g_dllLater.task[j];
         if (rc >= 0 || last)
             logLine("dllist: task %d from before removed: 0x%08X (try %d)", g_dllLater.task[j], (unsigned)rc,
                     g_dllLater.tries);
