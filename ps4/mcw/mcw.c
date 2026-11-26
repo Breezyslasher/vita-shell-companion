@@ -507,10 +507,11 @@ typedef struct {
     int64_t offset;
     int32_t prot;
     int32_t mtype;
-    uint32_t flags;  // 1 flexible, 2 direct, 4 stack, 8 pooled, 16 committed
-    char name[32];
+    uint8_t flags;  // 1 flexible, 2 direct, 4 stack, 8 pooled, 16 committed
+    char name[32];  // at 0x21: on a PS4 (11.50) the flags were one byte, the name right after
 } VirtualQueryInfo;  // OpenOrbis's OrbisKernelVirtualQueryInfo
 int sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, size_t size);
+_Static_assert(__builtin_offsetof(VirtualQueryInfo, name) == 0x21, "the name after one byte of flags");
 
 static uint32_t rd32(const uint8_t* p) {
     uint32_t v;
@@ -628,9 +629,10 @@ static void carve(void) {
         const size_t len = (size_t)(end - start);
         int skipped = 0;
         for (int i = 0; i < g_nSkip; i++) skipped |= g_skip[i] == (uint64_t)(uintptr_t)start;
-        // CPU-readable, committed, not direct (GPU) memory.
-        const int readable = (vq.prot & 1) && (vq.flags & 16) && !(vq.flags & 2) &&
-                             len <= (512u << 20) && !skipped;
+        // CPU-readable, not direct (GPU) memory. (0.31 also asked for
+        // "committed", which on a PS4 (11.50) most of the shell's memory is
+        // not marked: 3 MB of it was searched.)
+        const int readable = (vq.prot & 1) && !(vq.flags & 2) && len <= (512u << 20) && !skipped;
         if (len >= (1u << 20) || vq.name[0])
             say("  region %p-%p prot 0x%X type %d flags 0x%X %s%s", (const void*)start,
                 (const void*)end, (unsigned)vq.prot, vq.mtype, vq.flags, vq.name,
