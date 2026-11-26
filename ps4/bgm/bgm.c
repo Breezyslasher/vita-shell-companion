@@ -76,6 +76,8 @@ static struct {
     // WAV: where its samples end.
     size_t wavEnd;
     uint64_t framesRead;  // source frames, for the position
+    uint64_t durMs;       // the track's length: an MP3's from its first frame's bit rate
+    int kbps;             // that bit rate
 } g_src;
 
 static void srcClose(void) {
@@ -134,6 +136,7 @@ static int mp3Decode(void) {
         if (!info.frame_bytes) return 0;  // nothing more it can find
         g_src.off += (size_t)info.frame_bytes;
         if (frames > 0) {
+            if (!g_src.kbps) g_src.kbps = info.bitrate_kbps;
             g_src.channels = info.channels;
             g_src.hz = info.hz;
             g_src.pcmFrames = frames;
@@ -181,6 +184,10 @@ static int srcOpen(const char* path) {
             srcClose();
             return 0;
         }
+        g_src.durMs = g_src.hz && g_src.channels
+                          ? (uint64_t)(g_src.wavEnd - g_src.off) / (uint64_t)(g_src.channels * 2) *
+                                1000u / (uint64_t)g_src.hz
+                          : 0;
     } else {
         g_src.type = SRC_MP3;
         // An ID3v2 tag first, cover art and all: skipped, its size syncsafe.
@@ -191,11 +198,15 @@ static int srcOpen(const char* path) {
             if (h[5] & 0x10) g_src.off += 10;  // a footer
         }
         mp3dec_init(&g_src.dec);
+        g_src.kbps = 0;
+        const size_t audioAt = g_src.off;
         if (!mp3Decode()) {
             logLine("%s: no MP3 frames in it", path);
             srcClose();
             return 0;
         }
+        // kbit/s is bits a millisecond.
+        g_src.durMs = g_src.kbps ? (uint64_t)(g_src.size - audioAt) * 8u / (uint64_t)g_src.kbps : 0;
     }
     if (g_src.hz < 8000 || g_src.hz > 192000) {
         logLine("%s: a rate of %d Hz", path, g_src.hz);
@@ -381,8 +392,8 @@ static void writeStatus(void) {
     static char text[1024];
     const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : 0;
     fmt(text, sizeof(text),
-        "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\nfile=%s\nbeat_ms=%lu\n",
-        SC_BGM_PROTOCOL, stateName(g_state), g_index, g_count, (uint64_t)posMs,
+        "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\ndur_ms=%lu\nfile=%s\nbeat_ms=%lu\n",
+        SC_BGM_PROTOCOL, stateName(g_state), g_index, g_count, (uint64_t)posMs, g_src.durMs,
         g_count ? g_tracks[g_index] : "", (uint64_t)(sysNowUs() / 1000u));
     writeText(SC_BGM_STATUS, text);
     g_lastStatus = sysNowUs();

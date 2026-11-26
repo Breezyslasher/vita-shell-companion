@@ -23,6 +23,9 @@
  *   mcw.off        if there, nothing is hooked (for a PS4 that misbehaves)
  *   mcw-names.txt  if there, the functions to hook instead, one a line
  *   mcw.quiet      while there, nothing is logged (the hooks stay)
+ *   mcw-fake.txt   while there, and our player (sc_bgm) plays, the quick menu
+ *                  is answered for it (fakeApply): its first word is the
+ *                  title the answers name, SCMP00001 (the test app) if none
  *   mcw.carve      when it appears (the test app's DOWN), the .NET assemblies
  *                  in the shell's memory are copied to shell/, then it is
  *                  deleted
@@ -261,6 +264,150 @@ static void hookCallback(const Hook* via, int arg, uint64_t fn) {
     say("   hooking %s: %s%s", h->name, rc == 0 ? "hooked" : "not hooked: ", why);
 }
 
+// ── Answering the quick menu for our player (mcw-fake.txt) ───────────────────
+//
+// As the USB Music Player is answered (README, "the protocol"), after the
+// real call: GetPlayStatus's 0x70 bytes with our player's state, length and
+// position and a title of our choosing; GetEvent's event 2 ("look again")
+// when that changes and once a second; PlayControl's play (1) and pause
+// (3) sent to our player as its cmd file. Only while mcw-fake.txt is there
+// and our player has a track, playing or paused.
+
+#define FAKE SC_BGM_DIR "/mcw-fake.txt"
+static struct {
+    volatile int active;
+    volatile uint32_t state;  // 2 playing, 3 paused
+    volatile uint64_t durS, posS;
+    volatile int event;  // event 2 owed to the next GetEvent
+    char title[16];
+} g_fake;
+
+static int eq(const char* a, const char* b) {
+    while (*a && *a == *b) a++, b++;
+    return *a == *b;
+}
+
+// key=value's value from status.txt's text, or "".
+static void statusField(const char* text, const char* key, char* out, size_t cap) {
+    const size_t n = strlen(key);
+    out[0] = 0;
+    for (const char* p = text; *p;) {
+        if (memcmp(p, key, n) == 0 && p[n] == '=') {
+            p += n + 1;
+            size_t k = 0;
+            while (*p && *p != '\n' && k + 1 < cap) out[k++] = *p++;
+            out[k] = 0;
+            return;
+        }
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+}
+
+static uint64_t toU64(const char* s) {
+    uint64_t v = 0;
+    while (*s >= '0' && *s <= '9') v = v * 10 + (uint64_t)(*s++ - '0');
+    return v;
+}
+
+static void fakeRefresh(void) {
+    static char text[1024];
+    char v[64];
+    int on = 0;
+    int fd = sysOpen(FAKE, SC_O_RDONLY, 0);
+    if (fd >= 0) {
+        const int n = sysRead(fd, v, sizeof(v) - 1);
+        sysClose(fd);
+        v[n > 0 ? n : 0] = 0;
+        size_t k = 0;
+        for (const char* p = v; *p && *p != '\n' && *p != '\r' && *p != ' ' && k < 15; p++)
+            g_fake.title[k++] = *p;
+        if (!k) memcpy(g_fake.title, "SCMP00001", (k = 9));
+        g_fake.title[k] = 0;
+        fd = sysOpen(SC_BGM_STATUS, SC_O_RDONLY, 0);
+        if (fd >= 0) {
+            const int m = sysRead(fd, text, sizeof(text) - 1);
+            sysClose(fd);
+            text[m > 0 ? m : 0] = 0;
+            statusField(text, "beat_ms", v, sizeof(v));
+            const uint64_t beat = toU64(v), now = sysNowUs() / 1000u;
+            statusField(text, "state", v, sizeof(v));
+            const uint32_t state = eq(v, "playing") ? 2 : eq(v, "paused") ? 3 : 0;
+            on = state && beat && now >= beat && now - beat < 4000;
+            if (on) {
+                statusField(text, "pos_ms", v, sizeof(v));
+                const uint64_t pos = toU64(v) / 1000u;
+                statusField(text, "dur_ms", v, sizeof(v));
+                g_fake.durS = toU64(v) / 1000u;
+                if (state != g_fake.state || pos != g_fake.posS || !g_fake.active) g_fake.event = 1;
+                if (state != g_fake.state || !g_fake.active)
+                    say("fake: answering for our player as %s: %s, %lu of %lu s", g_fake.title,
+                        state == 2 ? "playing" : "paused", pos, g_fake.durS);
+                g_fake.state = state;
+                g_fake.posS = pos;
+            }
+        }
+    }
+    if (!on && g_fake.active) {
+        say("fake: off (%s)", fd >= 0 || sysExists(FAKE) ? "our player has no track" : "no mcw-fake.txt");
+        g_fake.event = 1;
+    }
+    g_fake.active = on;
+}
+
+static void put32At(uint8_t* p, size_t at, uint32_t v) {
+    memcpy(p + at, &v, 4);
+}
+static void put64At(uint8_t* p, size_t at, uint64_t v) {
+    memcpy(p + at, &v, 8);
+}
+
+static void sendPlayer(const char* cmd) {
+    const int fd = sysOpen(SC_BGM_CMD, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    if (fd >= 0) {
+        sysWrite(fd, cmd, strlen(cmd));
+        sysClose(fd);
+    }
+}
+
+// After the real call, before it is logged: the answer changed for ours.
+static void fakeApply(Frame* f) {
+    if (!g_fake.active) return;
+    const Hook* h = f->hook;
+    if (eq(h->name, "GetPlayStatus")) {
+        uint8_t* p = (uint8_t*)(uintptr_t)f->gpr[0];
+        if (hookReadable(p, 0x70) < 0x70 || !(hookProt(p) & 2)) return;
+        memset(p, 0, 0x70);
+        put32At(p, 0x04, g_fake.state);
+        put32At(p, 0x08, 100);
+        put64At(p, 0x10, g_fake.durS);
+        put64At(p, 0x18, g_fake.posS);
+        put32At(p, 0x2C, 1);
+        put32At(p, 0x30, 0x8000);
+        put32At(p, 0x44, 1);
+        put32At(p, 0x48, 0xFFFFFFFEu);  // the core's id, as the USB Music Player's
+        put32At(p, 0x54, 1);
+        put32At(p, 0x58, 1);
+        memcpy(p + 0x60, g_fake.title, 16);
+        f->retRax = 0;
+    } else if (eq(h->name, "GetEvent")) {
+        uint8_t* p = (uint8_t*)(uintptr_t)f->gpr[0];
+        if ((uint32_t)f->retRax != 0x80FD0014u || !g_fake.event) return;
+        if (hookReadable(p, 4) < 4 || !(hookProt(p) & 2)) return;
+        g_fake.event = 0;
+        put32At(p, 0, 2);
+        f->retRax = 0;
+    } else if (eq(h->name, "PlayControl")) {
+        const uint32_t cmd = (uint32_t)f->gpr[1];
+        say("fake: PlayControl command %u (core %d): %s", cmd, (int32_t)f->gpr[0],
+            cmd == 1 ? "play" : cmd == 3 ? "pause" : "not known yet, nothing sent");
+        if (cmd == 1) sendPlayer("play\n");
+        if (cmd == 3) sendPlayer("pause\n");
+        g_fake.event = 1;
+        f->retRax = 0;
+    }
+}
+
 void mcwPre(Frame* f) {
     f->t0 = sysNowUs();
     Hook* h = f->hook;
@@ -282,6 +429,7 @@ void mcwPre(Frame* f) {
 }
 
 void mcwPost(Frame* f) {
+    fakeApply(f);
     if (g_quiet) return;
     Hook* h = f->hook;
     const uint64_t us = sysNowUs() - f->t0;
@@ -732,6 +880,7 @@ static void* watchMain(void* arg) {
     memset(lastCalls, 0, sizeof(lastCalls));
     for (;;) {
         sysSleepMs(200);
+        fakeRefresh();
         const uint64_t now = sysNowUs();
         if (now - lastSummary >= 10000000u) {
             lastSummary = now;

@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.30"
+#define APP_VERSION "0.31"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -91,6 +91,7 @@ int scePadReadState(int handle, OrbisPadData* data);
 #define ORBIS_VIDEO_OUT_BUS_MAIN 0
 #define ORBIS_VIDEO_OUT_FLIP_VSYNC 1
 #define ORBIS_PAD_BUTTON_OPTIONS 0x0008
+#define ORBIS_PAD_BUTTON_R3 0x0004
 #define ORBIS_PAD_BUTTON_UP 0x0010
 #define ORBIS_PAD_BUTTON_DOWN 0x0040
 #define ORBIS_PAD_BUTTON_RIGHT 0x0020
@@ -825,6 +826,9 @@ static void draw(void) {
     y += LINE;
     text(x, y, FG, "DOWN   copy the shell's .NET code to ShellCompanion/ps4/shell (UP first)");
     y += LINE;
+    textf(x, y, FG, "R3     quick menu answers for our player (mcw-fake.txt): %s",
+          access(SC_BGM_DIR "/mcw-fake.txt", F_OK) == 0 ? "ON" : "off");
+    y += LINE;
     text(x, y, DIM, "Leave with the PS button: the music should keep playing.");
     y += LINE * 2;
 
@@ -1112,6 +1116,17 @@ int main(void) {
             if (copyFromPackage("sc_mps.prx", "/user/data/GoldHEN/plugins/sc_mps.prx") == 0 &&
                 shellLoad("/user/data/GoldHEN/plugins/sc_mps.prx"))
                 say("Music service probe in the shell: open the quick menu when it says so");
+        }
+        if (down & ORBIS_PAD_BUTTON_R3) {
+            // The watch answers the quick menu for our player while this
+            // file is there (ps4/mcw, fakeApply): as the test app.
+            if (access(SC_BGM_DIR "/mcw-fake.txt", F_OK) == 0) {
+                unlink(SC_BGM_DIR "/mcw-fake.txt");
+                say("Quick menu answers: off");
+            } else {
+                writeFile(SC_BGM_DIR "/mcw-fake.txt", "SCMP00001\n", 10);
+                say("Quick menu answers: on, as SCMP00001. Play, then open the quick menu");
+            }
         }
         if (down & ORBIS_PAD_BUTTON_DOWN) {
             // On disk the shell's code is encrypted (0.29's list): the watch,

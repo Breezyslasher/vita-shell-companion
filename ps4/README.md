@@ -187,6 +187,25 @@ started. **`GetPlayStartCondition(titleId, out*)`**: called from the
 Library's option menu with a game's title (`CUSA01780`): `out` `00 01 01 00`,
 whether music may play on in that game, it seems.
 
+### Answering the quick menu for our player (0.31, an experiment)
+
+With `mcw-fake.txt` there (the test app's R3 makes and removes it), while our
+player has a track, the watch changes three answers after the real call, as
+the USB Music Player's were:
+
+- **GetPlayStatus**: state (2 playing, 3 paused), length and position in
+  seconds (our player's `status.txt` now has `dur_ms`), core id -2, and the
+  file's first word as the title (`SCMP00001`, the test app, by default;
+  `NPXS20117` would claim to be the USB Music Player).
+- **GetEvent**: event 2 when that changes, and once a second, if the real
+  call had none.
+- **PlayControl**: 1 play and 3 pause, sent to our player's `cmd`; anything
+  else is logged, not sent.
+
+The questions: does the test app's quick menu entry show music controls?
+Does the Music section change? The log has a `fake:` line for each change
+and each button.
+
 ### The USB Music Player is NPXS20117
 
 `/system_ex/app/NPXS20117/sce_sys/param.sfo` says TITLE "USB Music Player",
