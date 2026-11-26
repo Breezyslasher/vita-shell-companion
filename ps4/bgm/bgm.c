@@ -63,6 +63,18 @@ static int g_state = ST_STOPPED;
 // The volume, 0 to 32768 (0 dB): the quick menu's, through the music watch
 // (volume=<n> as cmd).
 static int32_t g_volume = 32768;
+// Repeat (0 none, 1 all, 2 one) and shuffle (0, 1), as the quick menu sets
+// them (repeat=<n>, shuffle=<n> as cmd).
+static int g_repeat, g_shuffle;
+static int g_played;  // tracks played since the queue began, for shuffle
+static uint32_t g_rand = 0x9E3779B9u;
+
+static int otherTrack(void) {
+    if (g_count < 2) return g_index;
+    g_rand = g_rand * 1664525u + 1013904223u + (uint32_t)sysNowUs();
+    const int r = (int)((g_rand >> 8) % (uint32_t)(g_count - 1));
+    return r >= g_index ? r + 1 : r;
+}
 
 // ---- a source: a whole file in memory, decoded a frame at a time ----
 
@@ -514,10 +526,10 @@ static void writeStatus(void) {
     const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : 0;
     fmt(text, sizeof(text),
         "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\ndur_ms=%lu\nfile=%s\nbeat_ms=%lu\n"
-        "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\nvolume=%d\n",
+        "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\nvolume=%d\nrepeat=%d\nshuffle=%d\n",
         SC_BGM_PROTOCOL, stateName(g_state), g_index, g_count, (uint64_t)posMs, g_src.durMs,
         g_count ? g_tracks[g_index] : "", (uint64_t)(sysNowUs() / 1000u), g_meta.title,
-        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen, (int)g_volume);
+        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen, (int)g_volume, g_repeat, g_shuffle);
     writeText(SC_BGM_STATUS, text);
     g_lastStatus = sysNowUs();
 }
@@ -601,7 +613,7 @@ static void runCommand(const char* text, int n) {
     } else if (IS("next") || IS("prev")) {
         if (!g_count) return;
         const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : 0;
-        if (IS("next")) g_index = g_index + 1 < g_count ? g_index + 1 : 0;
+        if (IS("next")) g_index = g_shuffle ? otherTrack() : g_index + 1 < g_count ? g_index + 1 : 0;
         else if (posMs < 3000) g_index = g_index > 0 ? g_index - 1 : g_count - 1;
         // (prev after 3 s starts the track again, as players do)
         if (g_state == ST_STOPPED) g_state = ST_PAUSED;
@@ -615,6 +627,11 @@ static void runCommand(const char* text, int n) {
         stop("reloading");
         loadQueue();
         if (was != ST_STOPPED && openTrack()) g_state = ST_PLAYING;
+    } else if (n > 7 && !memcmp(text, "repeat=", 7)) {
+        g_repeat = text[7] == '1' ? 1 : text[7] == '2' ? 2 : 0;
+    } else if (n > 8 && !memcmp(text, "shuffle=", 8)) {
+        g_shuffle = text[8] == '1';
+        g_played = 0;
     } else if (n > 7 && !memcmp(text, "volume=", 7)) {
         int32_t v = 0;
         for (int i = 7; i < n && text[i] >= '0' && text[i] <= '9'; i++) v = v * 10 + (text[i] - '0');
@@ -683,10 +700,21 @@ static void* player(void* arg) {
         const int frames = rsFill(g_out);
         if (frames > 0) g_aoOutput(g_port, g_out);
         if (frames < GRAIN) {
-            // The track ended: the next, or the end of the queue.
-            g_index++;
-            if (!openTrack()) {
+            // The track ended: again (repeat one), another (shuffle), the
+            // next; past the end, the first (repeat all) or the end.
+            g_played++;
+            int ended = 0;
+            if (g_repeat == 2) {
+            } else if (g_shuffle) {
+                if (g_played >= g_count && !g_repeat) ended = 1;
+                else g_index = otherTrack();
+            } else if (++g_index >= g_count) {
+                if (g_repeat) g_index = 0;
+                else ended = 1;
+            }
+            if (ended || !openTrack()) {
                 g_index = 0;
+                g_played = 0;
                 stop("the end of the queue");
                 notify("Background music: the queue has ended");
             }

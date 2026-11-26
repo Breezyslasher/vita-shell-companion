@@ -23,9 +23,9 @@
  *   mcw.off        if there, nothing is hooked (for a PS4 that misbehaves)
  *   mcw-names.txt  if there, the functions to hook instead, one a line
  *   mcw.quiet      while there, nothing is logged (the hooks stay)
- *   mcw-fake.txt   while there, and our player (sc_bgm) plays, the quick menu
- *                  is answered for it (fakeApply): its first word is the
- *                  title the answers name, SCMP00001 (the test app) if none
+ *   mcw-fake.txt   while our player (sc_bgm) has a track, the quick menu is
+ *                  answered for it (fakeApply) unless this says off; its
+ *                  first word is the title, SCMP00001 (the test app) if none
  *   mcw.carve      when it appears (the test app's DOWN), the .NET assemblies
  *                  in the shell's memory are copied to shell/, then it is
  *                  deleted
@@ -315,6 +315,7 @@ static struct {
     volatile uint64_t durS, posS;
     volatile uint32_t index, count;
     volatile uint32_t volume;  // 0 to 32768, as the quick menu sets it
+    volatile uint32_t repeat, shuffle;  // SceMusicCoreRepeatMode, SceMusicCoreShuffle
     volatile uint32_t owed;  // events owed: 1 << type
     char title[16];
     // The track, under a lock: the watch's thread writes, the shell's read.
@@ -359,11 +360,17 @@ static void fakeRefresh(void) {
     static char text[2048];
     char v[320];
     int on = 0;
+    // On unless mcw-fake.txt says off; its first word, else SCMP00001, the
+    // title (0.35 and before: off unless the file was there).
     int fd = sysOpen(FAKE, SC_O_RDONLY, 0);
+    v[0] = 0;
     if (fd >= 0) {
         const int n = sysRead(fd, v, 64);
         sysClose(fd);
         v[n > 0 ? n : 0] = 0;
+    }
+    fd = -1;
+    if (!(v[0] == 'o' && v[1] == 'f' && v[2] == 'f')) {
         char title[16];
         size_t k = 0;
         for (const char* p = v; *p && *p != '\n' && *p != '\r' && *p != ' ' && k < 9; p++)
@@ -403,6 +410,13 @@ static void fakeRefresh(void) {
             g_fake.count = (uint32_t)toU64(v);
             statusField(text, "volume", v, sizeof(v));
             if (v[0]) g_fake.volume = (uint32_t)toU64(v);
+            statusField(text, "repeat", v, sizeof(v));
+            const uint32_t repeat = (uint32_t)toU64(v);
+            statusField(text, "shuffle", v, sizeof(v));
+            const uint32_t shuffle = (uint32_t)toU64(v);
+            if (repeat != g_fake.repeat || shuffle != g_fake.shuffle) owe(EV_PLAY_STATUS);
+            g_fake.repeat = repeat;
+            g_fake.shuffle = shuffle;
             statusField(text, "file", v, sizeof(v));
             if (!g_fake.active || !eq(v, g_fake.file)) {
                 lock(&g_fake.lock);
@@ -444,7 +458,7 @@ static void fakeRefresh(void) {
         }
     }
     if (!on && g_fake.active) {
-        say("fake: off (%s)", sysExists(FAKE) ? "our player has no track" : "no mcw-fake.txt");
+        say("fake: off (%s)", fd >= 0 ? "our player has no track" : "mcw-fake.txt says off");
         g_fake.owed = 1u << EV_CORE_KILLED;
     }
     g_fake.active = on;
@@ -504,9 +518,8 @@ static void fakeApply(Frame* f) {
         putStr(p, CI_SCHEME, 32, "customcore");
         putStr(p, CI_TITLE, 10, g_fake.title);
         put32At(p, CI_CONTENT, 0);  // music
+        // next, previous, shuffle, repeat, playback time, duration: all ours
         for (int i = 0; i < 6; i++) put32At(p, CI_CONTENT + 4 + 4 * (size_t)i, 1);
-        put32At(p, CI_CONTENT + 4 + 8, 0);   // shuffle: not ours yet
-        put32At(p, CI_CONTENT + 4 + 12, 0);  // repeat: not ours yet
         f->retRax = 0;
     } else if (eq(h->name, "GetPlayStatus")) {
         uint8_t* p = outBuf(f, 0, PS_SIZE);
@@ -520,8 +533,10 @@ static void fakeApply(Frame* f) {
         put32At(p, 0x28, g_fake.index);  // current play index
         put32At(p, 0x2C, g_fake.count);
         put32At(p, 0x30, g_fake.volume ? g_fake.volume : 0x8000);  // volume, 0x8000 0 dB
-        // mute, repeat, auto play, BGM status, shuffle, the GUID: 0
-        put32At(p, 0x58, g_fake.index + 1 < g_fake.count ? 0 : 1);  // 0 can skip next
+        put32At(p, 0x38, g_fake.repeat);   // 0 none, 1 all, 2 one
+        put32At(p, 0x44, g_fake.shuffle);  // mute, auto play, BGM status, the GUID: 0
+        // 0: can skip next (our player wraps round, or picks another)
+        put32At(p, 0x58, (g_fake.index + 1 < g_fake.count || g_fake.repeat || g_fake.shuffle) ? 0 : 1);
         put32At(p, 0x5C, 0);                                          // can skip previous
         putStr(p, 0x60, 10, g_fake.title);
         f->retRax = 0;
@@ -576,7 +591,19 @@ static void fakeApply(Frame* f) {
         owe(EV_PLAY_STATUS);
         f->retRax = 0;
     } else if (eq(h->name, "SetShuffle") || eq(h->name, "SetRepeatMode")) {
-        say("fake: %s(%lu): not ours yet", h->name, f->gpr[0]);
+        // SetShuffle(0 off, 1 on); SetRepeatMode(0 none, 1 all, 2 one)
+        const uint32_t v = (uint32_t)f->gpr[0];
+        char cmd[32];
+        if (eq(h->name, "SetShuffle")) {
+            fmt(cmd, sizeof(cmd), "shuffle=%u\n", v ? 1u : 0u);
+            g_fake.shuffle = v ? 1 : 0;
+        } else {
+            fmt(cmd, sizeof(cmd), "repeat=%u\n", v > 2 ? 0u : v);
+            g_fake.repeat = v > 2 ? 0 : v;
+        }
+        say("fake: %s(%u)", h->name, v);
+        sendPlayer(cmd);
+        owe(EV_PLAY_STATUS);
         f->retRax = 0;
     }
 }

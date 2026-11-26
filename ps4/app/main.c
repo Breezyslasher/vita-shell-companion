@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.35"
+#define APP_VERSION "0.36"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -785,6 +785,17 @@ static void readLogTail(void) {
 
 static int g_portType;
 
+// Whether mcw-fake.txt says off: the watch answers the quick menu for our
+// player otherwise.
+static int fakeOff(void) {
+    char t[8] = {0};
+    FILE* f = fopen(SC_BGM_DIR "/mcw-fake.txt", "r");
+    if (!f) return 0;
+    const size_t n = fread(t, 1, 3, f);
+    fclose(f);
+    return n == 3 && !memcmp(t, "off", 3);
+}
+
 static void draw(void) {
     fill(0, 0, W, H, BG);
     int y = 60;
@@ -827,7 +838,7 @@ static void draw(void) {
     text(x, y, FG, "DOWN   copy the shell's .NET code to ShellCompanion/ps4/shell (UP first)");
     y += LINE;
     textf(x, y, FG, "R3     quick menu answers for our player (mcw-fake.txt): %s",
-          access(SC_BGM_DIR "/mcw-fake.txt", F_OK) == 0 ? "ON" : "off");
+          fakeOff() ? "off" : "ON");
     y += LINE;
     text(x, y, DIM, "Leave with the PS button: the music should keep playing.");
     y += LINE * 2;
@@ -1120,8 +1131,9 @@ int main(void) {
         if (down & ORBIS_PAD_BUTTON_R3) {
             // The watch answers the quick menu for our player while this
             // file is there (ps4/mcw, fakeApply): as the test app.
-            if (access(SC_BGM_DIR "/mcw-fake.txt", F_OK) == 0) {
-                unlink(SC_BGM_DIR "/mcw-fake.txt");
+            // On unless the file says off (from 0.36).
+            if (!fakeOff()) {
+                writeFile(SC_BGM_DIR "/mcw-fake.txt", "off\n", 4);
                 say("Quick menu answers: off");
             } else {
                 writeFile(SC_BGM_DIR "/mcw-fake.txt", "SCMP00001\n", 10);

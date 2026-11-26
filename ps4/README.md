@@ -207,6 +207,21 @@ with `CUSA01780` in `mcw-fake.txt`, but 0.34 read the title only when our
 player became the core, so the shell was never told: from 0.35 a new title
 is announced at once (core ready, track, status).
 
+### 0.36: on by default; shuffle and repeat
+
+The watch answers the quick menu for our player whenever it has a track,
+unless `mcw-fake.txt` says `off` (R3 toggles it). Shuffle and repeat are
+ours: `SetShuffle` and `SetRepeatMode` go to our player (`shuffle=<0|1>`,
+`repeat=<0|1|2>` as `cmd`), which at a track's end plays it again (repeat
+one), another at random (shuffle; once through the queue unless repeat), the
+next, or from the first (repeat all); GetPlayStatus reports both.
+
+The Music section (Spotify's panel) asked for a PSN sign-in with our player
+announced as `CUSA01780` (0.35), but only for a second: 0.35's R3 removed
+`mcw-fake.txt`, so it fell back to `SCMP00001`. The panel called nothing of
+the music server's while it showed "Sign in" (no GetSpTrackInfo, no
+GetCoreInfo of its own), which suggests the sign-in check comes first.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
