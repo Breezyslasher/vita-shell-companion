@@ -265,6 +265,14 @@ service's are, not the managed wrappers 0.85 hooked.
   1 s); one of its states is Downloading_DataSizeUnknown, and ours were
   registered with size 0 (packages with their header's size). 1.23 gets a
   url item's size by HEAD before registering it (logged).
+- **1.23 on the PS4:** each song was registered with its size (by HEAD),
+  and the list still read "Calculating..." where a time left goes (the
+  bars, full, read our bytes). Guessing the list's rules from outside has
+  cost many builds: 1.24's debug build (CI artifact `ps4-debug-N`, SC_DEBUG)
+  dumps the Downloads list's own compiled code (DownloadItemBehavior,
+  DownloadItemBase, DownloadProgressBar, ..., BgftWrapper, TaskParam,
+  DownloadItemAccessor2) to `code/methods4.map` and `code/code4.bin`, each
+  method's calls named and the strings it loads (`str` lines), to read.
 
 ### One module, and the cleanup (0.95)
 

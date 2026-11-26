@@ -89,3 +89,16 @@ jobs:
             docs/PS4.md
             ps4/README.md
             NOTICE.txt
+      # The same with the debugging aids (SC_DEBUG=1: the code dump, ...),
+      # its own artifact, for research only.
+      - name: Build the debug module and test app (SC_DEBUG=1)
+        run: |
+          export OO_PS4_TOOLCHAIN="$RUNNER_TEMP/oo-goldhen/OpenOrbis/PS4Toolchain"
+          export CREATE_FSELF="$OO_PS4_TOOLCHAIN/bin/linux/create-fself"
+          SC_DEBUG=1 OUT=build-ps4-debug sh ps4/app/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ps4-debug-${{ github.run_number }}
+          path: |
+            build-ps4-debug/*.pkg
+            build-ps4-debug/*.prx

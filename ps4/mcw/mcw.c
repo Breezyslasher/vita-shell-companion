@@ -2340,8 +2340,8 @@ static uint64_t followStub(uint64_t t) {
 }
 
 static void codeDump(void* domain, void* imageLoaded, void* classFromName, void* compile) {
-    if (sysExists(CODE_DIR "/methods3.map")) {
-        say("code: code/methods3.map is there already: not again");
+    if (sysExists(CODE_DIR "/methods4.map")) {
+        say("code: code/methods4.map is there already: not again");
         return;
     }
     if (!g_dump.methods || !g_dump.fullName || !g_dump.jitFind || !g_dump.jitStart ||
@@ -2376,29 +2376,36 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
         skips[n > 0 ? n : 0] = 0;
         sysClose(fd);
     }
-    const int map = sysOpen(CODE_DIR "/methods3.map.new", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
-    const int bin = sysOpen(CODE_DIR "/code3.bin", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    const int map = sysOpen(CODE_DIR "/methods4.map.new", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    const int bin = sysOpen(CODE_DIR "/code4.bin", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
     if (map < 0 || bin < 0) return;
-    static const char* const want[][2] = {
-        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicPanel"},
-        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayListPanel"},
-        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayListPanelItem"},
-        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayListMenuData"},
-        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "PlayStationMusicContext"},
-        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "MusicPlayerPanel"},
-        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "ControlPanel"},
-        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListPanel"},
-        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuData"},
-        {"Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuPanel"},
-        {"Sce.Vsh.ShellUI.QuickMenu", "UserContext"},
-        {"Sce.Vsh.ShellUI.QuickMenu", "AppBrowseItemData"},
-        {"Sce.Vsh.ShellUI.QuickMenu", "DirectPlayback"},
-        // What a track chosen asks (0.56): PlaySpotifyUri, and what it checks.
-        {"Sce.Vsh.ShellUI.MusicCoreServer", "MusicCoreServerController"},
-        {"Sce.Vsh.ShellUI.MusicCoreServer", "MusicCoreServerControllerImpl"},
-        {"Sce.Vsh.ShellUI.MusicCoreServer", "MusicCoreServerControllerStorage"},
+    // 1.24: the Downloads list's own code, to read what it shows for a task
+    // (what reads "Calculating...", "Preparing to download...", a percent,
+    // time left) instead of guessing it from outside. {image, namespace,
+    // class}. (0.49-0.57 dumped the Music section's: code3.bin.)
+    static const char* const want[][3] = {
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadItemBehavior"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadItemBase"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadItem"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadProgressBar"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadItemParam"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadTaskInfo"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadTaskInfoEx"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadItemSource"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadSummaryItem"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadSummaryAccessor"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "BgftUtil"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "BgftTabManagerBase"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadTabManager"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "PollingTask"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "TaskParam"},
+        {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "DownloadItemAccessor2"},
+        {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "NotificationDbAccessor"},
     };
-    void* image = ((FnMonoName)imageLoaded)("app");
+    // The string class, to name the strings a method loads (msg_... ids).
+    void* corlib = ((FnMonoName)imageLoaded)("mscorlib");
+    void* stringClass = corlib ? ((FnMonoClass)classFromName)(corlib, "System", "String") : NULL;
     uint64_t at = 0;
     int methods = 0, calls = 0;
     // The classes, and those nested in them (lambdas, display classes, async
@@ -2406,12 +2413,13 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
     static void* classes[256];
     static char names[256][160];
     int nClasses = 0;
-    for (size_t k = 0; image && k < sizeof(want) / sizeof(want[0]) && nClasses < 256; k++) {
-        void* klass = ((FnMonoClass)classFromName)(image, want[k][0], want[k][1]);
-        dumpPut(map, "class %s.%s %p", want[k][0], want[k][1], klass);
+    for (size_t k = 0; k < sizeof(want) / sizeof(want[0]) && nClasses < 256; k++) {
+        void* image = ((FnMonoName)imageLoaded)(want[k][0]);
+        void* klass = image ? ((FnMonoClass)classFromName)(image, want[k][1], want[k][2]) : NULL;
+        dumpPut(map, "class %s.%s (%s) %p", want[k][1], want[k][2], want[k][0], klass);
         if (!klass) continue;
         const int top = nClasses;
-        fmt(names[nClasses], sizeof(names[0]), "%s", want[k][1]);
+        fmt(names[nClasses], sizeof(names[0]), "%s", want[k][2]);
         classes[nClasses++] = klass;
         for (int level = 0; level < 2; level++) {
             const int end = nClasses;
@@ -2500,6 +2508,22 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
                     dumpName(domain, real, name, sizeof(name));
                     dumpPut(map, "  call +0x%x %lx %s", (unsigned)o, real, name[0] ? name : "?");
                     calls++;
+                } else if (stringClass && (hs.flags & F_MODRM) && hs.modrm_mod == 0 && hs.modrm_rm == 5) {
+                    // A rip-relative slot holding a string (ldstr): its text,
+                    // only once its object's class is checked to be String.
+                    const uint64_t* slot = (const uint64_t*)(uintptr_t)(end + (int64_t)(int32_t)hs.disp.disp32);
+                    if (hookReadable(slot, 8) == 8) {
+                        const uint64_t v = *slot;
+                        const void* const* obj = (const void* const*)(uintptr_t)v;
+                        if (v > 0x10000 && hookReadable(obj, 16) == 16) {
+                            const void* const* vt = (const void* const*)obj[0];
+                            if ((uintptr_t)vt > 0x10000 && hookReadable(vt, 8) == 8 && vt[0] == stringClass) {
+                                char text[160];
+                                monoText(v, text, sizeof(text));
+                                dumpPut(map, "  str +0x%x \"%s\"", (unsigned)o, text);
+                            }
+                        }
+                    }
                 }
                 o += (int)len;
             }
@@ -2512,10 +2536,10 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
     sysClose(bin);
     sysClose(map);
     sysUnlink(CODE_DIR "/dumping");
-    sysRename(CODE_DIR "/methods3.map.new", CODE_DIR "/methods3.map");
-    say("code: %d methods, %lu bytes, %d calls named: code/methods3.map and code/code3.bin",
+    sysRename(CODE_DIR "/methods4.map.new", CODE_DIR "/methods4.map");
+    say("code: %d methods, %lu bytes, %d calls named: code/methods4.map and code/code4.bin",
         methods, at, calls);
-    notify("Music watch: the Music section's code is in ShellCompanion/ps4/code");
+    notify("Debug: the Downloads list's code is in ShellCompanion/ps4/code (methods4.map, code4.bin)");
 }
 
 #endif  // SC_DEBUG
