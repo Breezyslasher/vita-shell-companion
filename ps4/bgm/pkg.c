@@ -410,6 +410,13 @@ static int pkgItem(int i) {
     char where[MAX_PATH];
     fmt(where, sizeof(where), "%s%s", !memcmp(it->arg[0], "/data/", 6) ? "/user" : "", it->arg[0]);
     const int32_t task = pkgRegister(where, it->arg[1], it->title);
+    if (task == (int32_t)0x80990088) {
+        // 1.01's log: the same package (its content id, version and size)
+        // installed already, as the Downloads list's finished task for it
+        // showed. Nothing to do.
+        logLine("pkg: %s: installed already (0x80990088)", it->title);
+        return GET_DONE;
+    }
     if (task < 0) return task == -2 || task == -3 ? GET_GONE : GET_RETRY;
     it->task = task;
     dlStatus();

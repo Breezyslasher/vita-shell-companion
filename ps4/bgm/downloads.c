@@ -56,6 +56,8 @@ static struct {
 
 static uint8_t g_dlBuf[64 * 1024];
 
+static void dllRepair(void);  // dllist.c (1.02)
+
 // %XX back to its byte.
 static void dlDecode(char* s) {
     char* o = s;
@@ -192,6 +194,7 @@ static void dlStatus(void) {
     at += (size_t)fmt(text + at, sizeof(text) - at, "end\n");
     writeText(DL_STATUS, text);
     g_dls.lastStatus = sysNowUs();
+    dllRepair();  // placeholders the service failed, replaced (dllist.c, 1.02)
 }
 
 // Header lines ("Name: value", \r\n or \n between) added to the request.

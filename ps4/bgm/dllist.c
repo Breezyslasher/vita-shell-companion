@@ -52,6 +52,8 @@ static struct {
         uint32_t logged;
         uint32_t lastWas, lastSaid;  // the service's bits and ours, last logged (0.99)
         uint64_t lastParam;          // its param in the last query logged (0.99)
+        volatile int failed;         // the service failed it: to be replaced (1.02)
+        uint32_t tries;              // replaced so far
     } e[DLL_MAX];
     struct {
         int32_t task;
@@ -108,6 +110,7 @@ void dlListHook(Frame* f) {
         if (g_dll.e[k].task != task || task <= 0) continue;
         const uint32_t was = pr->bits;
         const int32_t err = pr->errorResult;
+        if (err && !g_dll.e[k].failed) g_dll.e[k].failed = 1;  // replaced by dllRepair (1.02)
         const int rc = (int)(int32_t)f->retRax;
         dllFill(k, pr);
         f->retRax = 0;
@@ -315,6 +318,72 @@ static void dllSave(void) {
     writeText(DLL_TASKS, text);
 }
 
+// One item's placeholder: registered, paused, its task (or <= 0).
+static int32_t dllRegister(int i) {
+    static uint32_t serial;
+    __typeof__(g_dls.item[0])* it = &g_dls.item[i];
+    // A content id of its own each time: XXYYYY-TITLEID_00-<16 letters and digits>.
+    char id[40];
+    fmt(id, sizeof(id), "IV0000-SCMP00001_00-SCDL%03u%09lu", serial++ % 1000,
+        (unsigned long)(sysNowUs() / 1000u % 1000000000u));
+    BgftParam p;
+    memset(&p, 0, sizeof(p));
+    p.userId = g_bgft.user;
+    p.entitlementType = 5;
+    p.id = id;
+    p.contentUrl = it->arg[0];
+    p.contentName = it->title[0] ? it->title : it->id;
+    p.iconPath = "";
+    p.playgoScenarioId = "0";
+    p.option = 0x10000;
+    p.packageType = "";
+    p.packageSubType = "";
+    p.packageSize = it->size;
+    int32_t task = -1;
+    const int rc = g_bgft.reg(&p, &task);
+    logLine("dllist: item %d (%s) registered: 0x%08X, task %d", i, p.contentName, (unsigned)rc, task);
+    if (rc < 0 || task <= 0) return -1;
+    // Paused at once (0.98): the service marked 0.97's failed within a
+    // second, never started. (Not always enough: 1.01's log, one failed
+    // 9 s later; dllRepair replaces it.)
+    if (g_dll.pause && !sysExists(SC_BGM_DIR "/dl-list-nopause")) {
+        BgftProgress pr;
+        memset(&pr, 0, sizeof(pr));
+        g_bgft.progress(task, &pr);
+        const uint32_t b0 = pr.bits;
+        const int32_t e0 = pr.errorResult;
+        const int prc = g_dll.pause(task);
+        memset(&pr, 0, sizeof(pr));
+        g_bgft.progress(task, &pr);
+        logLine("dllist: task %d: bits 0x%x error 0x%08X; paused 0x%08X; bits 0x%x error 0x%08X", task, b0,
+                (unsigned)e0, (unsigned)prc, pr.bits, (unsigned)pr.errorResult);
+    }
+    return task;
+}
+
+// Placeholders the service failed, replaced by new ones (1.02), on the
+// downloads' thread (dlStatus): at most 3 times each, so one the service
+// fails at once doesn't come back for ever.
+static void dllRepair(void) {
+    int changed = 0;
+    for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
+        if (!g_dll.e[k].failed) continue;
+        if (g_dll.e[k].tries >= 3) continue;
+        g_dll.e[k].tries++;
+        const int32_t old = g_dll.e[k].task;
+        const int32_t task = dllRegister(g_dll.e[k].item);
+        if (task <= 0) continue;
+        g_dll.e[k].lastParam = 0;
+        g_dll.e[k].logged = 0;
+        __atomic_store_n(&g_dll.e[k].task, task, __ATOMIC_RELEASE);
+        g_dll.e[k].failed = 0;
+        logLine("dllist: task %d failed by the service: replaced by task %d (try %u)", old, task, g_dll.e[k].tries);
+        dllUnregister(old);
+        changed = 1;
+    }
+    if (changed) dllSave();
+}
+
 // A list beginning: a placeholder for each of its url and pages items.
 static void dlListBegin(void) {
     g_dll.count = 0;
@@ -335,48 +404,18 @@ static void dlListBegin(void) {
         dllHex(text, "param-done", &g_dll.paramDone);
     }
     if (g_bgft.user == -1) bgftUser();
-    const uint64_t stamp = sysNowUs() / 1000u % 1000000000u;
     for (int i = 0; i < g_dls.count && g_dll.count < DLL_MAX; i++) {
         __typeof__(g_dls.item[0])* it = &g_dls.item[i];
         if (memcmp(it->kind, "url", 4) && memcmp(it->kind, "pages", 6)) continue;
-        // A content id of its own: XXYYYY-TITLEID_00-<16 letters and digits>.
-        char id[40];
-        fmt(id, sizeof(id), "IV0000-SCMP00001_00-SCDL%03d%09lu", i % 1000, (unsigned long)stamp);
-        BgftParam p;
-        memset(&p, 0, sizeof(p));
-        p.userId = g_bgft.user;
-        p.entitlementType = 5;
-        p.id = id;
-        p.contentUrl = it->arg[0];
-        p.contentName = it->title[0] ? it->title : it->id;
-        p.iconPath = "";
-        p.playgoScenarioId = "0";
-        p.option = 0x10000;
-        p.packageType = "";
-        p.packageSubType = "";
-        p.packageSize = it->size;
-        int32_t task = -1;
-        const int rc = g_bgft.reg(&p, &task);
-        logLine("dllist: item %d (%s) registered: 0x%08X, task %d", i, p.contentName, (unsigned)rc, task);
-        if (rc < 0 || task <= 0) continue;
-        // Paused at once (0.98): the service marked 0.97's failed within a
-        // second, never started.
-        if (g_dll.pause && !sysExists(SC_BGM_DIR "/dl-list-nopause")) {
-            BgftProgress pr;
-            memset(&pr, 0, sizeof(pr));
-            g_bgft.progress(task, &pr);
-            const uint32_t b0 = pr.bits;
-            const int32_t e0 = pr.errorResult;
-            const int prc = g_dll.pause(task);
-            memset(&pr, 0, sizeof(pr));
-            g_bgft.progress(task, &pr);
-            logLine("dllist: task %d: bits 0x%x error 0x%08X; paused 0x%08X; bits 0x%x error 0x%08X", task, b0,
-                    (unsigned)e0, (unsigned)prc, pr.bits, (unsigned)pr.errorResult);
-        }
+        const int32_t task = dllRegister(i);
+        if (task <= 0) continue;
         const int k = g_dll.count;
         g_dll.e[k].item = i;
         g_dll.e[k].t0 = g_dll.e[k].b0 = 0;
         g_dll.e[k].logged = 0;
+        g_dll.e[k].failed = 0;
+        g_dll.e[k].tries = 0;
+        g_dll.e[k].lastParam = 0;
         g_dll.e[k].task = task;
         __atomic_store_n(&g_dll.count, k + 1, __ATOMIC_RELEASE);
     }

@@ -95,6 +95,13 @@ service's are, not the managed wrappers 0.85 hooked.
   `0x10008261` (going, waiting) or `0x10008063` (done), written into the
   query's results array only, for our task ids; bits `0x18a` going,
   `0x188` done. `dl-list-bits.txt` takes `param-going=`, `param-done=`.
+- **1.01 on the PS4:** the query answered ours as real package tasks
+  (`10008261`, then `10008063` once done). One placeholder was still failed
+  by the service 9 s after it was paused (`0x80990033`, moved to section
+  5). 1.02 replaces a placeholder the service fails (seen in the progress
+  hook, replaced on the downloads' thread, up to 3 times each). The
+  package in the test list was installed already: registering it answered
+  `0x80990088`, now taken as done.
 
 ### One module, and the cleanup (0.95)
 
