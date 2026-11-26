@@ -91,7 +91,6 @@ static struct {
         uint64_t lastParam;          // its param in the last query logged (0.99)
         volatile int failed;         // the service failed it: to be replaced (1.02)
         uint32_t tries;              // replaced so far
-        int lastState;               // the item's state when last poked (1.12), -1 none
     } e[DLL_MAX];
     struct {
         int32_t task;
@@ -146,7 +145,7 @@ static void dllFill(int k, BgftProgress* pr) {
     // 1098: 0x38 "64 64"), and the list then shows it downloading, its bar
     // from the bytes; 0 reads "Preparing to download... (0%)", which 1.05
     // filled with the bytes' percent. 100 going and done, 0 waiting.
-    pr->preparingPercent = st == DLS_GOING || st == DLS_DONE ? 100 : 0;
+    pr->preparingPercent = st == DLS_GOING ? 100 : 0;  // finished: 0, as package 1099
     pr->restSec = pr->restSecTotal = st == DLS_DONE ? 0 : rest;
 }
 
@@ -288,6 +287,63 @@ void dlListQueryHook(Frame* f) {
                 logLine("dllist: section 5: %u of ours taken out of the failed ones", cnt - w);
                 *(uint32_t*)(uintptr_t)f->gpr[3] = w;
                 cnt = w;
+            }
+        }
+        // A finished one moves from section 3 (going) to the top of section
+        // 9 (finished), as the PS4's own do (1.13: packages 1078 and 1099
+        // left section 3 and came first in section 9 as 0x10008063, Stop/
+        // Download with every byte). The list builds its rows per section:
+        // ours, finished but still in section 3, read oddly whatever they
+        // answered.
+        if (h == &g_dll.query[1] && (f->gpr[2] == 3 || f->gpr[2] == 9) && count && cnt <= 960 &&
+            (hookProt(num) & 2)) {
+            const uint32_t max = (uint32_t)f->gpr[1] < 960 ? (uint32_t)f->gpr[1] : 960;
+            if (f->gpr[2] == 3 && cnt && hookReadable(res, (size_t)cnt * 8) == (size_t)cnt * 8 && (hookProt(res) & 2)) {
+                uint32_t w = 0;
+                for (uint32_t j = 0; j < cnt; j++) {
+                    int32_t id;
+                    memcpy(&id, res + j * 8, 4);
+                    int out = 0;
+                    for (int k = 0; k < count && k < DLL_MAX; k++) {
+                        const int i = g_dll.e[k].item;
+                        if (g_dll.e[k].task == id && id > 0 && i >= 0 && i < g_dls.count && g_dls.item[i].state == DLS_DONE)
+                            out = 1;
+                    }
+                    if (!out) {
+                        if (w != j) memmove((uint8_t*)res + w * 8, res + j * 8, 8);
+                        w++;
+                    }
+                }
+                if (w != cnt) {
+                    *(uint32_t*)(uintptr_t)f->gpr[3] = w;
+                    cnt = w;
+                }
+            } else if (f->gpr[2] == 9) {
+                // Ours finished, newest first, before the PS4's own.
+                int32_t add[DLL_MAX];
+                uint32_t n = 0;
+                for (int k = count - 1; k >= 0; k--) {
+                    const int i = g_dll.e[k].item;
+                    if (k >= DLL_MAX || g_dll.e[k].task <= 0 || i < 0 || i >= g_dls.count || g_dls.item[i].state != DLS_DONE)
+                        continue;
+                    int there = 0;
+                    for (uint32_t j = 0; j < cnt && hookReadable(res + j * 8, 8) == 8; j++) {
+                        int32_t id;
+                        memcpy(&id, res + j * 8, 4);
+                        if (id == g_dll.e[k].task) there = 1;
+                    }
+                    if (!there) add[n++] = g_dll.e[k].task;
+                }
+                if (n && cnt + n <= max && hookReadable(res, (size_t)(cnt + n) * 8) == (size_t)(cnt + n) * 8 &&
+                    (hookProt(res) & 2) && (hookProt(res + (cnt + n) * 8 - 1) & 2)) {
+                    if (cnt) memmove((uint8_t*)res + n * 8, res, (size_t)cnt * 8);
+                    for (uint32_t j = 0; j < n; j++) {
+                        memcpy((uint8_t*)res + j * 8, &add[j], 4);
+                        memset((uint8_t*)res + j * 8 + 4, 0, 4);  // its param, written below
+                    }
+                    cnt += n;
+                    *(uint32_t*)(uintptr_t)f->gpr[3] = cnt;
+                }
             }
         }
         if (cnt && cnt <= 960 && count && hookReadable(res, (size_t)cnt * 8) == (size_t)cnt * 8 &&
@@ -517,24 +573,6 @@ static int32_t dllRegister(int i) {
 // fails at once doesn't come back for ever.
 static void dllRepair(void) {
     int changed = 0;
-    // A placeholder whose item changed state is paused again (1.12): the
-    // list reads the query (state) only when told a task changed, while it
-    // asks progress every second; 1.11's list re-queried 3 times in 70 s,
-    // so rows mixed an old state with new progress ("Cannot download",
-    // "Calculating..." with a full bar). The PS4's own tasks tell it; ours
-    // never change. Whether pausing again tells it is what this tries.
-    for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
-        const int i = g_dll.e[k].item;
-        if (i < 0 || i >= g_dls.count || !g_dll.pause) continue;
-        const int st = g_dls.item[i].state;
-        if (st == g_dll.e[k].lastState) continue;
-        const int was = g_dll.e[k].lastState;
-        g_dll.e[k].lastState = st;
-        if (was < 0) continue;  // its first state: registered so
-        const int rc = g_dll.pause(g_dll.e[k].task);
-        logLine("dllist: task %d (item %d) %s -> %s: paused again 0x%08X", g_dll.e[k].task, i, g_dlStateName[was],
-                g_dlStateName[st], (unsigned)rc);
-    }
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
         if (!g_dll.e[k].failed) continue;
         if (g_dll.e[k].tries >= 3) continue;
@@ -582,10 +620,14 @@ static void dlListBegin(void) {
     // Complete with type 1 read "waiting" (1.05) or, with bit 20, "Queued
     // for downloading"; Stop/Download with type 1 "Cannot download"; Stop/
     // Complete and Run/Install nothing, a "?" icon.)
-    g_dll.bitsDone = 0x313;     // Package, Complete, Complete
+    // 1.13: finished ones go to section 9 (see dlListQueryHook) and answer
+    // as the PS4's own finished downloads there: Stop/Download with every
+    // byte, the param's type 3 (0x...63). (1.07 answered these in section 3:
+    // the music-note icon, no warning.)
+    g_dll.bitsDone = 0x308;     // Package, Stop, Download
     g_dll.paramGoing = 0x82c1;   // Download, Package, Run, Download
     g_dll.paramWaiting = 0x1c1;  // Download, Package, Ready, Standby (as registered)
-    g_dll.paramDone = 0x103c3;   // type 3, Package, Complete, Complete
+    g_dll.paramDone = 0x80c3;    // type 3, Package, Stop, Download (as 0x10008063)
     if (readText(SC_BGM_DIR "/dl-list-bits.txt", text, sizeof(text)) > 0) {
         if (dllHex(text, "going", &g_dll.bitsGoing)) g_dll.haveGoing = 1;
         dllHex(text, "waiting", &g_dll.bitsWaiting);
@@ -606,7 +648,6 @@ static void dlListBegin(void) {
         g_dll.e[k].logged = 0;
         g_dll.e[k].failed = 0;
         g_dll.e[k].tries = 0;
-        g_dll.e[k].lastState = -1;
         g_dll.e[k].lastParam = 0;
         g_dll.e[k].task = task;
         __atomic_store_n(&g_dll.count, k + 1, __ATOMIC_RELEASE);

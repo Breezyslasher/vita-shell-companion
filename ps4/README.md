@@ -175,6 +175,14 @@ service's are, not the managed wrappers 0.85 hooked.
   here, so a row mixes an old state with new progress. 1.12 pauses a
   placeholder again when its item changes state, logging the answer, to
   see whether that tells the list.
+- **1.12 on the PS4:** pausing again (`0x00000000` each time) did not
+  make the list ask again (its queries at 24, 48.7, 55.8, 83 s): removed.
+  The real installs logged earlier show the sequence: going in section 3
+  (`0x10008261`, Run/Download, preparing 100); installing `...8e`, then
+  `...93`; finished, out of section 3 and first in section 9 (`0x10008063`,
+  Stop/Download, every byte, preparing 0). Ours stayed in section 3 when
+  finished. 1.13 moves them: out of section 3's results, into the top of
+  section 9's (within the array's 960), answering `0x308`/`0x80c3`.
 
 ### One module, and the cleanup (0.95)
 
