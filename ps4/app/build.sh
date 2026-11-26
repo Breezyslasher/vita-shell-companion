@@ -14,9 +14,12 @@ SRC=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-build-ps4}
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
-TITLE="Shell Companion BGM Test"
-TITLE_ID=SCMP00001
-CONTENT_ID=IV0000-SCMP00001_00-SHELLCOMPBGM0001
+# Another title, as CI builds the second package (TITLE_ID=CUSA01780, the
+# title the Music section knows as Spotify's: the shell then finds "Spotify"
+# installed, ps4/README.md).
+TITLE=${TITLE:-"Shell Companion BGM Test"}
+TITLE_ID=${TITLE_ID:-SCMP00001}
+CONTENT_ID=${CONTENT_ID:-IV0000-SCMP00001_00-SHELLCOMPBGM0001}
 VERSION=01.00
 BIN=$OO/bin/linux
 # PkgTool is .NET; without ICU (outside the image) it wants this.
@@ -25,7 +28,7 @@ BIN=$OO/bin/linux
 OUT="$OUT" sh "$SRC/../bgm/build.sh"
 
 clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -Wall -Wextra -Werror \
-    -isysroot "$OO" -isystem "$OO/include" "-DSC_PRX_PATH=\"$OUT/sc_bgm.prx\"" \
+    -isysroot "$OO" -isystem "$OO/include" "-DSC_PRX_PATH=\"$OUT/sc_bgm.prx\"" "-DSC_TITLE_ID=\"$TITLE_ID\"" \
     -c "$SRC/main.c" -o "$OUT/app.o"
 ld.lld -m elf_x86_64 -pie --script "$OO/link.x" --eh-frame-hdr -o "$OUT/app.elf" "$OUT/app.o" \
     -L"$OO/lib" -lc -lkernel -lSceVideoOut -lScePad -lSceUserService -lSceSysmodule -lSceSystemService "$OO/lib/crt1.o"

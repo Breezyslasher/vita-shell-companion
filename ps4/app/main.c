@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.46"
+#define APP_VERSION "0.47"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -416,7 +416,10 @@ static int selfLoad(const char* path) {
     return rc == 0;
 }
 
-#define PKG_DIR "/mnt/sandbox/pfsmnt/SCMP00001-app0"
+#ifndef SC_TITLE_ID
+#define SC_TITLE_ID "SCMP00001"
+#endif
+#define PKG_DIR "/mnt/sandbox/pfsmnt/" SC_TITLE_ID "-app0"
 #define SHELL_SANDBOX "/mnt/sandbox/NPXS20001_000"
 
 // The module in the package (ps4/bgm/build.sh), and whether it loads into

@@ -373,6 +373,19 @@ linking page, but "Download Spotify" stayed beside it and X moved there:
 `NotifyAppVerChanged(float)` is hooked and its argument made 9.99 before the
 call, while `ebgm/` is there.
 
+### "Download Spotify" is the installed-apps list (0.46, 0.47)
+
+0.46 made the version 9.99 (`NotifyAppVerChanged(0.00) made 9.99`,
+`IsValidAppVer … made 9.99`) and "Download Spotify" stayed. The Music
+section's panel watches the installed apps for Spotify's entry
+(`UserContext.SpotifyAppBrowseItemData`, `OnMusicAppBrowseItemChanged`):
+none, so it offers the download, and X goes there.
+
+From 0.47 CI also builds the test app as `CUSA01780`
+(`IV0000-CUSA01780_00-SHELLCOMPANION00.pkg`, titled "Shell Companion"):
+installed, the shell finds an app with Spotify's title, ours. Uninstall it
+before installing Spotify's own app; they would share the title.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
