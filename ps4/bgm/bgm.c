@@ -1865,6 +1865,9 @@ static void runCommand(const char* text, int n) {
         int lib = 0;
         for (int i = save ? 10 : 12; i < n && text[i] >= '0' && text[i] <= '9'; i++) lib = lib * 10 + (text[i] - '0');
         plusPressed(save, lib);
+    } else if (IS("bgft_probe")) {
+        // An experiment (0.90): media through the PS4's download service.
+        probeStart();
     } else if (IS("update_start")) {
         // An app's own update, once it has gone (the client library's
         // scUpdateInstallPkg, 0.89): pkg.c.

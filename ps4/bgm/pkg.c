@@ -380,3 +380,144 @@ static int pkgItem(int i) {
     const int rc = pkgFollow(task, &it->bytes, &it->size, &g_dls.takeBack);
     return rc == 0 ? GET_DONE : rc == 1 ? GET_STOPPED : GET_RETRY;
 }
+
+// ── An experiment: media through the service (0.90) ─────────────────────────
+//
+// The service has task subtypes for photos, music and video besides
+// packages. Whether it takes a plain MP3 (or MP4) by URL is not known: this
+// registers one with each of a few package types, logs each answer, and
+// for the first taken, starts it, follows it for up to 3 minutes and lists
+// the folders it might have gone to. The "bgft_probe" command; its URL from
+// bgft-probe.txt (its first line), else a test MP3.
+
+typedef int (*FnBgftTaskInfo)(int32_t, void*);
+
+static void probeList(const char* dir, int depth) {
+    const int fd = sysOpen(dir, SC_O_RDONLY | SC_O_DIRECTORY, 0);
+    if (fd < 0) {
+        logLine("probe: %s: not opened (%d)", dir, fd);
+        return;
+    }
+    static uint8_t buf[0x2000];
+    int n, shown = 0;
+    while ((n = sysGetdents(fd, buf, sizeof(buf))) > 0 && shown < 60) {
+        for (int at = 0; at < n && shown < 60;) {
+            const uint16_t reclen = le16(buf + at + 4);
+            const uint8_t type = buf[at + 6], namlen = buf[at + 7];
+            if (!reclen) break;
+            char name[256];
+            memcpy(name, buf + at + 8, namlen);
+            name[namlen] = 0;
+            at += reclen;
+            if (name[0] == '.') continue;
+            char path[512];
+            fmt(path, sizeof(path), "%s/%s", dir, name);
+            int64_t size = -1;
+            if (type != 4) {
+                const int f = sysOpen(path, SC_O_RDONLY, 0);
+                if (f >= 0) {
+                    size = sysSeek(f, 0, 2);
+                    sysClose(f);
+                }
+            }
+            logLine("probe:   %s%s %ld", path, type == 4 ? "/" : "", (long)size);
+            shown++;
+            if (type == 4 && depth > 0) probeList(path, depth - 1);
+        }
+    }
+    sysClose(fd);
+}
+
+static void* probeMain(void* arg) {
+    (void)arg;
+    static char url[MAX_PATH];
+    char text[MAX_PATH];
+    fmt(url, sizeof(url), "%s", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3");
+    const int n = readText(SC_BGM_DIR "/bgft-probe.txt", text, sizeof(text));
+    if (n > 0) {
+        int k = 0;
+        while (k < n && text[k] != '\n' && text[k] != '\r') k++;
+        text[k] = 0;
+        if (isUrl(text)) fmt(url, sizeof(url), "%s", text);
+    }
+    char shown[160];
+    urlShown(url, shown, sizeof(shown));
+    logLine("probe: media through the download service: %s", shown);
+    if (!bgftSetup()) {
+        logLine("probe: the service is not there");
+        return NULL;
+    }
+    // Package types to try: none, empty, and guesses at a media one.
+    // NULL last: the service may take a missing one worst.
+    static const char* const types[] = {"", "PS4MUSIC", "MUSIC", "PS4AUDIO", "AUDIO", "PS4VIDEO", "VIDEO", "audio/mpeg", NULL};
+    const int nTypes = (int)(sizeof(types) / sizeof(types[0]));
+    int32_t task = -1;
+    for (int t = 0; t < nTypes && task < 0; t++) {
+        for (int ent = 0; ent < 2 && task < 0; ent++) {
+            BgftParam p;
+            memset(&p, 0, sizeof(p));
+            p.userId = g_bgft.user;
+            p.entitlementType = ent ? 0 : 5;
+            p.id = "IV0000-SCMP00001_00-SHELLCOMPMUSIC01";
+            p.contentUrl = url;
+            p.contentName = "Shell Companion test";
+            p.iconPath = "";
+            p.playgoScenarioId = "0";
+            p.option = 0x10000;  // DISABLE_CDN_QUERY_PARAM
+            p.packageType = types[t];
+            p.packageSubType = "";
+            p.packageSize = 0;
+            int32_t id = -1;
+            const int rc = g_bgft.reg(&p, &id);
+            logLine("probe: type %s%s%s, entitlement %d: 0x%08X, task %d", types[t] ? "\"" : "",
+                    types[t] ? types[t] : "NULL", types[t] ? "\"" : "", p.entitlementType, (unsigned)rc, id);
+            if (rc >= 0 && id >= 0) task = id;
+        }
+    }
+    if (task < 0) {
+        logLine("probe: no type was taken: media can't go through the service this way");
+        notify("Download service test: not taken (see bgm.log)");
+        return NULL;
+    }
+    const int st = g_bgft.start(task);
+    logLine("probe: task %d started: 0x%08X", task, (unsigned)st);
+    notify("Download service test: task %d taken, see Notifications > Downloads", task);
+    FnBgftTaskInfo info = (FnBgftTaskInfo)anySym(0, "sceBgftServiceIntDownloadGetTaskInfo");
+    if (info) {
+        struct {
+            char* title;
+            char* icon;
+            uint64_t tick;
+            uint8_t spare[0x40];
+        } ti;
+        memset(&ti, 0, sizeof(ti));
+        const int ir = info(task, &ti);
+        logLine("probe: task info 0x%08X: title %p, icon %p", (unsigned)ir, (void*)ti.title, (void*)ti.icon);
+    }
+    for (int s = 0; s < 90; s++) {
+        BgftProgress pr;
+        memset(&pr, 0, sizeof(pr));
+        const int rc = g_bgft.progress(task, &pr);
+        logLine("probe: progress 0x%08X: bits 0x%x, error 0x%08X, %lu of %lu (total %lu of %lu), %u s left",
+                (unsigned)rc, pr.bits, (unsigned)pr.errorResult, (unsigned long)pr.transferred,
+                (unsigned long)pr.length, (unsigned long)pr.transferredTotal, (unsigned long)pr.lengthTotal,
+                pr.restSec);
+        if (rc < 0 || pr.errorResult) break;
+        if (pr.length && pr.transferred >= pr.length) break;
+        sysSleepMs(2000);
+    }
+    // Where it may have gone.
+    static const char* const dirs[] = {"/user/av_contents", "/user/download", "/user/data/download",
+                                       "/user/av_contents/music", "/user/av_contents/video_temp",
+                                       "/system_data/priv/bgft", "/user/system/download"};
+    for (int d = 0; d < (int)(sizeof(dirs) / sizeof(dirs[0])); d++) probeList(dirs[d], 2);
+    logLine("probe: done");
+    return NULL;
+}
+
+static void probeStart(void) {
+    static volatile int running;
+    if (running) return;
+    running = 1;
+    if (threadStart(probeMain, NULL, "ScBgmProbe") < 0) running = 0;
+}

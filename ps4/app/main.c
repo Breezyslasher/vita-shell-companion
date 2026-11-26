@@ -24,7 +24,7 @@
 #include "../client/shell_companion.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.89"
+#define APP_VERSION "0.90"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -93,6 +93,7 @@ int scePadReadState(int handle, OrbisPadData* data);
 #define ORBIS_VIDEO_OUT_FLIP_VSYNC 1
 #define ORBIS_PAD_BUTTON_OPTIONS 0x0008
 #define ORBIS_PAD_BUTTON_L3 0x0002
+#define ORBIS_PAD_BUTTON_TOUCH_PAD 0x00100000
 #define ORBIS_PAD_BUTTON_R3 0x0004
 #define ORBIS_PAD_BUTTON_UP 0x0010
 #define ORBIS_PAD_BUTTON_DOWN 0x0040
@@ -908,6 +909,8 @@ static void draw(void) {
     y += LINE;
     text(x, y, FG, "L3     self-update from test-update.txt (a .pkg path or URL), then close");
     y += LINE;
+    text(x, y, FG, "TOUCH  test: an MP3 through the PS4's download service (bgm.log)");
+    y += LINE;
     text(x, y, FG, "UP     music watch in the shell: logs the quick menu's music calls");
     y += LINE;
     text(x, y, FG, "DOWN   copy the shell's .NET code to ShellCompanion/ps4/shell (UP first)");
@@ -1295,6 +1298,14 @@ int main(void) {
             for (uint32_t i = 0; i < n; i++)
                 say("  %s: %s, %llu of %llu bytes%s", st[i].id, st[i].state, (unsigned long long)st[i].bytes,
                     (unsigned long long)st[i].size, "");
+        }
+        if (down & ORBIS_PAD_BUTTON_TOUCH_PAD) {
+            // An experiment (0.90): an MP3 (bgft-probe.txt's URL, else a test
+            // one) through the PS4's download service; bgm.log says what came of it.
+            char what[512];
+            scOpen(what, sizeof(what));
+            say("Download service test: %d, see bgm.log (probe:) and Notifications > Downloads",
+                scCommand("bgft_probe\n"));
         }
         if (down & ORBIS_PAD_BUTTON_L3) {
             // Self-update (0.89): test-update.txt's first line, a package's

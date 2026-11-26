@@ -896,6 +896,18 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### An experiment: media through the download service (0.90)
+
+The service has task subtypes for photos, music and video besides packages.
+No documentation or homebrew shows a plain MP3 or MP4 registered with it.
+`bgft_probe` (the test app's touch pad button) registers one by URL
+(`bgft-probe.txt`'s first line, else SoundHelix's test MP3) with package
+types `""`, `PS4MUSIC`, `MUSIC`, `PS4AUDIO`, `AUDIO`, `PS4VIDEO`, `VIDEO`,
+`audio/mpeg`, then `NULL`, each with entitlement types 5 and 0, logging
+each answer (`probe:` in bgm.log). For the first one taken, it starts it,
+logs its task info and progress every 2 s for up to 3 minutes, then lists
+the folders the file might have gone to.
+
 ### Packages and self-update (0.89)
 
 `ps4/bgm/pkg.c`. A download list's `pkg` item, and an app's own update
