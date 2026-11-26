@@ -553,6 +553,23 @@ album, or of the queue) and plays. The test app no longer writes these, only
 the profile and the session link. A track's row has no picture: the shell
 reads only `name`, `explicit`, `artists[].name` and `is_playable` for it.
 
+### R3, "Add to Your Music" (0.61), and pictures on tracks
+
+The player panel's R3 "+" is Spotify's "Add to Your Music" (`ControlPanel`,
+`AddMyLibraryFunction`): enabled once the shell has the playing track's
+Spotify id (`OnSpotifyTrackIdChanged`, from `GetSpTrackInfo`), it asks
+`/v1/ebgm/users/me/library/contains/<id>` (`contains_in_library`) and on R3
+`…/save/<id>` or `…/delete/<id>`. From 0.61 the watch answers
+`GetSpTrackInfo` (`trackId[128]` `sc<n>`, `trackUri[128]`, `contextUri[128]`,
+`canShare`, `canEditPlaylist`), gives event 6 (Spotify track info changed)
+when the track changes, and answers the library requests itself: the playing
+track's file is put in, or taken out of, `/data/ShellCompanion/ps4/liked.txt`
+(one path a line), for an app to read.
+
+A track's row (`TrackListPanelItem`) is two labels, its title and its
+artist, with no picture in it; tiles (playlists) and the player panel are
+where pictures are shown.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the

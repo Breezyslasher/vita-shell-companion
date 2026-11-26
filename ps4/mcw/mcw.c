@@ -300,6 +300,7 @@ static void hookCallback(const Hook* via, int arg, uint64_t fn) {
 #define EV_TRACK_INFO 3
 #define EV_SP_MESSAGE 4
 #define EV_CORE_KILLED 5
+#define EV_SP_TRACK 6  // SP_TRACKINFOCHANGED: GetSpTrackInfo, the track's Spotify id, again
 #define TRACK_CURRENT 0xFFFFFFFEu  // SCE_MUSICCORE_CURRENT_TRACK_INDEX
 #define TRACK_PREV 0xFFFFFFFDu
 #define TRACK_NEXT 0xFFFFFFFCu
@@ -458,6 +459,7 @@ static void fakeRefresh(void) {
                 fmt(g_fake.cover, sizeof(g_fake.cover), "%s", cover);
                 unlock(&g_fake.lock);
                 owe(EV_TRACK_INFO);
+                owe(EV_SP_TRACK);
                 say("fake: track \"%s\" by \"%s\" (%s), cover %lu bytes at %lu, %s", g_fake.name,
                     g_fake.artist, g_fake.file, g_fake.artLen, g_fake.artOff,
                     g_fake.cover[0] ? g_fake.cover : "no cover file");
@@ -565,6 +567,95 @@ static EbgmReq* ebgmFind(int64_t id) {
 }
 
 // After CreateRequest(ctx, apiGroup, path, method, content, int64* requestId).
+// A slot for request id, its answer text: the slot, or NULL.
+static EbgmReq* ebgmClaim(int64_t id) {
+    if (!g_ebgmPool) g_ebgmPool = sysMap(EBGM_SLOTS * EBGM_MAX);
+    if (!g_ebgmPool) return NULL;
+    lock(&g_ebgmLock);
+    EbgmReq* r = NULL;
+    for (int i = 0; i < EBGM_SLOTS && !r; i++)
+        if (!g_ebgm[i].id) r = &g_ebgm[i];
+    if (r) {
+        r->body = g_ebgmPool + (size_t)(r - g_ebgm) * EBGM_MAX;
+        r->len = r->off = 0;
+        r->id = id;
+    }
+    unlock(&g_ebgmLock);
+    return r;
+}
+
+// ── "Add to your music" (R3 on the player panel): liked.txt ──────────────────
+//
+// /v1/ebgm/users/me/library/contains|save|delete/<id>, for the playing track
+// (its id sc<n>, GetSpTrackInfo's): answered here, the track's file kept in
+// liked.txt (one path a line) for an app to read, or taken out of it.
+
+#define LIKED SC_BGM_DIR "/liked.txt"
+
+static int likedHas(const char* file, char* text, size_t cap) {
+    const int fd = sysOpen(LIKED, SC_O_RDONLY, 0);
+    int n = fd >= 0 ? sysRead(fd, text, cap - 1) : 0;
+    if (fd >= 0) sysClose(fd);
+    text[n > 0 ? n : 0] = 0;
+    const size_t len = strlen(file);
+    for (const char* p = text; *p;) {
+        const char* e = p;
+        while (*e && *e != '\n') e++;
+        if ((size_t)(e - p) == len && !memcmp(p, file, len)) return 1;
+        p = *e ? e + 1 : e;
+    }
+    return 0;
+}
+
+static void likedSet(const char* file, int on) {
+    static char text[64 * 1024];
+    const int had = likedHas(file, text, sizeof(text));
+    if (on == had) return;
+    const int fd = sysOpen(LIKED ".tmp", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    if (fd < 0) return;
+    const size_t len = strlen(file);
+    for (const char* p = text; *p;) {
+        const char* e = p;
+        while (*e && *e != '\n') e++;
+        if (!((size_t)(e - p) == len && !memcmp(p, file, len)) && e > p) {
+            sysWrite(fd, p, (size_t)(e - p));
+            sysWrite(fd, "\n", 1);
+        }
+        p = *e ? e + 1 : e;
+    }
+    if (on) {
+        sysWrite(fd, file, len);
+        sysWrite(fd, "\n", 1);
+    }
+    sysClose(fd);
+    sysRename(LIKED ".tmp", LIKED);
+}
+
+// sub: the path after /v1/ebgm/. 1 if it was a library request, answered.
+static int ebgmLibrary(const char* sub, int64_t id) {
+    static const char lib[] = "users/me/library/";
+    if (memcmp(sub, lib, sizeof(lib) - 1) != 0) return 0;
+    const char* act = sub + sizeof(lib) - 1;
+    const int contains_ = !memcmp(act, "contains/", 9);
+    const int save = !memcmp(act, "save/", 5);
+    const int del = !memcmp(act, "delete/", 7);
+    if (!contains_ && !save && !del) return 0;
+    char file[256];
+    lock(&g_fake.lock);
+    fmt(file, sizeof(file), "%s", g_fake.file);
+    unlock(&g_fake.lock);
+    if (!file[0]) return 0;
+    if (save || del) likedSet(file, save);
+    static char text[64 * 1024];
+    const int has = likedHas(file, text, sizeof(text));
+    EbgmReq* r = ebgmClaim(id);
+    if (!r) return 0;
+    r->len = (uint32_t)fmt(r->body, EBGM_MAX, "{\"contains_in_library\":%s}", has ? "true" : "false");
+    say("ebgm: library %s for %s: %s", contains_ ? "contains" : save ? "save" : "delete", file,
+        has ? "in liked.txt" : "not in liked.txt");
+    return 1;
+}
+
 static void ebgmCreated(Frame* f) {
     if ((int32_t)f->retRax < 0) return;
     const char* group = (const char*)(uintptr_t)f->gpr[1];
@@ -584,6 +675,10 @@ static void ebgmCreated(Frame* f) {
     if (social) {
         if (memcmp(path, socialPrefix, sizeof(socialPrefix) - 1) != 0) return;
         sub = path + sizeof(socialPrefix) - 1;
+    }
+    if (!social && ebgmLibrary(sub, *idp)) {
+        g_jsonUntil = sysNowUs() + 10000000u;
+        return;
     }
     char name[4][200];
     for (int i = 0; i < 3; i++) ebgmName(sub, i, name[i + 1], sizeof(name[0]));
@@ -714,6 +809,7 @@ static void fakeApply(Frame* f) {
                          : (owed & (1u << EV_CORE_READY))  ? EV_CORE_READY
                          : (owed & (1u << EV_TRACK_INFO))  ? EV_TRACK_INFO
                          : (owed & (1u << EV_SP_MESSAGE))  ? EV_SP_MESSAGE
+                         : (owed & (1u << EV_SP_TRACK))    ? EV_SP_TRACK
                                                            : EV_PLAY_STATUS;
         if (type != EV_CORE_KILLED && !g_fake.active) return;
         __atomic_and_fetch(&g_fake.owed, ~(1u << type), __ATOMIC_RELAXED);
@@ -780,6 +876,23 @@ static void fakeApply(Frame* f) {
             put64At(p, TI_COVER_OFF + 8, g_fake.artLen);
         }
         unlock(&g_fake.lock);
+        f->retRax = 0;
+    } else if (eq(h->name, "GetSpTrackInfo")) {
+        // SceMusicCoreSpTrackInfo: trackId[128], trackUri[128], contextUri[128],
+        // canShare, canEditPlaylist: the playing track's id, sc<its place in
+        // the queue>, which the player panel's R3 "+" (add to your music)
+        // needs before it is enabled.
+        uint8_t* p = outBuf(f, 0, 386);
+        if (!p) return;
+        memset(p, 0, 386);
+        char v[64];
+        fmt(v, sizeof(v), "sc%u", g_fake.index);
+        putStr(p, 0, 128, v);
+        fmt(v, sizeof(v), "spotify:track:sc%u", g_fake.index);
+        putStr(p, 128, 128, v);
+        putStr(p, 256, 128, "spotify:user:shellcompanion:playlist:queue");
+        p[384] = 0;  // canShare
+        p[385] = 1;  // canEditPlaylist
         f->retRax = 0;
     } else if (eq(h->name, "GetTitleId")) {
         char* p = (char*)(uintptr_t)f->gpr[0];
