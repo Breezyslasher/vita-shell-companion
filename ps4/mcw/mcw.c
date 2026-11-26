@@ -1092,7 +1092,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 17
+#define MONO_HOOKS 18
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -1341,6 +1341,7 @@ static struct {
     void *listFocused, *menuData, *startQuery;   // TrackListPanel
     void* getList;                               // LoadingListPanel.get_ListPanel
     void *focusIndex, *isMoving, *beginMove, *withTarget, *endOnBack, *decide;  // ListPanelBase
+    void *moveTarget, *origTarget;               // its MoveTargetIndex, OrigMoveTargetIndex (0.68)
 } g_qk;
 
 // The track's place in the queue, from its uri (spotify:track:sc<n>): -1 if none.
@@ -1632,16 +1633,34 @@ static void qkKey(Frame* f) {
     g_mono.set(args, g_qk.fHandled, &yes);
 }
 
-// ListPanelBase.OnItemMoved(from, to), after: in our list in move mode, the
-// player told (each step, or once: either way it follows).
+static int qkIndex(void* method, void* list) {
+    void* boxed = method ? rowCall(method, list, NULL) : NULL;
+    return boxed ? *(int*)g_row.unbox(boxed) : -1;
+}
+
+// ListPanelBase.OnItemMoved(from, to), after: logged only. 0.67 took each
+// for a move of the queue, but after the first step they read (-1, row):
+// the held track is out of the list while it moves.
 static void qkMoved(Frame* f) {
     void* list = (void*)(uintptr_t)f->gpr[0];
     if (!g_qk.moving || g_row.target(g_qk.moving) != list) return;
-    const int from = (int)f->gpr[1] - g_qk.moveOffset, to = (int)f->gpr[2] - g_qk.moveOffset;
+    say("queue: OnItemMoved(%d, %d); target row %d, from row %d", (int)f->gpr[1], (int)f->gpr[2],
+        qkIndex(g_qk.moveTarget, list), qkIndex(g_qk.origTarget, list));
+}
+
+// ListPanelBase.DecideMoveItem(), before: the track put down (X, or our □).
+// Its first row and the row it is put down at, to the player as one move.
+// ○ rolls it back instead, and comes nowhere near here.
+static void qkDecide(Frame* f) {
+    void* list = (void*)(uintptr_t)f->gpr[0];
+    if (!g_qk.moving || g_row.target(g_qk.moving) != list) return;
+    const int fromRow = qkIndex(g_qk.origTarget, list), toRow = qkIndex(g_qk.moveTarget, list);
+    const int from = fromRow - g_qk.moveOffset, to = toRow - g_qk.moveOffset;
+    say("queue: put down: rows %d to %d, places %d to %d", fromRow, toRow, from, to);
+    if (fromRow < 0 || toRow < 0 || from < 0 || from == to) return;
     char cmd[48];
     fmt(cmd, sizeof(cmd), "move=%d:%d\n", from, to < 0 ? 0 : to);
     sendEdit(cmd);
-    say("queue: moved from %d to %d (rows %d to %d)", from, to, (int)f->gpr[1], (int)f->gpr[2]);
 }
 
 // ListPanelBase.EndItemMoveMode(), after: our move done; the queue again.
@@ -1678,6 +1697,8 @@ static void qkSetup(void* pui, void* app, FnMonoClass cls) {
         g_qk.withTarget = m(lpb, "set_BeginItemMoveModeWithTargetSelected", 1);
         g_qk.endOnBack = m(lpb, "set_EndItemMoveModeOnBackButton", 1);
         g_qk.decide = m(lpb, "DecideMoveItem", 0);
+        g_qk.moveTarget = m(lpb, "get_MoveTargetIndex", 0);
+        g_qk.origTarget = m(lpb, "get_OrigMoveTargetIndex", 0);
     }
     if (llp) g_qk.getList = m(llp, "get_ListPanel", 0);
     if (tlp) {
@@ -1690,7 +1711,7 @@ static void qkSetup(void* pui, void* app, FnMonoClass cls) {
     if (data) g_qk.fTrackIndex = g_mono.fieldByName(data, "TrackIndex");
     g_qk.ready = g_row.ready && g_mono.set && g_qk.fKey && g_qk.fKeyEvent && g_qk.fHandled &&
                  g_qk.focusIndex && g_qk.isMoving && g_qk.beginMove && g_qk.withTarget &&
-                 g_qk.endOnBack && g_qk.decide && g_qk.getList && g_qk.listFocused &&
+                 g_qk.endOnBack && g_qk.decide && g_qk.moveTarget && g_qk.origTarget && g_qk.getList && g_qk.listFocused &&
                  g_qk.menuData && g_qk.startQuery && g_qk.fPlayList && g_qk.fListPanel &&
                  g_qk.fTrackIndex;
     say("queue: keys %s (KeyEventArgs %p, ListPanelBase %p, LoadingListPanel %p, TrackListPanel %p)",
@@ -2213,6 +2234,8 @@ static void monoHooks(void) {
          "ListPanelBase.OnItemMoved"},
         {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ListPanelBase", "EndItemMoveMode", 0, 13,
          "ListPanelBase.EndItemMoveMode"},
+        {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ListPanelBase", "DecideMoveItem", 0, 14,
+         "ListPanelBase.DecideMoveItem"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
@@ -2288,6 +2311,10 @@ void mcwPre(Frame* f) {
     }
     if (h->json == 11) {
         qkKey(f);  // a key, before the Music panel's handler sees it (0.67)
+        return;
+    }
+    if (h->json == 14) {
+        qkDecide(f);  // a track put down, before the list does it (0.68)
         return;
     }
     if (h->json) return;  // the key, after: nothing read here
