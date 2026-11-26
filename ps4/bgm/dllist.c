@@ -211,9 +211,13 @@ void dlListHook(Frame* f) {
             memcpy((uint8_t*)pr + 0x40, &pct, 4);
         }
         f->retRax = 0;
-        // Whenever the service's bits or ours change (0.99), and every 200th.
+        // Whenever the service's bits or ours change (0.99), and every 200th;
+        // and while going, every 5 s (1.20: bytes and time left as they go).
         const uint32_t seen = g_dll.e[k].logged++;
-        const int changed = !seen || was != g_dll.e[k].lastWas || pr->bits != g_dll.e[k].lastSaid;
+        static uint64_t lastGoingLog;
+        const int goingTick = (pr->bits & 0x1F) == 0x0a && sysNowUs() - lastGoingLog > 5000000u;
+        if (goingTick) lastGoingLog = sysNowUs();
+        const int changed = !seen || goingTick || was != g_dll.e[k].lastWas || pr->bits != g_dll.e[k].lastSaid;
         g_dll.e[k].lastWas = was;
         g_dll.e[k].lastSaid = pr->bits;
         if (changed || seen % 200 == 0)
@@ -421,7 +425,11 @@ void dlListQueryHook(Frame* f) {
                 for (int k = 0; k < count && k < DLL_MAX; k++) {
                     if (g_dll.e[k].task != id || id <= 0) continue;
                     const int i = g_dll.e[k].item;
-                    const int st = i >= 0 && i < g_dls.count ? g_dls.item[i].state : DLS_WAITING;
+                    int st = i >= 0 && i < g_dls.count ? g_dls.item[i].state : DLS_WAITING;
+                    // Finished but still in section 3 (1.20): its going
+                    // param, as its progress answers going (1.19's log: 80c3
+                    // in section 3 beside going progress).
+                    if (st == DLS_DONE && !g_dll.e[k].movedOut) st = DLS_GOING;
                     const uint32_t prm = st == DLS_FAILED || st == DLS_GONE ? 0x40080c1u  // 1097's 0x14008061: error, Stop/Download; Package
                                        : st == DLS_DONE && g_dll.trying ? g_dllTry[i % 6].param
                                        : st != DLS_DONE && st != DLS_GOING && g_dll.trying ? g_dllTryWait[i % 6].param

@@ -243,6 +243,11 @@ service's are, not the managed wrappers 0.85 hooked.
   `DbNotify.Post(NotificationDbAccessor.GetDbPath(), "item")` (and
   `"notification"`) when one of ours changes state, from the list's own
   thread (in the progress hook), logged in mcw.log as `dbnotify:`.
+- **1.19's bgm.log:** finished songs still in section 3 had the finished
+  param (`80c3`) beside going progress: 1.20 keeps the going param there
+  till they move. The list asked for section 3 at 34.8, 52.8, 108.7 s and
+  for section 9 not after 34.9 s, so none moved. "Calculating..." is time
+  left unknown (`0xFFFFFFFF`); 1.20 logs each going answer every 5 s.
 
 ### One module, and the cleanup (0.95)
 
