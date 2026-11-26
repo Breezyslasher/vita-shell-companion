@@ -652,6 +652,17 @@ static void runCommand(const char* text, int n) {
         stop("reloading");
         loadQueue();
         if (was != ST_STOPPED && openTrack()) g_state = ST_PLAYING;
+    } else if (n > 6 && !memcmp(text, "index=", 6)) {
+        // A track of the queue by its number, from 0, playing: the Music
+        // section's choice, through the music watch (PlaySpUri's index).
+        int v = 0;
+        for (int i = 6; i < n && text[i] >= '0' && text[i] <= '9'; i++) v = v * 10 + (text[i] - '0');
+        if (!g_count) loadQueue();
+        if (g_count) {
+            g_index = v < g_count ? v : 0;
+            if (openTrack()) g_state = ST_PLAYING;
+            else stop("that track would not open");
+        }
     } else if (n > 7 && !memcmp(text, "repeat=", 7)) {
         g_repeat = text[7] == '1' ? 1 : text[7] == '2' ? 2 : 0;
     } else if (n > 8 && !memcmp(text, "shuffle=", 8)) {

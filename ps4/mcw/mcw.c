@@ -298,6 +298,7 @@ static void hookCallback(const Hook* via, int arg, uint64_t fn) {
 #define EV_CORE_READY 1
 #define EV_PLAY_STATUS 2
 #define EV_TRACK_INFO 3
+#define EV_SP_MESSAGE 4
 #define EV_CORE_KILLED 5
 #define TRACK_CURRENT 0xFFFFFFFEu  // SCE_MUSICCORE_CURRENT_TRACK_INDEX
 #define TRACK_PREV 0xFFFFFFFDu
@@ -690,16 +691,19 @@ static void fakeApply(Frame* f) {
         const int type = (owed & (1u << EV_CORE_KILLED))   ? EV_CORE_KILLED
                          : (owed & (1u << EV_CORE_READY))  ? EV_CORE_READY
                          : (owed & (1u << EV_TRACK_INFO))  ? EV_TRACK_INFO
+                         : (owed & (1u << EV_SP_MESSAGE))  ? EV_SP_MESSAGE
                                                            : EV_PLAY_STATUS;
         if (type != EV_CORE_KILLED && !g_fake.active) return;
         __atomic_and_fetch(&g_fake.owed, ~(1u << type), __ATOMIC_RELAXED);
         put32At(p, 0, (uint32_t)type);
-        put32At(p, 4, 0);
+        // A Spotify message's param: 200, MESSAGE_LOGIN_SUCCESS, what a
+        // Spotify core says once it plays a URI it was given (PlaySpUri).
+        put32At(p, 4, type == EV_SP_MESSAGE ? 200u : 0u);
         f->retRax = 0;
         if (type != EV_PLAY_STATUS) say("fake: event %d given", type);
         return;
     }
-    if (!g_fake.active) return;
+    if (!g_fake.active && !eq(h->name, "PlaySpUri") && !eq(h->name, "LaunchSpCore")) return;
     if (eq(h->name, "GetCoreInfo")) {
         uint8_t* p = outBuf(f, 0, CI_SIZE);
         if (!p) return;
@@ -776,6 +780,29 @@ static void fakeApply(Frame* f) {
         if (send) sendPlayer(send);
         owe(EV_PLAY_STATUS);
         if (track == TRACK_NEXT || track == TRACK_PREV) owe(EV_TRACK_INFO);
+        f->retRax = 0;
+    } else if (eq(h->name, "LaunchSpCore")) {
+        // Spotify's core asked for: we are it already.
+        say("fake: LaunchSpCore: we are the core");
+        owe(EV_CORE_READY);
+        f->retRax = 0;
+    } else if (eq(h->name, "PlaySpUri")) {
+        // (SceMusicCoreSpLoginInfo*, char* playUri, int trackIndex, startView,
+        // shuffle): a track or Play All chosen in the Music section.
+        char uri[160] = "";
+        const char* u = (const char*)(uintptr_t)f->gpr[1];
+        const size_t n = hookReadable(u, sizeof(uri) - 1);
+        for (size_t i = 0; i < n && u[i]; i++) uri[i] = u[i], uri[i + 1] = 0;
+        const int32_t index = (int32_t)f->gpr[2];
+        char cmd[48];
+        fmt(cmd, sizeof(cmd), "index=%d\n%s", index < 0 ? 0 : index,
+            (uint32_t)f->gpr[4] ? "shuffle=1\n" : "");
+        sendPlayer(cmd);
+        say("fake: PlaySpUri(\"%s\", track %d, view %lu, shuffle %lu): %s", uri, index, f->gpr[3],
+            f->gpr[4], cmd);
+        owe(EV_TRACK_INFO);
+        owe(EV_PLAY_STATUS);
+        owe(EV_SP_MESSAGE);
         f->retRax = 0;
     } else if (eq(h->name, "SetAudioVolume")) {
         // (level): 0 to 0x8000, 0 dB; the quick menu's slider sends ten a second.

@@ -472,6 +472,23 @@ first guess: `total`, `offset`, `limit`, and `track_list`, each track with
 `name`, `uri`, `artists[].name`, `album.name`, `explicit`, `is_playable`,
 `duration_ms` and `image_url`.
 
+### Our tracks in the Music section (0.54), and choosing one (0.55)
+
+`playlist_tracks.json` was taken: the shell read `total`, `offset`,
+`track_list`, and each track's `name`, `explicit`, `artists[].name` and
+`is_playable` (and `partnerProfile`, which it adds itself), and the track
+list ended with no error, 3 items (our two tracks and Play All).
+
+Choosing one (`TrackListMenuPanel.OnItemSelected`, from 0.51's dump) posts a
+task that ends in `MusicCoreServerController`, then the native
+`sceMusicCoreServerPlaySpUri(loginInfo, playUri, trackIndex, startView,
+shuffle)`, the C# side waiting up to 5 s (`SPOTIFY_PLAYURI_TIMEOUT`). From
+0.55 the watch answers `LaunchSpCore` (we are the core) and `PlaySpUri`:
+our player is sent `index=<trackIndex>` (a new command: that track of its
+queue, playing) and `shuffle=1` if asked, and the shell is given track info
+changed, a Spotify message (4, param 200, `MESSAGE_LOGIN_SUCCESS`) and play
+status changed.
+
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
 DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
