@@ -670,6 +670,12 @@ ConvertOption DXTCompressByGPU, Resize 64×64, and the box's ImageScaleType
 set to AspectInside. Each `rowart:` line now also says whether the box's
 `Image` has loaded.
 
+0.63 still showed nothing. Each list opening makes new rows, so no row was
+logged twice and the result of a load was never seen. 0.64 hooks
+`ImageBox.HandleLoadCompleted`, where every image box's load ends. It logs
+each of ours (`rowart: OUR box … loaded: ok|FAILED`, with the shell's own
+error text) and the shell's own first 12, for comparison.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our

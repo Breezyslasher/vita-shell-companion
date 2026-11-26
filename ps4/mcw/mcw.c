@@ -1033,7 +1033,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 12
+#define MONO_HOOKS 13
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -1338,6 +1338,37 @@ static void rowArt(Frame* f) {
     }
 }
 
+// An ImageBox's load finished (its HandleLoadCompleted(args, action,
+// setImage), after): ours, said with the shell's own error if it failed, and
+// the shell's own first few, to compare (0.64).
+static void rowLoaded(Frame* f) {
+    if (!g_row.target) return;
+    void* box = (void*)(uintptr_t)f->gpr[0];
+    void* args = (void*)(uintptr_t)f->gpr[1];
+    int ours = -1;
+    for (int i = 0; i < ROWS; i++)
+        if (g_rows[i].img && g_row.target(g_rows[i].img) == box) ours = i;
+    static int others;
+    if (ours < 0 && others >= 12) return;
+    if (ours < 0) others++;
+    char err[400];
+    err[0] = 0;
+    void* exc = NULL;
+    if (args && g_mono.objectClass && g_mono.fieldByName) {
+        void* fe = g_mono.fieldByName(g_mono.objectClass(args), "error");
+        exc = fe ? monoGet(args, fe) : NULL;
+        if (exc) {
+            void* e2 = NULL;
+            void* str = g_row.toString(exc, &e2);
+            if (str && !e2) monoText((uint64_t)(uintptr_t)str, err, sizeof(err));
+            else fmt(err, sizeof(err), "(an error, its text not read)");
+        }
+    }
+    void* asset = g_row.getImage ? rowCall(g_row.getImage, box, NULL) : NULL;
+    say("rowart: %s box %p (row entry %d) loaded: %s; its Image %s%s%s", ours >= 0 ? "OUR" : "shell's",
+        box, ours, exc ? "FAILED" : "ok", asset ? "set" : "empty", err[0] ? "; error: " : "", err);
+}
+
 // Mono's functions and the classes' methods, once (on the watch's thread,
 // attached).
 static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* classFromName) {
@@ -1467,6 +1498,8 @@ static void monoLog(Frame* f) {
             f->seq, scePthreadGetthreadid());
     } else if (h->json == 8) {
         rowArt(f);
+    } else if (h->json == 9) {
+        rowLoaded(f);
     } else if (h->json == 5) {
         if (f->seq <= 50)
             say("mono: %s: %d (0x%X), 0x%X  [#%u, thread %d]", h->name, (int32_t)f->gpr[1],
@@ -1818,6 +1851,9 @@ static void monoHooks(void) {
         // A track's row filled in: given its cover (0.62, rowArt).
         {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListPanelItem", "UpdateData", 1,
          8, "TrackListPanelItem.UpdateData"},
+        // An ImageBox's load finished: what came of ours (0.64, rowLoaded).
+        {"Sce.PlayStation.PUI", "Sce.PlayStation.PUI.UI2", "ImageBox", "HandleLoadCompleted", 3, 9,
+         "ImageBox.HandleLoadCompleted"},
     };
     for (int i = 0; i < MONO_HOOKS; i++) {
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
@@ -1911,7 +1947,7 @@ void mcwPre(Frame* f) {
 void mcwPost(Frame* f) {
     if (f->hook->json) {
         if (!g_quiet || f->hook->json == 2 || f->hook->json == 6 || f->hook->json == 7 ||
-            f->hook->json == 8)
+            f->hook->json == 8 || f->hook->json == 9)
             monoLog(f);
         return;
     }
