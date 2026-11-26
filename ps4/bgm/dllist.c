@@ -73,7 +73,7 @@ static struct {
     Hook hooks[2];
     Hook query[4];  // the list's task queries (0.98)
     Hook info[8];   // its task info calls, logged only (1.11)
-    Hook ctl[11];   // start, resume, pause, stop, unregister and the Int ones: the list's buttons (1.15, 1.29)
+    Hook ctl[15];   // start, resume, pause, stop, unregister and the Int ones: the list's buttons (1.15, 1.29)
     volatile int selfCall;  // our own pause of a task, not the list's (1.29)
     Hook appSize[3];  // the service's app data size call (1.25)
     uint32_t appSizeLogged;
@@ -93,6 +93,7 @@ static struct {
     int32_t pctSeen;     // the first real task it was seen in
     struct {
         volatile int32_t task;
+        volatile int32_t oldTask;  // the one it replaced (dllRepair), still the list's row's for a while (1.33)
         int item;
         uint64_t t0, b0;  // when it began to come, and its bytes then
         uint32_t logged;
@@ -564,18 +565,31 @@ void dlListInfoHook(Frame* f) {
 // can't (0.92-0.94): paused again at once. Unregister (triangle, delete):
 // no longer ours. Pause and stop: logged; the downloads go on.
 void dlListCtlHook(Frame* f) {
-    const int32_t task = (int32_t)f->gpr[0];
-    if (task <= 0 || scePthreadGetthreadid() == g_dll.dlThread || g_dll.selfCall) return;
+    if (scePthreadGetthreadid() == g_dll.dlThread || g_dll.selfCall) return;
+    const char* name = f->hook->name;
+    // Every call from the list logged, its first 60 (1.33), with its
+    // arguments: the task may not be the first (the state calls).
+    static uint32_t seenCalls;
+    if (seenCalls++ < 60)
+        logLine("dllist: %s(%lx, %lx, %lx) = 0x%08X  [thread %d]", name, (unsigned long)f->gpr[0],
+                (unsigned long)f->gpr[1], (unsigned long)f->gpr[2], (unsigned)f->retRax, scePthreadGetthreadid());
+    // The "All" ones: every one of ours.
+    const int all = hasText(name, "All");
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
-        if (g_dll.e[k].task != task) continue;
-        const char* name = f->hook->name;
+        const int32_t task = g_dll.e[k].task;
+        if (task <= 0) continue;
+        const int32_t a0 = (int32_t)f->gpr[0], a1 = (int32_t)f->gpr[1], old = g_dll.e[k].oldTask;
+        if (!all && a0 != task && a1 != task && (old <= 0 || (a0 != old && a1 != old))) continue;
         logLine("dllist: %s(%d) [ours, item %d] from the list = 0x%08X  [thread %d]", name, task, g_dll.e[k].item,
                 (unsigned)f->retRax, scePthreadGetthreadid());
         const int i = g_dll.e[k].item;
         __typeof__(g_dls.item[0])* it = i >= 0 && i < g_dls.count ? &g_dls.item[i] : NULL;
         const int open = it && it->state != DLS_DONE && it->state != DLS_GONE && it->state != DLS_FAILED &&
                          it->state != DLS_CANCELLED;
-        if (hasText(name, "Unregister")) {
+        if (hasText(name, "State")) {
+            // The state calls: only logged (above) till a log shows what
+            // they say (1.33).
+        } else if (hasText(name, "Unregister")) {
             g_dll.e[k].task = 0;
             if (open) it->cancel = 1;  // deleted: not fetched (1.29)
         } else if (hasText(name, "Pause") || hasText(name, "Stop")) {
@@ -586,7 +600,7 @@ void dlListCtlHook(Frame* f) {
             // Resume, or Download Now: next, after the one going (1.29).
             if (open) {
                 it->paused = 0;
-                it->now = 1;
+                if (!all) it->now = 1;
             }
             if (!hasText(name, "HighPriority") && g_dll.pause) {
                 g_dll.selfCall = 1;  // the service still fetches nothing itself
@@ -595,7 +609,7 @@ void dlListCtlHook(Frame* f) {
             }
         }
         g_dll.wantPost = 1;
-        return;
+        if (!all) return;
     }
 }
 
@@ -763,15 +777,21 @@ static int dllSetup(void) {
     // 1.29: and the Int ones. 1.28's Download Now, Pause and delete called
     // none of the first five (nothing logged); the list's other calls
     // (progress, queries, task info) are all the Int ones.
-    static const char* const cnames[11] = {"sceBgftServiceDownloadStartTask", "sceBgftServiceDownloadResumeTask",
+    static const char* const cnames[15] = {"sceBgftServiceDownloadStartTask", "sceBgftServiceDownloadResumeTask",
                                            "sceBgftServiceDownloadPauseTask", "sceBgftServiceDownloadStopTask",
                                            "sceBgftServiceIntDownloadUnregisterTask",
                                            "sceBgftServiceIntDownloadStartTask", "sceBgftServiceIntDownloadResumeTask",
                                            "sceBgftServiceIntDownloadPauseTask", "sceBgftServiceIntDownloadStopTask",
                                            "sceBgftServiceIntDownloadSetHighPriority",
-                                           "sceBgftServiceIntDownloadSetStartState"};
-    void* seen[11] = {0};
-    for (int i = 0; i < 11; i++) {
+                                           "sceBgftServiceIntDownloadSetStartState",
+                                           // 1.33: Resume left the row paused, no call of ours
+                                           // logged; these may be what it calls.
+                                           "sceBgftServiceIntDownloadSetResumeState",
+                                           "sceBgftServiceIntDownloadResumeTaskAll",
+                                           "sceBgftServiceIntDownloadStartTaskAll",
+                                           "sceBgftServiceDownloadResumeTaskAll"};
+    void* seen[15] = {0};
+    for (int i = 0; i < 15; i++) {
         void* fn = anySym(lib, cnames[i]);
         if (!fn) {
             logLine("dllist: %s: not found", cnames[i]);
@@ -989,6 +1009,7 @@ static void dllRepair(void) {
         if (task <= 0) continue;
         g_dll.e[k].lastParam = 0;
         g_dll.e[k].logged = 0;
+        g_dll.e[k].oldTask = old;
         __atomic_store_n(&g_dll.e[k].task, task, __ATOMIC_RELEASE);
         g_dll.e[k].failed = 0;
         logLine("dllist: task %d failed by the service: replaced by task %d (try %u)", old, task, g_dll.e[k].tries);
@@ -1075,6 +1096,7 @@ static void dlListBegin(void) {
         g_dll.e[k].movedOut = 0;
         g_dll.e[k].shownIn = 0;
         g_dll.e[k].lastParam = 0;
+        g_dll.e[k].oldTask = 0;
         g_dll.e[k].task = task;
         __atomic_store_n(&g_dll.count, k + 1, __ATOMIC_RELEASE);
     }

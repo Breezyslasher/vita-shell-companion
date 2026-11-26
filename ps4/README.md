@@ -350,6 +350,13 @@ service's are, not the managed wrappers 0.85 hooked.
   with `GetItemByTitleId`). 1.32: each placeholder a title id of its own
   (`SCDLnnnnn`, no app's), and before each item the module asks the
   service about every one of its tasks, so one deleted is seen at once.
+- **1.33, Resume:** a resumed song still read "Paused", with no call of
+  ours logged. The service fails a paused placeholder within seconds
+  (0x80990033) and `dllRepair` replaces it; the list's row may still have
+  the old task's id, so a call with it now counts as the new one's. Also
+  hooked: the set-state and "All" start/resume calls; every button call is
+  logged with its arguments (the first 60), the task taken from the first
+  or second; the state calls only logged till a log shows what they say.
 
 ### One module, and the cleanup (0.95)
 
