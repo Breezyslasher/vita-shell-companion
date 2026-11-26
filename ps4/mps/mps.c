@@ -26,6 +26,20 @@
 int sceKernelLoadStartModule(const char* path, size_t args, const void* argp, uint32_t flags,
                              const void* opt, int* res);
 int sceKernelDlsym(int handle, const char* symbol, void** addr);
+const char* sceKernelGetFsSandboxRandomWord(void);
+typedef int32_t (*FnSysmoduleLoad)(uint32_t id);
+
+// A system library loaded by its path in this sandbox: SceShellUI's has no
+// /system, its libraries are under /<random word>/common/lib (as
+// ps4-thumbgrid-ime opens the shell's PUI assembly). Its handle, or < 0.
+static int loadSystemLib(const char* name, int* res) {
+    char path[160];
+    const char* word = sceKernelGetFsSandboxRandomWord();
+    fmt(path, sizeof(path), "/%s/common/lib/%s", word ? word : "?", name);
+    const int h = sceKernelLoadStartModule(path, 0, NULL, 0, NULL, res);
+    logLine("%s: 0x%08X (start 0x%X)", path, (unsigned)h, *res);
+    return h;
+}
 
 typedef int32_t (*FnInit3)(size_t poolSize, void* pool, uint64_t a, uint64_t b);
 typedef int32_t (*FnInit)(size_t poolSize, void* pool);
@@ -165,14 +179,23 @@ static void* probe(void* arg) {
     threadStart(watch, NULL, "ScMpsWatch");
 
     int res = 0, lib = -1;
-    step("sceKernelLoadStartModule(libSceMusicPlayerService.sprx)");
-    lib = sceKernelLoadStartModule("libSceMusicPlayerService.sprx", 0, NULL, 0, NULL, &res);
-    logLine("libSceMusicPlayerService.sprx: 0x%08X (start 0x%X)", (unsigned)lib, res);
+    // 0.19: by its name and by /system/common/lib, ENOENT (0x80020002).
+    step("load libSceMusicPlayerService from the sandbox's common/lib");
+    lib = loadSystemLib("libSceMusicPlayerService.sprx", &res);
     if (lib < 0) {
-        step("sceKernelLoadStartModule(/system/common/lib/...)");
-        lib = sceKernelLoadStartModule("/system/common/lib/libSceMusicPlayerService.sprx", 0, NULL,
-                                       0, NULL, &res);
-        logLine("by its path: 0x%08X (start 0x%X)", (unsigned)lib, res);
+        // Its sysmodule then (0xDD), through libSceSysmodule, found the same
+        // way.
+        step("load libSceSysmodule from the sandbox's common/lib");
+        const int sm = loadSystemLib("libSceSysmodule.sprx", &res);
+        void* load = NULL;
+        if (sm >= 0) sceKernelDlsym(sm, "sceSysmoduleLoadModule", &load);
+        if (load) {
+            step("sceSysmoduleLoadModule(0xDD)");
+            logLine("sceSysmoduleLoadModule(0xDD): 0x%08X",
+                    (unsigned)((FnSysmoduleLoad)load)(0xDD));
+            step("load libSceMusicPlayerService again");
+            lib = loadSystemLib("libSceMusicPlayerService.sprx", &res);
+        }
     }
     if (lib < 0) {
         notify("Music service probe: no libSceMusicPlayerService (0x%08X)", (unsigned)lib);
