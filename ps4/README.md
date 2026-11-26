@@ -797,6 +797,20 @@ UTF-8 byte-order mark and spaces before a URL are ignored. Logs show URLs up to
 their `?`, so a token in the query isn't logged. HTTPS checks the server's
 certificate unless `https-noverify` is in the player's folder.
 
+### Streaming works (0.75), and tidier names (0.76)
+
+0.75 played `https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3`
+on 11.50. The server answered HTTP 200 with a length of 8,945,229 bytes in
+577 ms. Playback began at 262,144 bytes, 1.2 s after the track was picked,
+and the whole file had come in 9.6 s.
+
+A title taken from a file's name (no TIT2 tag) loses a YouTube video id at
+its end, as download tools add one: `Celebration-QZWRu3kqkG8` and
+`Celebration [QZWRu3kqkG8]` both read `Celebration`. Since 0.76 a row's box
+is replaced for any new cover once a load has been begun into it. 0.75 kept
+the box when the row had held a track with no cover in between, and that
+load could still land.
+
 ### How the hooks work
 
 A hooked function starts with a 5-byte `jmp` to a small entry that our

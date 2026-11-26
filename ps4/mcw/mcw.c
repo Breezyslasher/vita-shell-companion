@@ -1242,6 +1242,7 @@ static struct {
 static struct {
     uint32_t row, img;  // weak handles
     int idx, shifted, rev;
+    int loaded;         // a load was ever begun into its box
     float x[2];         // the labels' own X, before they were moved
 } g_rows[ROWS];
 static int g_rowSaid;
@@ -1458,6 +1459,7 @@ static void rowArt(Frame* f) {
         g_rows[e].img = g_row.weak(img, 0);
         g_rows[e].idx = -1;
         g_rows[e].shifted = 0;
+        g_rows[e].loaded = 0;
     }
     void* img = g_row.target(g_rows[e].img);
     if (!img) {
@@ -1470,7 +1472,9 @@ static void rowArt(Frame* f) {
             // into the row's earlier box (the list reuses rows as it
             // scrolls) put an earlier track's cover on this one. The earlier
             // box is taken off the row.
-            if (g_rows[e].idx >= 0 && g_row.removeChild) {
+            // (Any box a load was begun into, 0.76: 0.75 kept one whose row
+            // had held a track with no cover meanwhile, its load still coming.)
+            if (g_rows[e].loaded && g_row.removeChild) {
                 rowShow(img, 0);
                 rowCall(g_row.removeChild, img, NULL);
                 void* fresh = rowNewBox(row);
@@ -1489,6 +1493,7 @@ static void rowArt(Frame* f) {
             g_row.ourLoad = 0;
             g_rows[e].idx = idx;
             g_rows[e].rev = rev;
+            g_rows[e].loaded = 1;
         }
         rowShow(img, 1);
         rowShift(row, e, !g_rows[e].shifted, ROW_SHIFT);

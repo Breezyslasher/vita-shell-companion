@@ -1024,6 +1024,34 @@ static void libArt(const char* name, const uint8_t* img, size_t n) {
     sysClose(fd);
 }
 
+// A title from a file's name without a YouTube video's id, as download
+// tools add it (0.76): "Celebration-QZWRu3kqkG8", "Celebration [QZWRu3kqkG8]".
+static int idChar(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+}
+static void titleTidy(char* t) {
+    size_t n = strlen(t);
+    if (n > 14 && t[n - 1] == ']' && t[n - 13] == '[') {
+        int ok = 1;
+        for (size_t k = n - 12; k < n - 1; k++) ok &= idChar(t[k]);
+        if (ok) {
+            n -= 13;
+            while (n && t[n - 1] == ' ') n--;
+            t[n] = 0;
+            return;
+        }
+    }
+    if (n > 12 && t[n - 12] == '-') {
+        int ok = 1;
+        for (size_t k = n - 11; k < n; k++) ok &= idChar(t[k]);
+        if (ok) {
+            n -= 12;
+            while (n && t[n - 1] == ' ') n--;
+            t[n] = 0;
+        }
+    }
+}
+
 // A track's tags, and its cover written for its album if it has none yet.
 static void libRead(int i) {
     static uint8_t head[10];
@@ -1099,6 +1127,7 @@ static void libRead(int i) {
                 *q = 0;
                 break;
             }
+        titleTidy(g_lib[i].title);
     }
     // Its album: one already seen, or a new one.
     int a = 0;
