@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.69"
+#define APP_VERSION "0.70"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -314,12 +314,30 @@ static int useYourSong(void) {
         say("Could not copy %s into music/", from);
         return 0;
     }
-    // The queue: it first, then the test tone if it is there.
-    char queue[512];
-    snprintf(queue, sizeof(queue), "%s\n%s\n", dest, SC_BGM_MUSIC "/test-tone.wav");
-    writeFile(SC_BGM_QUEUE, queue, strlen(queue));
+    // The queue: it first, then every other track in music/ by name, the
+    // test tone last (0.70: 0.69 and before queued only it and the tone).
+    static char queue[64 * 1024];
+    static char names[256][128];
+    int n = 0;
+    DIR* d = opendir(SC_BGM_MUSIC);
+    struct dirent* e;
+    while (d && n < 256 && (e = readdir(d))) {
+        const size_t len = strlen(e->d_name);
+        if (len < 5 || len >= sizeof(names[0]) || e->d_name[0] == '.') continue;
+        if (strcasecmp(e->d_name + len - 4, ".mp3") && strcasecmp(e->d_name + len - 4, ".wav")) continue;
+        if (!strcasecmp(e->d_name, YOUR_SONG) || !strcasecmp(e->d_name, "test-tone.wav")) continue;
+        snprintf(names[n++], sizeof(names[0]), "%s", e->d_name);
+    }
+    if (d) closedir(d);
+    qsort(names, (size_t)n, sizeof(names[0]), (int (*)(const void*, const void*))strcasecmp);
+    size_t at = (size_t)snprintf(queue, sizeof(queue), "%s\n", dest);
+    for (int i = 0; i < n && at + 200 < sizeof(queue); i++)
+        at += (size_t)snprintf(queue + at, sizeof(queue) - at, SC_BGM_MUSIC "/%s\n", names[i]);
+    if (access(SC_BGM_MUSIC "/test-tone.wav", R_OK) == 0)
+        at += (size_t)snprintf(queue + at, sizeof(queue) - at, SC_BGM_MUSIC "/test-tone.wav\n");
+    writeFile(SC_BGM_QUEUE, queue, at);
     chmod(SC_BGM_QUEUE, 0666);
-    say("%s: %d KB copied into music/, queued first", from, kb);
+    say("%s: %d KB copied into music/, queued first; %d other track(s) after it", from, kb, n);
     return 1;
 }
 
