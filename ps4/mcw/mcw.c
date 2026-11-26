@@ -1163,6 +1163,7 @@ static struct {
     void *setCache, *globalCache;                // its Cache, ImageObject.GlobalCache (0.65)
     void *getManager, *setManager;               // its AssetManager (0.66)
     FnMonoWeak strong;                           // mono_gchandle_new
+    void (*freeHandle)(uint32_t);                // mono_gchandle_free
     uint32_t manager;                            // the shell's own loads' AssetManager
     void* managerName;                           // AssetManager.name
     int ourLoad;                                 // in our own LoadAsync call
@@ -1355,6 +1356,14 @@ static void rowArt(Frame* f) {
         if (g_rows[e].shifted) rowShift(row, e, 0, 0.0f);
         g_rows[e].shifted = 0;
     }
+    if (g_rowSaid < 30 && has && g_row.manager) {
+        char name[80];
+        name[0] = 0;
+        void* mgr = g_row.target(g_row.manager);
+        void* n = mgr && g_row.managerName ? monoGet(mgr, g_row.managerName) : NULL;
+        if (n) monoText((uint64_t)(uintptr_t)n, name, sizeof(name));
+        say("rowart: its load given AssetManager %p \"%s\"", mgr, name);
+    }
     if (g_rowSaid < 30) {
         // Whether the picture loaded so far (it loads in the background: a
         // row shown again says what came of its earlier load).
@@ -1428,10 +1437,12 @@ static void rowShellLoad(Frame* f) {
     }
     if (said < 12) {
         said++;
-        say("rowart: shell's LoadAsync(\"%s\"): AssetManager %p \"%s\"%s", uri, mgr, name,
-            mgr && !g_row.manager ? ", kept for ours" : "");
+        say("rowart: shell's LoadAsync(\"%s\"): AssetManager %p \"%s\"", uri, mgr, name);
     }
-    if (mgr && !g_row.manager) g_row.manager = g_row.strong(mgr, 0);
+    // The latest kept: when a track list opens, the Music section's own.
+    if (!mgr || (g_row.manager && g_row.target(g_row.manager) == mgr)) return;
+    if (g_row.manager && g_row.freeHandle) g_row.freeHandle(g_row.manager);
+    g_row.manager = g_row.strong(mgr, 0);
 }
 
 // Mono's functions and the classes' methods, once (on the watch's thread,
@@ -1492,6 +1503,8 @@ static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* class
         void* am = cls(pui, "Sce.PlayStation.PUI", "AssetManager");
         g_row.managerName = am ? g_mono.fieldByName(am, "name") : NULL;
         if (!sceKernelDlsym((int)(intptr_t)mono, "mono_gchandle_new", &p)) g_row.strong = (FnMonoWeak)p;
+        if (!sceKernelDlsym((int)(intptr_t)mono, "mono_gchandle_free", &p))
+            g_row.freeHandle = (void (*)(uint32_t))p;
         say("rowart: ImageOptions.get/set_AssetManager %p %p, AssetManager.name %p, gchandle_new %p",
             g_row.getManager, g_row.setManager, g_row.managerName, (void*)g_row.strong);
         void* io = cls(pui, "Sce.PlayStation.PUI", "ImageObject");

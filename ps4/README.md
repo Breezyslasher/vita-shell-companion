@@ -686,7 +686,7 @@ no cache; the shell's always have one.
 is out of memory`, raised in `AssetManager.Register`. The picture was read
 and decoded, but the default asset manager has no room. 0.66 hooks the
 shell's own `ImageBox.LoadAsync(uri, action, options)`, keeps the
-`AssetManager` of the first of those (with a strong GC handle), and gives it
+`AssetManager` of the latest of those (with a strong GC handle), and gives it
 to our loads' options (`ImageOptions.set_AssetManager`). It logs each of the
 shell's first 12 loads with its address and manager's name.
 
