@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.29"
+#define APP_VERSION "0.30"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -823,7 +823,7 @@ static void draw(void) {
     y += LINE;
     text(x, y, FG, "UP     music watch in the shell: logs the quick menu's music calls");
     y += LINE;
-    text(x, y, FG, "DOWN   copy the shell's music code to /data/ShellCompanion/ps4/shell");
+    text(x, y, FG, "DOWN   copy the shell's .NET code to ShellCompanion/ps4/shell (UP first)");
     y += LINE;
     text(x, y, DIM, "Leave with the PS button: the music should keep playing.");
     y += LINE * 2;
@@ -1113,7 +1113,14 @@ int main(void) {
                 shellLoad("/user/data/GoldHEN/plugins/sc_mps.prx"))
                 say("Music service probe in the shell: open the quick menu when it says so");
         }
-        if (down & ORBIS_PAD_BUTTON_DOWN) dumpShellCode();
+        if (down & ORBIS_PAD_BUTTON_DOWN) {
+            // On disk the shell's code is encrypted (0.29's list): the watch,
+            // inside the shell, copies its .NET assemblies from memory
+            // instead, within 10 s of mcw.carve appearing.
+            dumpShellCode();
+            writeFile(SC_BGM_DIR "/mcw.carve", "1", 1);
+            say("Asked the music watch (UP first) for the shell's code: in 10-60 s, see mcw.log");
+        }
         if (down & ORBIS_PAD_BUTTON_UP) {
             // The music watch (ps4/mcw): hooks the shell's calls to the music
             // server, passes each on unchanged, and logs it to mcw.log. Once

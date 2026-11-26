@@ -23,6 +23,9 @@
  *   mcw.off        if there, nothing is hooked (for a PS4 that misbehaves)
  *   mcw-names.txt  if there, the functions to hook instead, one a line
  *   mcw.quiet      while there, nothing is logged (the hooks stay)
+ *   mcw.carve      when it appears (the test app's DOWN), the .NET assemblies
+ *                  in the shell's memory are copied to shell/, then it is
+ *                  deleted
  */
 
 #include "../bgm/bgm.h"
@@ -341,6 +344,191 @@ void mcwPost(Frame* f) {
     }
 }
 
+// ── The shell's .NET assemblies, from its memory ─────────────────────────────
+//
+// On disk they are signed executables (.dll.sprx, encrypted); the shell runs
+// them, so their metadata, the code's structures with their layouts, is in
+// its memory as a plain PE file. Every readable region that is not direct
+// (GPU) memory is searched, 16 bytes at a time, for "MZ" with a .NET PE
+// header after it, and each one found is written to shell/asm-<address>.dll
+// for a decompiler.
+
+typedef struct {
+    void* start;
+    void* end;
+    int64_t offset;
+    int32_t prot;
+    int32_t mtype;
+    uint32_t flags;  // 1 flexible, 2 direct, 4 stack, 8 pooled, 16 committed
+    char name[32];
+} VirtualQueryInfo;  // OpenOrbis's OrbisKernelVirtualQueryInfo
+int sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, size_t size);
+
+static uint32_t rd32(const uint8_t* p) {
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+static uint16_t rd16(const uint8_t* p) {
+    uint16_t v;
+    memcpy(&v, p, 2);
+    return v;
+}
+
+// A .NET PE file at p (left bytes readable): its size, or 0.
+static size_t netPe(const uint8_t* p, size_t left) {
+    if (left < 0x200 || p[0] != 'M' || p[1] != 'Z') return 0;
+    const uint32_t pe = rd32(p + 0x3C);
+    if (pe < 0x40 || pe > 0x400 || pe + 0x18 + 0xF0 > left) return 0;
+    if (rd32(p + pe) != 0x00004550u) return 0;  // "PE\0\0"
+    const uint16_t sections = rd16(p + pe + 6), optSize = rd16(p + pe + 0x14);
+    const uint8_t* opt = p + pe + 0x18;
+    const uint16_t magic = rd16(opt);
+    uint32_t cli;
+    if (magic == 0x10B && optSize >= 0xE0)
+        cli = rd32(opt + 0x60 + 14 * 8);
+    else if (magic == 0x20B && optSize >= 0xF0)
+        cli = rd32(opt + 0x70 + 14 * 8);
+    else
+        return 0;
+    if (!cli || !sections || sections > 32) return 0;  // not .NET
+    const uint8_t* sec = opt + optSize;
+    if ((size_t)(sec - p) + sections * 40u > left) return 0;
+    size_t size = 0;
+    for (uint16_t i = 0; i < sections; i++) {
+        const uint32_t raw = rd32(sec + i * 40 + 20), rawSize = rd32(sec + i * 40 + 16);
+        if (raw + (size_t)rawSize > size) size = raw + (size_t)rawSize;
+    }
+    return size >= 0x200 && size <= (64u << 20) ? size : 0;
+}
+
+// The region being searched, written before and deleted after: if the
+// shell goes down reading one, the next carve finds it here and adds it to
+// mcw-carve-skip.txt, whose regions are never read again.
+#define CARVING SC_BGM_DIR "/mcw.carving"
+#define CARVE_SKIP SC_BGM_DIR "/mcw-carve-skip.txt"
+static uint64_t g_skip[64];
+static int g_nSkip;
+
+static uint64_t parseHex(const char* s) {
+    uint64_t v = 0;
+    for (;; s++) {
+        const char c = *s;
+        if (c >= '0' && c <= '9') v = v * 16 + (uint64_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') v = v * 16 + (uint64_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v = v * 16 + (uint64_t)(c - 'A' + 10);
+        else if (c == 'x' || c == 'X') v = 0;
+        else return v;
+    }
+}
+
+static void readSkips(void) {
+    static char text[2048];
+    char last[40];
+    int fd = sysOpen(CARVING, SC_O_RDONLY, 0);
+    if (fd >= 0) {
+        const int n = sysRead(fd, last, sizeof(last) - 1);
+        sysClose(fd);
+        if (n > 0) {
+            last[n] = 0;
+            say("carve: the last one stopped in region %s: never read again", last);
+            fd = sysOpen(CARVE_SKIP, SC_O_WRONLY | SC_O_CREAT, 0666);
+            if (fd >= 0) {
+                sysSeek(fd, 0, 2);
+                sysWrite(fd, last, (size_t)n);
+                sysWrite(fd, "\n", 1);
+                sysClose(fd);
+            }
+        }
+        sysUnlink(CARVING);
+    }
+    g_nSkip = 0;
+    fd = sysOpen(CARVE_SKIP, SC_O_RDONLY, 0);
+    if (fd < 0) return;
+    const int n = sysRead(fd, text, sizeof(text) - 1);
+    sysClose(fd);
+    if (n <= 0) return;
+    text[n] = 0;
+    for (char* p = text; *p && g_nSkip < 64;) {
+        const uint64_t v = parseHex(p);
+        if (v) g_skip[g_nSkip++] = v;
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    say("carve: %d region(s) skipped (mcw-carve-skip.txt)", g_nSkip);
+}
+
+static void carve(void) {
+    sysMkdir(SC_BGM_DIR "/shell", 0777);
+    readSkips();
+    say("carve: looking for .NET assemblies in the shell's memory");
+    drain();
+    const uint8_t* at = (const uint8_t*)0x10000;
+    int regions = 0, found = 0;
+    uint64_t scanned = 0, lastHash[64];
+    int nHash = 0;
+    VirtualQueryInfo vq;
+    for (int guard = 0; guard < 20000; guard++) {
+        memset(&vq, 0, sizeof(vq));
+        if (sceKernelVirtualQuery(at, 1 /* the next region */, &vq, sizeof(vq)) != 0) break;
+        const uint8_t* start = vq.start;
+        const uint8_t* end = vq.end;
+        if (end <= at) break;
+        at = end;
+        vq.name[31] = 0;
+        regions++;
+        const size_t len = (size_t)(end - start);
+        int skipped = 0;
+        for (int i = 0; i < g_nSkip; i++) skipped |= g_skip[i] == (uint64_t)(uintptr_t)start;
+        // CPU-readable, committed, not direct (GPU) memory.
+        const int readable = (vq.prot & 1) && (vq.flags & 16) && !(vq.flags & 2) &&
+                             len <= (512u << 20) && !skipped;
+        if (len >= (1u << 20) || vq.name[0])
+            say("  region %p-%p prot 0x%X type %d flags 0x%X %s%s", (const void*)start,
+                (const void*)end, (unsigned)vq.prot, vq.mtype, vq.flags, vq.name,
+                readable ? "" : " (skipped)");
+        if (!readable) continue;
+        char mark[40];
+        const int mn = fmt(mark, sizeof(mark), "%p", (const void*)start);
+        const int mfd = sysOpen(CARVING, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+        if (mfd >= 0) {
+            sysWrite(mfd, mark, (size_t)mn);
+            sysFsync(mfd);
+            sysClose(mfd);
+        }
+        // Readable as it was queried; checked again before each 1 MB.
+        for (size_t off = 0; off + 0x200 <= len; off += 16) {
+            if ((off & 0xFFFFF) == 0 && !(hookProt(start + off) & 1)) break;
+            const uint8_t* p = start + off;
+            if (p[0] != 'M' || p[1] != 'Z') continue;
+            const size_t size = netPe(p, len - off);
+            if (!size || size > len - off) continue;
+            const uint64_t h = hashBytes(0xCBF29CE484222325ull, p, size);
+            int dup = 0;
+            for (int i = 0; i < nHash; i++) dup |= lastHash[i] == h;
+            if (dup) continue;
+            if (nHash < 64) lastHash[nHash++] = h;
+            char path[160];
+            fmt(path, sizeof(path), SC_BGM_DIR "/shell/asm-%lx.dll", (uint64_t)(uintptr_t)p);
+            const int fd = sysOpen(path, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+            const int wrote = fd >= 0 ? sysWrite(fd, p, size) : fd;
+            if (fd >= 0) sysClose(fd);
+            found++;
+            say("  assembly at %p, %u bytes (in %s) -> %s: %d", (const void*)p, (unsigned)size,
+                vq.name[0] ? vq.name : "?", path, wrote);
+            drain();
+            off += (size - 16) & ~(size_t)15;
+        }
+        scanned += len;
+        drain();
+    }
+    sysUnlink(CARVING);
+    say("carve: %d regions, %lu MB searched, %d assemblies written to shell/", regions,
+        scanned >> 20, found);
+    notify("Music watch: %d .NET assemblies copied to ShellCompanion/ps4/shell", found);
+    drain();
+}
+
 // ── Finding the functions ────────────────────────────────────────────────────
 
 static int contains(const char* s, const char* part) {
@@ -548,6 +736,10 @@ static void* watchMain(void* arg) {
         if (now - lastSummary >= 10000000u) {
             lastSummary = now;
             g_quiet = sysExists(SC_BGM_DIR "/mcw.quiet");
+            if (sysExists(SC_BGM_DIR "/mcw.carve")) {
+                sysUnlink(SC_BGM_DIR "/mcw.carve");
+                carve();
+            }
             if (!g_quiet) {
                 char line[512];
                 int n = 0;
