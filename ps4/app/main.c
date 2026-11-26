@@ -23,7 +23,7 @@
 #include "../bgm/bgm.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "0.15"
+#define APP_VERSION "0.16"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -253,6 +253,65 @@ static int writeTestTone(void) {
 }
 
 // How many tracks music/ has.
+// yoursong.mp3 beside the package on a USB drive (its root), or in
+// /data/ShellCompanion/ps4/: copied into music/ and queued first, ahead of
+// the test tone. 1 if one was found.
+#define YOUR_SONG "yoursong.mp3"
+static int copyFile(const char* from, const char* to) {
+    FILE* in = fopen(from, "rb");
+    if (!in) return -1;
+    char tmp[200];
+    snprintf(tmp, sizeof(tmp), "%s.new", to);
+    FILE* out = fopen(tmp, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    static char buf[256 * 1024];
+    size_t n, total = 0;
+    int ok = 1;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            ok = 0;
+            break;
+        }
+        total += n;
+    }
+    fclose(in);
+    fclose(out);
+    if (!ok || !total || rename(tmp, to) != 0) return -1;
+    chmod(to, 0666);
+    return (int)(total / 1024);
+}
+
+static int useYourSong(void) {
+    const char* dest = SC_BGM_MUSIC "/" YOUR_SONG;
+    char from[96] = "";
+    for (int i = 0; i < 8 && !from[0]; i++) {
+        char path[96];
+        snprintf(path, sizeof(path), "/mnt/usb%d/" YOUR_SONG, i);
+        if (access(path, R_OK) == 0) snprintf(from, sizeof(from), "%s", path);
+    }
+    if (!from[0] && access(SC_BGM_DIR "/" YOUR_SONG, R_OK) == 0)
+        snprintf(from, sizeof(from), "%s", SC_BGM_DIR "/" YOUR_SONG);
+    if (!from[0]) {
+        say("No " YOUR_SONG " on a USB drive or in " SC_BGM_DIR);
+        return 0;
+    }
+    const int kb = copyFile(from, dest);
+    if (kb < 0) {
+        say("Could not copy %s into music/", from);
+        return 0;
+    }
+    // The queue: it first, then the test tone if it is there.
+    char queue[512];
+    snprintf(queue, sizeof(queue), "%s\n%s\n", dest, SC_BGM_MUSIC "/test-tone.wav");
+    writeFile(SC_BGM_QUEUE, queue, strlen(queue));
+    chmod(SC_BGM_QUEUE, 0666);
+    say("%s: %d KB copied into music/, queued first", from, kb);
+    return 1;
+}
+
 static int countMusic(void) {
     DIR* d = opendir(SC_BGM_MUSIC);
     if (!d) return 0;
@@ -714,7 +773,8 @@ int main(void) {
     char portText[16];
     if (readFile(SC_BGM_PORT, portText, sizeof(portText)) > 0) g_portType = atoi(portText);
 
-    if (!countMusic() && access(SC_BGM_QUEUE, F_OK) != 0) {
+    const int yourSong = useYourSong();
+    if (!yourSong && !countMusic() && access(SC_BGM_QUEUE, F_OK) != 0) {
         const int rc = writeTestTone();
         say("No tracks yet: test-tone.wav written (%d)", rc);
     }
