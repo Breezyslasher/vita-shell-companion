@@ -862,6 +862,91 @@ static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer an
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
 #define APPVER_SAID 9.99f   // what it is made when lower: Spotify's app there, and recent
 
+// ── The Music section's "Spotify installed?" (0.48, an experiment) ───────────
+//
+// The section's panel shows "Download Spotify" while the user's Spotify app
+// entry (UserContext.SpotifyAppBrowseItemData, made for CUSA01780) holds no
+// AppBrowseItem: none is installed. In IsValidAppVer's hook, on the shell's
+// own thread, the entry of the app in front (BigAppBrowseItemData's, the test
+// app's) is put in Spotify's through Mono (mono_field_set_value, its write
+// barrier and all), and Spotify's entry told (NotifyAppBrowseItemChanged,
+// mono_runtime_invoke), as when an app is installed.
+
+typedef void* (*FnMonoGetClass)(void*);
+typedef void* (*FnMonoFieldByName)(void*, const char*);
+typedef void (*FnMonoFieldValue)(void*, void*, void*);
+typedef void* (*FnMonoFields)(void*, void**);
+typedef const char* (*FnMonoFieldName)(void*);
+typedef void* (*FnMonoInvoke)(void*, void*, void**, void**);
+static struct {
+    FnMonoGetClass objectClass;
+    FnMonoFieldByName fieldByName;
+    FnMonoFieldValue get, set;
+    FnMonoFields fields;
+    FnMonoFieldName fieldName;
+    FnMonoMethod methodByName;
+    FnMonoInvoke invoke;
+} g_mono;
+static int g_fixSaid;
+
+// A field of klass named name, else the first whose name has part in it
+// (an auto-property's backing field, <Name>k__BackingField).
+static void* monoField(void* klass, const char* name, const char* part) {
+    void* f = g_mono.fieldByName(klass, name);
+    if (f || !part || !g_mono.fields || !g_mono.fieldName) return f;
+    void* iter = NULL;
+    void* each;
+    while ((each = g_mono.fields(klass, &iter))) {
+        const char* n = g_mono.fieldName(each);
+        if (n && contains(n, part)) return each;
+    }
+    return NULL;
+}
+
+static void* monoGet(void* obj, void* field) {
+    void* v = NULL;
+    if (obj && field) g_mono.get(obj, field, &v);
+    return v;
+}
+
+static void spotifyEntryFix(void* ctx) {
+    if (!g_mono.objectClass || !g_mono.fieldByName || !g_mono.get || !g_mono.set || !ctx) return;
+    const int say_ = g_fixSaid < 12;
+    void* user = monoGet(ctx, monoField(g_mono.objectClass(ctx), "m_userContext", "userContext"));
+    if (!user) {
+        if (say_) say("mono: spotify entry: no m_userContext");
+        g_fixSaid++;
+        return;
+    }
+    void* uc = g_mono.objectClass(user);
+    void* sp = monoGet(user, monoField(uc, "<SpotifyAppBrowseItemData>k__BackingField", "SpotifyAppBrowse"));
+    void* big = monoGet(user, monoField(uc, "<BigAppBrowseItemData>k__BackingField", "BigAppBrowse"));
+    if (!sp || !big) {
+        if (say_) say("mono: spotify entry: user %p, Spotify's %p, the app in front's %p", user, sp, big);
+        g_fixSaid++;
+        return;
+    }
+    void* dc = g_mono.objectClass(sp);
+    void* itemField = monoField(dc, "<AppBrowseItem>k__BackingField", "AppBrowseItem");
+    void* spItem = monoGet(sp, itemField);
+    void* bigItem = monoGet(big, itemField);
+    if (spItem || !bigItem) {
+        if (say_)
+            say("mono: spotify entry: Spotify's holds %p, the app in front's %p: %s", spItem, bigItem,
+                spItem ? "left" : "nothing to give it");
+        g_fixSaid++;
+        return;
+    }
+    g_mono.set(sp, itemField, &bigItem);
+    void* notify = g_mono.methodByName ? g_mono.methodByName(dc, "NotifyAppBrowseItemChanged", 0) : NULL;
+    void* exc = NULL;
+    if (notify && g_mono.invoke) g_mono.invoke(notify, sp, NULL, &exc);
+    if (say_)
+        say("mono: spotify entry: Spotify's (%p) given the app in front's item %p; told: %s%s", sp,
+            bigItem, notify ? "yes" : "no method", exc ? ", it threw" : "");
+    g_fixSaid++;
+}
+
 static void monoLog(Frame* f) {
     const Hook* h = f->hook;
     if (h->json == 1) {
@@ -884,6 +969,7 @@ static void monoLog(Frame* f) {
                 memcpy(self + APPVER_AT, &said, 4);
             }
         }
+        if (g_forceApp) spotifyEntryFix(self);
         if (first) {
             const int v100 = (int)(ver * 100.0f);
             say("mono: %s(%lu) = %d%s; app version there %d.%02d%s  [#%u, thread %d]", h->name,
@@ -922,6 +1008,18 @@ static void monoHooks(void) {
     sceKernelDlsym(mono, "mono_class_from_name", &classFromName);
     sceKernelDlsym(mono, "mono_class_get_method_from_name", &methodFromName);
     sceKernelDlsym(mono, "mono_compile_method", &compile);
+    void* p;
+    if (!sceKernelDlsym(mono, "mono_object_get_class", &p)) g_mono.objectClass = (FnMonoGetClass)p;
+    if (!sceKernelDlsym(mono, "mono_class_get_field_from_name", &p)) g_mono.fieldByName = (FnMonoFieldByName)p;
+    if (!sceKernelDlsym(mono, "mono_field_get_value", &p)) g_mono.get = (FnMonoFieldValue)p;
+    if (!sceKernelDlsym(mono, "mono_field_set_value", &p)) g_mono.set = (FnMonoFieldValue)p;
+    if (!sceKernelDlsym(mono, "mono_class_get_fields", &p)) g_mono.fields = (FnMonoFields)p;
+    if (!sceKernelDlsym(mono, "mono_field_get_name", &p)) g_mono.fieldName = (FnMonoFieldName)p;
+    if (!sceKernelDlsym(mono, "mono_runtime_invoke", &p)) g_mono.invoke = (FnMonoInvoke)p;
+    g_mono.methodByName = (FnMonoMethod)methodFromName;
+    say("mono: object class %p, field by name %p, get %p, set %p, fields %p, field name %p, invoke %p",
+        (void*)g_mono.objectClass, (void*)g_mono.fieldByName, (void*)g_mono.get, (void*)g_mono.set,
+        (void*)g_mono.fields, (void*)g_mono.fieldName, (void*)g_mono.invoke);
     drain();
     if (!rootDomain || !attach || !imageLoaded || !classFromName || !methodFromName || !compile) {
         say("mono: its API is not all there");

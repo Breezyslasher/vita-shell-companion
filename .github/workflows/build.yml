@@ -82,10 +82,6 @@ jobs:
           export OO_PS4_TOOLCHAIN="$RUNNER_TEMP/oo-goldhen/OpenOrbis/PS4Toolchain"
           export CREATE_FSELF="$OO_PS4_TOOLCHAIN/bin/linux/create-fself"
           sh ps4/app/build.sh
-          # The same app as CUSA01780, the title the Music section knows as
-          # Spotify's: installed, the section finds "Spotify" there.
-          TITLE="Shell Companion" TITLE_ID=CUSA01780 \
-            CONTENT_ID=IV0000-CUSA01780_00-SHELLCOMPANION00 sh ps4/app/build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: ps4-probes-${{ github.run_number }}

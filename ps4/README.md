@@ -381,10 +381,18 @@ section's panel watches the installed apps for Spotify's entry
 (`UserContext.SpotifyAppBrowseItemData`, `OnMusicAppBrowseItemChanged`):
 none, so it offers the download, and X goes there.
 
-From 0.47 CI also builds the test app as `CUSA01780`
-(`IV0000-CUSA01780_00-SHELLCOMPANION00.pkg`, titled "Shell Companion"):
-installed, the shell finds an app with Spotify's title, ours. Uninstall it
-before installing Spotify's own app; they would share the title.
+0.47 built the test app as `CUSA01780` too; the PS4 refused to install it
+(CE-35237-0), with no `CUSA01780` folder under `/user/app`, `/user/appmeta`
+or `/system_data/priv/appmeta`. CI builds it no more (`build.sh` still takes
+`TITLE`, `TITLE_ID`, `CONTENT_ID`).
+
+From 0.48, in `IsValidAppVer`'s hook (a shell thread Mono knows), the watch
+follows the Music section's context to its `m_userContext`, and when
+Spotify's app entry (`SpotifyAppBrowseItemData`) holds no `AppBrowseItem`
+while the app in front's (`BigAppBrowseItemData`) does, puts that item in
+Spotify's (`mono_field_set_value`) and calls its
+`NotifyAppBrowseItemChanged` (`mono_runtime_invoke`). Each step is logged
+(`mono: spotify entry: …`).
 
 ### The shell's own declarations (0.32's copy from memory, decompiled)
 
