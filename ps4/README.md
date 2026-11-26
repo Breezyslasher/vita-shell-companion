@@ -187,6 +187,44 @@ started. **`GetPlayStartCondition(titleId, out*)`**: called from the
 Library's option menu with a game's title (`CUSA01780`): `out` `00 01 01 00`,
 whether music may play on in that game, it seems.
 
+### The shell's own declarations (0.32's copy from memory, decompiled)
+
+DOWN copied 135 .NET assemblies out of the shell's memory; `app` (the
+shell's app.exe, 9 MB) and `platform` decompile with ILSpy. They are
+precompiled (full AOT), so method bodies are empty, but every type, field,
+enum and native import is there:
+
+- `Sce.Vsh.ShellUI.MusicCoreServer.MusicCoreServerWrapper` (platform): each
+  `sceMusicCoreServer*` import with its arguments, and the native
+  structures: `SceMusicCorePlayStatusInfo` (0x70), `SceMusicCoreTrackInfo`
+  (srcUri[1048], trackName, albumName, artistName [341 each], a byte,
+  coverartUri[1048], coverartOffset, coverartSize), `SceMusicCoreCoreInfo`
+  (scheme[32]: `bgmplayer`, `mediaplayer`, `mediaplayer2`, `customcore`;
+  titleId[10]; content type; six capabilities), `SceMusicCoreIpmiMessageData`
+  (type, param: 1 core ready, 2 play status changed, 3 track info changed,
+  4 Spotify message, 5 core killed, 6 Spotify track info changed).
+- `PlayControl(trackIndex, cmd, startTime, playSpeed)`: track 0xFFFFFFFE the
+  current one, 0xFFFFFFFD the previous, 0xFFFFFFFC the next; command 0 start
+  by time, 1 start at the current position, 2 jump, 3 stop.
+- The quick menu's entries (`MainMenuType`): **MusicApp**, the current music
+  core's entry (`MusicPanel`: cover, title, album, artist, time, play/pause,
+  previous/next, shuffle, repeat, volume), which is where the USB Music
+  Player shows; **PSMusic**, the Music section, Spotify's
+  `PlayStationMusicPanel` (playlists, sign-in, and a `MusicPlayerPanel` for
+  what plays); SpotifyApp.
+
+### Our player as a music core (0.33, an experiment)
+
+With `mcw-fake.txt` there and our player playing, the watch answers as a
+core: GetEvent gives core ready (1), track info changed (3) and play status
+changed (2) as they are owed; GetCoreInfo `customcore` with the file's
+title; GetPlayStatus our state, length, position, track and count;
+GetTrackInfo the file, its ID3 title, artist and album, and its cover (the
+APIC picture's offset and size in the MP3, which `MusicPanel` loads); play,
+pause, next and previous go to our player. When it stops, core killed (5).
+Our player's `status.txt` now has the tags (`title`, `artist`, `album`,
+`art_off`, `art_len`).
+
 ### Answering the quick menu for our player (0.31, an experiment)
 
 With `mcw-fake.txt` there (the test app's R3 makes and removes it), while our

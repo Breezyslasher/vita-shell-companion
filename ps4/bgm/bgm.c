@@ -147,6 +147,122 @@ static int mp3Decode(void) {
     return 0;
 }
 
+// ---- an MP3's tags, for the quick menu: title, artist, album, cover art ----
+
+#define META_LEN 300
+static struct {
+    char title[META_LEN], artist[META_LEN], album[META_LEN];
+    uint64_t artOff, artLen;  // the cover's image in the file (APIC), or 0
+} g_meta;
+
+static uint32_t syncsafe(const uint8_t* p) {
+    return (uint32_t)(p[0] & 0x7F) << 21 | (uint32_t)(p[1] & 0x7F) << 14 |
+           (uint32_t)(p[2] & 0x7F) << 7 | (uint32_t)(p[3] & 0x7F);
+}
+static uint32_t be32(const uint8_t* p) {
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+static size_t putUtf8(char* out, size_t at, size_t cap, uint32_t c) {
+    if (c < 0x80) {
+        if (at + 1 < cap) out[at++] = (char)c;
+    } else if (c < 0x800) {
+        if (at + 2 < cap) {
+            out[at++] = (char)(0xC0 | (c >> 6));
+            out[at++] = (char)(0x80 | (c & 0x3F));
+        }
+    } else if (c < 0x10000) {
+        if (at + 3 < cap) {
+            out[at++] = (char)(0xE0 | (c >> 12));
+            out[at++] = (char)(0x80 | ((c >> 6) & 0x3F));
+            out[at++] = (char)(0x80 | (c & 0x3F));
+        }
+    } else if (at + 4 < cap) {
+        out[at++] = (char)(0xF0 | (c >> 18));
+        out[at++] = (char)(0x80 | ((c >> 12) & 0x3F));
+        out[at++] = (char)(0x80 | ((c >> 6) & 0x3F));
+        out[at++] = (char)(0x80 | (c & 0x3F));
+    }
+    return at;
+}
+
+// A text frame's body (its encoding byte first) as UTF-8, one line.
+static void id3Text(const uint8_t* b, size_t n, char* out, size_t cap) {
+    size_t o = 0;
+    out[0] = 0;
+    if (!n) return;
+    const uint8_t enc = b[0];
+    b++;
+    n--;
+    if (enc == 0 || enc == 3) {
+        for (size_t i = 0; i < n && b[i]; i++)
+            o = enc == 3 ? (o + 1 < cap ? (out[o] = (char)b[i], o + 1) : o)
+                         : putUtf8(out, o, cap, b[i]);
+    } else {
+        int le = enc == 1;  // UTF-16 with a BOM; 2 is UTF-16BE
+        size_t i = 0;
+        if (enc == 1 && n >= 2) {
+            le = !(b[0] == 0xFE && b[1] == 0xFF);
+            if ((b[0] == 0xFF && b[1] == 0xFE) || (b[0] == 0xFE && b[1] == 0xFF)) i = 2;
+        }
+        for (; i + 1 < n; i += 2) {
+            uint32_t c = le ? (uint32_t)(b[i] | b[i + 1] << 8) : (uint32_t)(b[i] << 8 | b[i + 1]);
+            if (!c) break;
+            if (c >= 0xD800 && c < 0xDC00 && i + 3 < n) {
+                const uint32_t lo = le ? (uint32_t)(b[i + 2] | b[i + 3] << 8)
+                                       : (uint32_t)(b[i + 2] << 8 | b[i + 3]);
+                c = 0x10000 + ((c - 0xD800) << 10) + (lo - 0xDC00);
+                i += 2;
+            }
+            o = putUtf8(out, o, cap, c);
+        }
+    }
+    out[o < cap ? o : cap - 1] = 0;
+    for (size_t i = 0; out[i]; i++)
+        if (out[i] == '\n' || out[i] == '\r') out[i] = ' ';
+}
+
+// ID3v2.3 and 2.4 at the file's start: TIT2, TPE1, TALB and the first APIC.
+static void id3Read(const uint8_t* d, size_t n) {
+    memset(&g_meta, 0, sizeof(g_meta));
+    if (n < 10 || memcmp(d, "ID3", 3) != 0 || (d[3] != 3 && d[3] != 4)) return;
+    const int v4 = d[3] == 4;
+    size_t end = 10 + (size_t)syncsafe(d + 6);
+    if (end > n) end = n;
+    size_t p = 10;
+    if ((d[5] & 0x40) && p + 4 <= end) p += v4 ? syncsafe(d + p) : be32(d + p) + 4;
+    while (p + 10 <= end) {
+        const uint8_t* id = d + p;
+        if (!id[0]) break;
+        const size_t size = v4 ? syncsafe(id + 4) : be32(id + 4);
+        const size_t body = p + 10;
+        if (body + size > end) break;
+        const uint8_t* b = d + body;
+        if (!memcmp(id, "TIT2", 4)) id3Text(b, size, g_meta.title, META_LEN);
+        else if (!memcmp(id, "TPE1", 4)) id3Text(b, size, g_meta.artist, META_LEN);
+        else if (!memcmp(id, "TALB", 4)) id3Text(b, size, g_meta.album, META_LEN);
+        else if (!memcmp(id, "APIC", 4) && !g_meta.artLen && size > 4) {
+            // encoding, MIME type\0, picture type, description\0 (\0\0 in UTF-16), the image
+            const uint8_t enc = b[0];
+            size_t q = 1;
+            while (q < size && b[q]) q++;
+            q += 2;  // its \0 and the picture type
+            if (enc == 1 || enc == 2) {
+                while (q + 1 < size && (b[q] || b[q + 1])) q += 2;
+                q += 2;
+            } else {
+                while (q < size && b[q]) q++;
+                q++;
+            }
+            if (q < size) {
+                g_meta.artOff = body + q;
+                g_meta.artLen = size - q;
+            }
+        }
+        p = body + size;
+    }
+}
+
 static int srcOpen(const char* path) {
     srcClose();
     const int fd = sysOpen(path, SC_O_RDONLY, 0);
@@ -178,6 +294,7 @@ static int srcOpen(const char* path) {
     sysClose(fd);
     g_src.size = got;
     if (endsWith(path, ".wav")) {
+        memset(&g_meta, 0, sizeof(g_meta));
         g_src.type = SRC_WAV;
         if (!wavOpen()) {
             logLine("%s: not a 16-bit PCM WAV", path);
@@ -190,6 +307,7 @@ static int srcOpen(const char* path) {
                           : 0;
     } else {
         g_src.type = SRC_MP3;
+        id3Read(g_src.data, g_src.size);
         // An ID3v2 tag first, cover art and all: skipped, its size syncsafe.
         if (g_src.size > 10 && !memcmp(g_src.data, "ID3", 3)) {
             const uint8_t* h = g_src.data;
@@ -389,12 +507,14 @@ static const char* baseName(const char* path) {
 static uint64_t g_lastStatus;
 
 static void writeStatus(void) {
-    static char text[1024];
+    static char text[2048];
     const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : 0;
     fmt(text, sizeof(text),
-        "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\ndur_ms=%lu\nfile=%s\nbeat_ms=%lu\n",
+        "protocol=%d\nstate=%s\nindex=%d\ncount=%d\npos_ms=%lu\ndur_ms=%lu\nfile=%s\nbeat_ms=%lu\n"
+        "title=%s\nartist=%s\nalbum=%s\nart_off=%lu\nart_len=%lu\n",
         SC_BGM_PROTOCOL, stateName(g_state), g_index, g_count, (uint64_t)posMs, g_src.durMs,
-        g_count ? g_tracks[g_index] : "", (uint64_t)(sysNowUs() / 1000u));
+        g_count ? g_tracks[g_index] : "", (uint64_t)(sysNowUs() / 1000u), g_meta.title,
+        g_meta.artist, g_meta.album, g_meta.artOff, g_meta.artLen);
     writeText(SC_BGM_STATUS, text);
     g_lastStatus = sysNowUs();
 }

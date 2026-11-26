@@ -266,20 +266,60 @@ static void hookCallback(const Hook* via, int arg, uint64_t fn) {
 
 // ── Answering the quick menu for our player (mcw-fake.txt) ───────────────────
 //
-// As the USB Music Player is answered (README, "the protocol"), after the
-// real call: GetPlayStatus's 0x70 bytes with our player's state, length and
-// position and a title of our choosing; GetEvent's event 2 ("look again")
-// when that changes and once a second; PlayControl's play (1) and pause
-// (3) sent to our player as its cmd file. Only while mcw-fake.txt is there
-// and our player has a track, playing or paused.
+// The shell's own declarations (its app.exe and platform.dll, copied from
+// its memory and decompiled: Sce.Vsh.ShellUI.MusicCoreServer.
+// MusicCoreServerWrapper) give the music server's structures. The quick
+// menu's entry for the current music core (MainMenuType.MusicApp, its
+// MusicPanel: cover, title, album, artist, time and buttons) shows the core
+// named by GetCoreInfo once the event "core ready" (1) has come; "play
+// status changed" (2) and "track info changed" (3) have it ask again. (The
+// Music section, MainMenuType.PSMusic, is Spotify's PlayStationMusicPanel.)
+//
+// While mcw-fake.txt is there and our player has a track, after each real
+// call: GetEvent gives core ready, then track info, then play status, as
+// they are owed; GetCoreInfo, GetPlayStatus, GetTrackInfo and GetTitleId
+// describe our player as a core whose title is the file's first word
+// (SCMP00001, the test app, by default); PlayControl's play, pause, next and
+// previous go to our player. When it stops: "core killed" (5).
 
 #define FAKE SC_BGM_DIR "/mcw-fake.txt"
+#define EV_CORE_READY 1
+#define EV_PLAY_STATUS 2
+#define EV_TRACK_INFO 3
+#define EV_CORE_KILLED 5
+#define TRACK_CURRENT 0xFFFFFFFEu  // SCE_MUSICCORE_CURRENT_TRACK_INDEX
+#define TRACK_PREV 0xFFFFFFFDu
+#define TRACK_NEXT 0xFFFFFFFCu
+
+// SceMusicCoreCoreInfo, 0x48 bytes.
+#define CI_SCHEME 0x00  // char[32]
+#define CI_TITLE 0x20   // char[10]
+#define CI_CONTENT 0x2C // then 6 capabilities, u32 each, 1 supported
+#define CI_SIZE 0x48
+// SceMusicCorePlayStatusInfo, 0x70 bytes (as seen, the USB Music Player's).
+#define PS_SIZE 0x70
+// SceMusicCoreTrackInfo: srcUri[1048], trackName[341], albumName[341],
+// artistName[341], a byte, coverartUri[1048], coverartOffset, coverartSize.
+#define TI_SRC 0
+#define TI_TRACK 1048
+#define TI_ALBUM (TI_TRACK + 341)
+#define TI_ARTIST (TI_ALBUM + 341)
+#define TI_COVER (TI_ARTIST + 341 + 1)
+#define TI_COVER_OFF (TI_COVER + 1048)
+#define TI_SIZE (TI_COVER_OFF + 16)
+_Static_assert(TI_COVER_OFF == 3120, "SceMusicCoreTrackInfo");
+
 static struct {
     volatile int active;
     volatile uint32_t state;  // 2 playing, 3 paused
     volatile uint64_t durS, posS;
-    volatile int event;  // event 2 owed to the next GetEvent
+    volatile uint32_t index, count;
+    volatile uint32_t owed;  // events owed: 1 << type
     char title[16];
+    // The track, under a lock: the watch's thread writes, the shell's read.
+    volatile int lock;
+    char file[256], name[300], artist[300], album[300];
+    uint64_t artOff, artLen;
 } g_fake;
 
 static int eq(const char* a, const char* b) {
@@ -310,47 +350,87 @@ static uint64_t toU64(const char* s) {
     return v;
 }
 
+static void owe(int type) {
+    __atomic_or_fetch(&g_fake.owed, 1u << type, __ATOMIC_RELAXED);
+}
+
 static void fakeRefresh(void) {
-    static char text[1024];
-    char v[64];
+    static char text[2048];
+    char v[320];
     int on = 0;
     int fd = sysOpen(FAKE, SC_O_RDONLY, 0);
     if (fd >= 0) {
-        const int n = sysRead(fd, v, sizeof(v) - 1);
+        const int n = sysRead(fd, v, 64);
         sysClose(fd);
         v[n > 0 ? n : 0] = 0;
         size_t k = 0;
-        for (const char* p = v; *p && *p != '\n' && *p != '\r' && *p != ' ' && k < 15; p++)
+        for (const char* p = v; *p && *p != '\n' && *p != '\r' && *p != ' ' && k < 9; p++)
             g_fake.title[k++] = *p;
         if (!k) memcpy(g_fake.title, "SCMP00001", (k = 9));
         g_fake.title[k] = 0;
         fd = sysOpen(SC_BGM_STATUS, SC_O_RDONLY, 0);
-        if (fd >= 0) {
-            const int m = sysRead(fd, text, sizeof(text) - 1);
-            sysClose(fd);
-            text[m > 0 ? m : 0] = 0;
-            statusField(text, "beat_ms", v, sizeof(v));
-            const uint64_t beat = toU64(v), now = sysNowUs() / 1000u;
-            statusField(text, "state", v, sizeof(v));
-            const uint32_t state = eq(v, "playing") ? 2 : eq(v, "paused") ? 3 : 0;
-            on = state && beat && now >= beat && now - beat < 4000;
-            if (on) {
-                statusField(text, "pos_ms", v, sizeof(v));
-                const uint64_t pos = toU64(v) / 1000u;
-                statusField(text, "dur_ms", v, sizeof(v));
-                g_fake.durS = toU64(v) / 1000u;
-                if (state != g_fake.state || pos != g_fake.posS || !g_fake.active) g_fake.event = 1;
-                if (state != g_fake.state || !g_fake.active)
-                    say("fake: answering for our player as %s: %s, %lu of %lu s", g_fake.title,
-                        state == 2 ? "playing" : "paused", pos, g_fake.durS);
-                g_fake.state = state;
-                g_fake.posS = pos;
+    }
+    if (fd >= 0) {
+        const int m = sysRead(fd, text, sizeof(text) - 1);
+        sysClose(fd);
+        text[m > 0 ? m : 0] = 0;
+        statusField(text, "beat_ms", v, sizeof(v));
+        const uint64_t beat = toU64(v), now = sysNowUs() / 1000u;
+        statusField(text, "state", v, sizeof(v));
+        const uint32_t state = eq(v, "playing") ? 2 : eq(v, "paused") ? 3 : 0;
+        on = state && beat && now >= beat && now - beat < 4000;
+        if (on) {
+            statusField(text, "pos_ms", v, sizeof(v));
+            const uint64_t pos = toU64(v) / 1000u;
+            statusField(text, "dur_ms", v, sizeof(v));
+            g_fake.durS = toU64(v) / 1000u;
+            statusField(text, "index", v, sizeof(v));
+            g_fake.index = (uint32_t)toU64(v);
+            statusField(text, "count", v, sizeof(v));
+            g_fake.count = (uint32_t)toU64(v);
+            statusField(text, "file", v, sizeof(v));
+            if (!g_fake.active || !eq(v, g_fake.file)) {
+                lock(&g_fake.lock);
+                fmt(g_fake.file, sizeof(g_fake.file), "%s", v);
+                statusField(text, "title", g_fake.name, sizeof(g_fake.name));
+                if (!g_fake.name[0]) {  // the file's name, without its folder and type
+                    const char* base = v;
+                    for (const char* q = v; *q; q++)
+                        if (*q == '/') base = q + 1;
+                    fmt(g_fake.name, sizeof(g_fake.name), "%s", base);
+                    for (char* q = g_fake.name + strlen(g_fake.name); q > g_fake.name; q--)
+                        if (*q == '.') {
+                            *q = 0;
+                            break;
+                        }
+                }
+                statusField(text, "artist", g_fake.artist, sizeof(g_fake.artist));
+                statusField(text, "album", g_fake.album, sizeof(g_fake.album));
+                statusField(text, "art_off", v, sizeof(v));
+                g_fake.artOff = toU64(v);
+                statusField(text, "art_len", v, sizeof(v));
+                g_fake.artLen = toU64(v);
+                unlock(&g_fake.lock);
+                owe(EV_TRACK_INFO);
+                say("fake: track \"%s\" by \"%s\" (%s), cover %lu bytes at %lu", g_fake.name,
+                    g_fake.artist, g_fake.file, g_fake.artLen, g_fake.artOff);
             }
+            if (!g_fake.active) {
+                owe(EV_CORE_READY);
+                say("fake: our player is the music core, as %s", g_fake.title);
+            }
+            if (state != g_fake.state || pos != g_fake.posS || !g_fake.active)
+                owe(EV_PLAY_STATUS);
+            if (state != g_fake.state || !g_fake.active)
+                say("fake: %s, %lu of %lu s, track %u of %u", state == 2 ? "playing" : "paused",
+                    pos, g_fake.durS, g_fake.index + 1, g_fake.count);
+            g_fake.state = state;
+            g_fake.posS = pos;
         }
     }
     if (!on && g_fake.active) {
-        say("fake: off (%s)", fd >= 0 || sysExists(FAKE) ? "our player has no track" : "no mcw-fake.txt");
-        g_fake.event = 1;
+        say("fake: off (%s)", sysExists(FAKE) ? "our player has no track" : "no mcw-fake.txt");
+        g_fake.owed = 1u << EV_CORE_KILLED;
     }
     g_fake.active = on;
 }
@@ -361,6 +441,10 @@ static void put32At(uint8_t* p, size_t at, uint32_t v) {
 static void put64At(uint8_t* p, size_t at, uint64_t v) {
     memcpy(p + at, &v, 8);
 }
+static void putStr(uint8_t* p, size_t at, size_t cap, const char* s) {
+    const size_t n = strlen(s);
+    memcpy(p + at, s, n < cap - 1 ? n : cap - 1);
+}
 
 static void sendPlayer(const char* cmd) {
     const int fd = sysOpen(SC_BGM_CMD, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
@@ -370,40 +454,104 @@ static void sendPlayer(const char* cmd) {
     }
 }
 
-// After the real call, before it is logged: the answer changed for ours.
+static uint8_t* outBuf(const Frame* f, int arg, size_t size) {
+    uint8_t* p = (uint8_t*)(uintptr_t)f->gpr[arg];
+    if (hookReadable(p, size) < size || !(hookProt(p) & 2)) return NULL;
+    return p;
+}
+
+// After the real call, before it is logged: the answer, ours.
 static void fakeApply(Frame* f) {
-    if (!g_fake.active) return;
     const Hook* h = f->hook;
-    if (eq(h->name, "GetPlayStatus")) {
-        uint8_t* p = (uint8_t*)(uintptr_t)f->gpr[0];
-        if (hookReadable(p, 0x70) < 0x70 || !(hookProt(p) & 2)) return;
-        memset(p, 0, 0x70);
-        put32At(p, 0x04, g_fake.state);
-        put32At(p, 0x08, 100);
+    if (eq(h->name, "GetEvent")) {
+        // An event owed, when the server had none: killed only once we are off.
+        if ((uint32_t)f->retRax != 0x80FD0014u || !g_fake.owed) return;
+        uint8_t* p = outBuf(f, 0, 8);
+        if (!p) return;
+        const uint32_t owed = g_fake.owed;
+        const int type = (owed & (1u << EV_CORE_KILLED))   ? EV_CORE_KILLED
+                         : (owed & (1u << EV_CORE_READY))  ? EV_CORE_READY
+                         : (owed & (1u << EV_TRACK_INFO))  ? EV_TRACK_INFO
+                                                           : EV_PLAY_STATUS;
+        if (type != EV_CORE_KILLED && !g_fake.active) return;
+        __atomic_and_fetch(&g_fake.owed, ~(1u << type), __ATOMIC_RELAXED);
+        put32At(p, 0, (uint32_t)type);
+        put32At(p, 4, 0);
+        f->retRax = 0;
+        if (type != EV_PLAY_STATUS) say("fake: event %d given", type);
+        return;
+    }
+    if (!g_fake.active) return;
+    if (eq(h->name, "GetCoreInfo")) {
+        uint8_t* p = outBuf(f, 0, CI_SIZE);
+        if (!p) return;
+        memset(p, 0, CI_SIZE);
+        putStr(p, CI_SCHEME, 32, "customcore");
+        putStr(p, CI_TITLE, 10, g_fake.title);
+        put32At(p, CI_CONTENT, 0);  // music
+        for (int i = 0; i < 6; i++) put32At(p, CI_CONTENT + 4 + 4 * (size_t)i, 1);
+        put32At(p, CI_CONTENT + 4 + 8, 0);   // shuffle: not ours yet
+        put32At(p, CI_CONTENT + 4 + 12, 0);  // repeat: not ours yet
+        f->retRax = 0;
+    } else if (eq(h->name, "GetPlayStatus")) {
+        uint8_t* p = outBuf(f, 0, PS_SIZE);
+        if (!p) return;
+        memset(p, 0, PS_SIZE);
+        put32At(p, 0x04, g_fake.state);  // SceMusicCorePlayStatus: 2 play, 3 pause
+        put32At(p, 0x08, 100);           // play speed
         put64At(p, 0x10, g_fake.durS);
         put64At(p, 0x18, g_fake.posS);
-        put32At(p, 0x2C, 1);
-        put32At(p, 0x30, 0x8000);
-        put32At(p, 0x44, 1);
-        put32At(p, 0x48, 0xFFFFFFFEu);  // the core's id, as the USB Music Player's
-        put32At(p, 0x54, 1);
-        put32At(p, 0x58, 1);
-        memcpy(p + 0x60, g_fake.title, 16);
+        put32At(p, 0x24, g_fake.index);  // current track
+        put32At(p, 0x28, g_fake.index);  // current play index
+        put32At(p, 0x2C, g_fake.count);
+        put32At(p, 0x30, 0x8000);        // volume, 0 dB
+        // mute, repeat, auto play, BGM status, shuffle, the GUID: 0
+        put32At(p, 0x58, g_fake.index + 1 < g_fake.count ? 0 : 1);  // 0 can skip next
+        put32At(p, 0x5C, 0);                                          // can skip previous
+        putStr(p, 0x60, 10, g_fake.title);
         f->retRax = 0;
-    } else if (eq(h->name, "GetEvent")) {
-        uint8_t* p = (uint8_t*)(uintptr_t)f->gpr[0];
-        if ((uint32_t)f->retRax != 0x80FD0014u || !g_fake.event) return;
-        if (hookReadable(p, 4) < 4 || !(hookProt(p) & 2)) return;
-        g_fake.event = 0;
-        put32At(p, 0, 2);
+    } else if (eq(h->name, "GetTrackInfo")) {
+        uint8_t* p = outBuf(f, 1, TI_SIZE);
+        if (!p) return;
+        memset(p, 0, TI_SIZE);
+        char uri[300];
+        lock(&g_fake.lock);
+        fmt(uri, sizeof(uri), "file://%s", g_fake.file);
+        putStr(p, TI_SRC, 1048, uri);
+        putStr(p, TI_TRACK, 341, g_fake.name);
+        putStr(p, TI_ALBUM, 341, g_fake.album);
+        putStr(p, TI_ARTIST, 341, g_fake.artist);
+        if (g_fake.artLen) {
+            putStr(p, TI_COVER, 1048, uri);
+            put64At(p, TI_COVER_OFF, g_fake.artOff);
+            put64At(p, TI_COVER_OFF + 8, g_fake.artLen);
+        }
+        unlock(&g_fake.lock);
+        f->retRax = 0;
+    } else if (eq(h->name, "GetTitleId")) {
+        char* p = (char*)(uintptr_t)f->gpr[0];
+        const size_t cap = (size_t)f->gpr[1];
+        if (cap < 10 || cap > 64 || hookReadable(p, cap) < cap || !(hookProt(p) & 2)) return;
+        memset(p, 0, cap);
+        putStr((uint8_t*)p, 0, cap, g_fake.title);
         f->retRax = 0;
     } else if (eq(h->name, "PlayControl")) {
-        const uint32_t cmd = (uint32_t)f->gpr[1];
-        say("fake: PlayControl command %u (core %d): %s", cmd, (int32_t)f->gpr[0],
-            cmd == 1 ? "play" : cmd == 3 ? "pause" : "not known yet, nothing sent");
-        if (cmd == 1) sendPlayer("play\n");
-        if (cmd == 3) sendPlayer("pause\n");
-        g_fake.event = 1;
+        // (trackIndex, SceMusicCorePlayCmd, startTime, playSpeed). Commands: 0
+        // start by time, 1 start at the current position, 2 jump, 3 stop.
+        const uint32_t track = (uint32_t)f->gpr[0], cmd = (uint32_t)f->gpr[1];
+        const char* send = track == TRACK_NEXT ? "next\n"
+                           : track == TRACK_PREV ? "prev\n"
+                           : cmd == 3            ? "pause\n"
+                           : cmd <= 1            ? "play\n"
+                                                 : NULL;
+        say("fake: PlayControl track 0x%X, command %u, time %lu: %s", track, cmd, f->gpr[2],
+            send ? send : "nothing sent\n");
+        if (send) sendPlayer(send);
+        owe(EV_PLAY_STATUS);
+        if (track == TRACK_NEXT || track == TRACK_PREV) owe(EV_TRACK_INFO);
+        f->retRax = 0;
+    } else if (eq(h->name, "SetShuffle") || eq(h->name, "SetRepeatMode")) {
+        say("fake: %s(%lu): not ours yet", h->name, f->gpr[0]);
         f->retRax = 0;
     }
 }
