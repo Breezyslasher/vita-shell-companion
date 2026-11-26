@@ -479,6 +479,25 @@ static void* probeMain(void* arg) {
         return NULL;
     }
     if (g_bgft.user == -1) bgftUser();
+    // Its size, as a package installer gives a package's (0.93: 0.92
+    // registered with none, and the PS4 said it was not on the server):
+    // HEAD, its Content-Length.
+    uint64_t size = 0;
+    if (httpSetup()) {
+        const int tmpl = g_http.tmpl(g_http.ctx, "ShellCompanion/" SC_BGM_VERSION, 2, 1);
+        const int conn = tmpl >= 0 ? g_http.conn(tmpl, url, 1) : -1;
+        const int req = conn >= 0 ? g_http.req(conn, 2 /* HEAD */, url, 0) : -1;
+        int code = 0, known = -1;
+        if (req >= 0 && g_http.send(req, NULL, 0) >= 0) {
+            g_http.status(req, &code);
+            g_http.length(req, &known, &size);
+        }
+        if (known != 0) size = 0;
+        logLine("probe: HEAD: HTTP %d, %lu bytes", code, (unsigned long)size);
+        if (req >= 0) g_http.delReq(req);
+        if (conn >= 0) g_http.delConn(conn);
+        if (tmpl >= 0) g_http.delTmpl(tmpl);
+    }
     // Package types to try: none, empty, and guesses at a media one.
     // NULL last: the service may take a missing one worst.
     static const char* const types[] = {"", "PS4MUSIC", "MUSIC", "PS4AUDIO", "AUDIO", "PS4VIDEO", "VIDEO", "audio/mpeg", NULL};
@@ -498,7 +517,7 @@ static void* probeMain(void* arg) {
             p.option = 0x10000;  // DISABLE_CDN_QUERY_PARAM
             p.packageType = types[t];
             p.packageSubType = "";
-            p.packageSize = 0;
+            p.packageSize = size;
             int32_t id = -1;
             const int rc = g_bgft.reg(&p, &id);
             logLine("probe: type %s%s%s, entitlement %d: 0x%08X, task %d", types[t] ? "\"" : "",

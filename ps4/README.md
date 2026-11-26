@@ -896,6 +896,18 @@ scReadQueueStatus(&st);               // st.index, st.track, st.positionMs, …
 
 The test app (0.81) loads both modules with `scOpen`, on X and on UP.
 
+### Media through the download service: listed, not fetched (0.93)
+
+0.92's run: the MP3 was taken (task 1059) and shown in Notifications >
+Downloads as "Shell Companion test". It failed at once, without a byte
+(progress error `0x80990033`, 0 of 0), and the PS4 said CE-32942-0: "Cannot
+continue downloading the content. It is not on the server." The same URL
+streams in the player. The service keeps what it downloads in
+`/user/download/NPXS20113/download0.dat` (2 GB), not where an app chooses.
+0.93 registers it with its size (a HEAD request's Content-Length), as
+package installers give a package's. The probe's URL can be a PC's HTTP
+server (`bgft-probe.txt`), whose log shows what the PS4 asks for.
+
 ### Media through the download service: taken (0.92)
 
 With a user (0.91), the service took the MP3 at once: package type `""`,
