@@ -2232,6 +2232,7 @@ static struct {
     volatile int n;
 } g_dbReg;
 
+static void dbKeep(const char* path, const char* table, const char* how);
 static void dbRegistSeen(Frame* f) {
     char path[160] = "", table[64] = "";
     monoText(f->gpr[0], path, sizeof(path));
@@ -2241,11 +2242,41 @@ static void dbRegistSeen(Frame* f) {
         if (eq(g_dbReg.path[i], path) && eq(g_dbReg.table[i], table)) known = 1;
     say("dbnotify: subscription (\"%s\", \"%s\")%s  [thread %d]", path, table, known ? " again" : "",
         scePthreadGetthreadid());
-    if (!known && g_dbReg.n < 8 && path[0] && table[0]) {
+    dbKeep(path, table, "subscription");
+}
+
+static void dbKeep(const char* path, const char* table, const char* how) {
+    int known = 0;
+    for (int i = 0; i < g_dbReg.n; i++)
+        if (eq(g_dbReg.path[i], path) && eq(g_dbReg.table[i], table)) known = 1;
+    if (known || !path[0] || !table[0] || path[0] == '(' || table[0] == '(') return;
+    say("dbnotify: %s (\"%s\", \"%s\")  [thread %d]", how, path, table, scePthreadGetthreadid());
+    if (g_dbReg.n < 8) {
         fmt(g_dbReg.path[g_dbReg.n], sizeof(g_dbReg.path[0]), "%s", path);
         fmt(g_dbReg.table[g_dbReg.n], sizeof(g_dbReg.table[0]), "%s", table);
         __atomic_store_n(&g_dbReg.n, g_dbReg.n + 1, __ATOMIC_RELEASE);
     }
+}
+
+// DbItemAccessor.DbEventHandler, an event heard (1.43): the accessor's own
+// strings, m_dbPath (0x38) and m_tablePath (0x40) (the dump's fields), kept
+// as a subscription's. 1.42's log: the list's and the tile's accessors had
+// subscribed before the hooks were in, and only these events showed them.
+static void dbHandlerSeen(Frame* f) {
+    static uint32_t seen;
+    const uint8_t* acc = (const uint8_t*)(uintptr_t)f->gpr[0];
+    char path[160] = "", table[64] = "";
+    if ((uintptr_t)acc > 0x10000 && hookReadable(acc, 0x48) == 0x48) {
+        uint64_t sp, st;
+        memcpy(&sp, acc + 0x38, 8);
+        memcpy(&st, acc + 0x40, 8);
+        if (sp > 0x10000 && hookReadable((void*)(uintptr_t)sp, 0x18) == 0x18) monoText(sp, path, sizeof(path));
+        if (st > 0x10000 && hookReadable((void*)(uintptr_t)st, 0x18) == 0x18) monoText(st, table, sizeof(table));
+    }
+    if (seen++ < 80)
+        say("dbnotify: accessor %p told its table changed: \"%s\", \"%s\"  [#%u, thread %d]", (void*)acc, path, table,
+            seen, scePthreadGetthreadid());
+    dbKeep(path, table, "an accessor's");
 }
 
 // 1 once a subscription to notification.db has been seen (1.42).
@@ -2957,10 +2988,7 @@ void mcwPost(Frame* f) {
         return;
     }
     if (f->hook->json == 25) {
-        static uint32_t seen;
-        if (seen++ < 80)
-            say("dbnotify: an accessor (%p) told its table changed  [#%u, thread %d]", (void*)(uintptr_t)f->gpr[0],
-                seen, scePthreadGetthreadid());
+        dbHandlerSeen(f);
         return;
     }
 #endif

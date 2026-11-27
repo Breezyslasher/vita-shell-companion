@@ -432,6 +432,15 @@ service's are, not the managed wrappers 0.85 hooked.
   With that, a finished song leaves section 3 at once and is not made
   again (1.38's swap only with `dl-list-swap`, or if no subscription was
   seen). `dl-list-nopost` turns the post off.
+- **1.42 on the PS4:** no subscription was seen: the list's and the tile's
+  accessors had subscribed before the hooks were in (1.1 s), so the swap
+  went on. `DbItemAccessor.DbEventHandler` was heard three times (46.9,
+  50.8, 63.0 s), each for the same five accessors. The tile itself is not
+  there with nothing going or failed (`DownloadSummaryAccessor.GetItems`:
+  no item when `m_execute + m_error` is 0), as with the PS4's own.
+  1.43: an event heard keeps the accessor's own strings, `m_dbPath`
+  (0x38) and `m_tablePath` (0x40), as a subscription's, so from then on
+  the module posts with them.
 
 ### One module, and the cleanup (0.95)
 
