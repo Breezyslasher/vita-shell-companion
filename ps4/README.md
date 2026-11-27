@@ -389,6 +389,14 @@ service's are, not the managed wrappers 0.85 hooked.
   refused (0x80990055). Rows made after a song finished were all answered
   the app's title id (1.36's way). 1.38: the new placeholder keeps a title
   id of its own, and the list, making its row, gets the app's.
+- **The Notifications tile** (`DownloadSummaryAccessor:GetItems`, the
+  dump): it counts section 3's tasks (filter 3, the same query as the
+  list's), Run as downloading and every other one, paused or finished, as
+  waiting; filter 5 as errors. Ours stay in section 3 when finished till
+  the list has read section 9, so it read "Downloading: 1 Waiting: 5"
+  till all were done. 1.39, a test: with `dl-list-move-now` a finished one
+  leaves section 3 at once (1.15 did, and rows were gone till the list
+  next read section 9, 24 s on).
 
 ### One module, and the cleanup (0.95)
 

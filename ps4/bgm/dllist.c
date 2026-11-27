@@ -81,6 +81,7 @@ static struct {
     uint64_t endedUs;  // when the last list ended, 0 if one is going
     int restored;      // its entries are from before a reboot (1.29)
     uint32_t titleLogged;
+    int moveNow;       // dl-list-move-now: finished ones out of section 3 at once (1.39, a test)
     int noPausedParam; // dl-list-param-nopause: paused only in the progress answers (1.35, a test)
     volatile int wantPost;  // an item changed state: tell the list (1.19)
     uint32_t infoLogged;
@@ -414,8 +415,12 @@ void dlListQueryHook(Frame* f) {
                         // answer (1.16): 1.15's left section 3 at 55.4 s, the
                         // list asked for section 9 at 79.9 s, and between
                         // them they were in neither, gone from the screen.
+                        // (1.39: with dl-list-move-now, at once: the
+                        // Notifications tile counts every section 3 task
+                        // not Run as waiting, finished ones too, and read
+                        // "Downloading: 1 Waiting: 5" till all were done.)
                         if (g_dll.e[k].task == id && id > 0 && dllSection(k) != 3 &&
-                            g_dll.e[k].shownIn == dllSection(k)) {
+                            (g_dll.e[k].shownIn == dllSection(k) || g_dll.moveNow)) {
                             out = 1;
                             if (!g_dll.e[k].movedOut) {
                                 g_dll.e[k].movedOut = 1;
@@ -1057,6 +1062,8 @@ static void dllAnswers(void) {
     // the list make a resumed song's row again (1.34's log: rebuilt at the
     // section read after Resume, as the song above it left the section).
     g_dll.noPausedParam = sysExists(SC_BGM_DIR "/dl-list-param-nopause");
+    g_dll.moveNow = sysExists(SC_BGM_DIR "/dl-list-move-now");
+    if (g_dll.moveNow) logLine("dllist: dl-list-move-now: finished ones out of section 3 at once");
     if (g_dll.noPausedParam) logLine("dllist: dl-list-param-nopause: paused only in the progress answers");
     if (g_dll.trying) logLine("dllist: trying finished answers (dl-list-try): item i gets [A-F][i %% 6]");
     // 1.25, from the list's own code (the debug dump, code4.bin): a row
