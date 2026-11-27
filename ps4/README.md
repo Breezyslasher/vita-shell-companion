@@ -441,6 +441,11 @@ service's are, not the managed wrappers 0.85 hooked.
   1.43: an event heard keeps the accessor's own strings, `m_dbPath`
   (0x38) and `m_tablePath` (0x40), as a subscription's, so from then on
   the module posts with them.
+- **1.43 on the PS4:** the events were heard (6.6, 9.8, 47.4, 64.8 s, five
+  accessors each), but `m_dbPath`/`m_tablePath` were empty:
+  `NotificationDbAccessor` subscribes with its own `m_dbInfo` (path 0x58,
+  table 0x60), which its `GetDbTableForNotification` returns. 1.44 reads
+  those when the base's are empty.
 
 ### One module, and the cleanup (0.95)
 

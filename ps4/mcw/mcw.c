@@ -2272,6 +2272,16 @@ static void dbHandlerSeen(Frame* f) {
         memcpy(&st, acc + 0x40, 8);
         if (sp > 0x10000 && hookReadable((void*)(uintptr_t)sp, 0x18) == 0x18) monoText(sp, path, sizeof(path));
         if (st > 0x10000 && hookReadable((void*)(uintptr_t)st, 0x18) == 0x18) monoText(st, table, sizeof(table));
+        // (1.44: empty in 1.43's log: NotificationDbAccessor subscribes with
+        // its own m_dbInfo, path at 0x58, table at 0x60, which its
+        // GetDbTableForNotification returns, the dump's.)
+        if ((!path[0] || !table[0]) && hookReadable(acc, 0x68) == 0x68) {
+            memcpy(&sp, acc + 0x58, 8);
+            memcpy(&st, acc + 0x60, 8);
+            path[0] = table[0] = 0;
+            if (sp > 0x10000 && hookReadable((void*)(uintptr_t)sp, 0x18) == 0x18) monoText(sp, path, sizeof(path));
+            if (st > 0x10000 && hookReadable((void*)(uintptr_t)st, 0x18) == 0x18) monoText(st, table, sizeof(table));
+        }
     }
     if (seen++ < 80)
         say("dbnotify: accessor %p told its table changed: \"%s\", \"%s\"  [#%u, thread %d]", (void*)acc, path, table,
