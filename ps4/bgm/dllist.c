@@ -1203,14 +1203,18 @@ static void dlListDone(int i) {
         if (g_dll.e[k].item != i || g_dll.e[k].swapped || g_dll.e[k].task <= 0 || g_dll.e[k].movedOut) continue;
         g_dll.e[k].swapped = 1;
         const int32_t old = g_dll.e[k].task;
-        const int32_t task = dllRegisterAs(i, g_dls.app);
+        // Its own title id still (1.38): with the app's the service said
+        // 0x80990055 to every one (1.37's log). The list asks for a new
+        // row's content id as it makes it, finished by then, and is
+        // answered with the app's (dlListInfoHook, 1.36).
+        const int32_t task = dllRegisterAs(i, NULL);
         if (task <= 0) return;
         g_dll.e[k].lastParam = 0;
         g_dll.e[k].logged = 0;
         g_dll.e[k].shownIn = 0;
         g_dll.e[k].oldTask = old;
         __atomic_store_n(&g_dll.e[k].task, task, __ATOMIC_RELEASE);
-        logLine("dllist: task %d finished: made again as task %d, title %s", old, task, g_dls.app);
+        logLine("dllist: task %d finished: made again as task %d", old, task);
         dllUnregister(old);
         dllSave();
         return;

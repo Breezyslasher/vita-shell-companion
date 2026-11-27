@@ -385,6 +385,10 @@ service's are, not the managed wrappers 0.85 hooked.
   made. 1.37: as a song finishes its placeholder is registered again with
   the app's title id and the old one removed (a new task is in the list's
   next section read at once), so its row is made finished, with the app.
+- **1.37 on the PS4:** every registration with the app's title id was
+  refused (0x80990055). Rows made after a song finished were all answered
+  the app's title id (1.36's way). 1.38: the new placeholder keeps a title
+  id of its own, and the list, making its row, gets the app's.
 
 ### One module, and the cleanup (0.95)
 
