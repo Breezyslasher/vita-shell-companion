@@ -377,6 +377,14 @@ service's are, not the managed wrappers 0.85 hooked.
   now answered with the app's title id (from `app=`); songs still coming
   keep their own, so Cancel and Delete still takes only one.
   `dl-list-own-title` keeps their own throughout.
+- **1.36 on the PS4:** Resume put the song back in the queue. Songs 1-3,
+  whose rows were made again in section 9 with the app's title id, read
+  "Installed."; songs 4-6, finished in section 3 in rows made while they
+  were coming, read nothing, though 4 and 5 were asked for again with the
+  app's title id: the row's look is built with the title id it had when
+  made. 1.37: as a song finishes its placeholder is registered again with
+  the app's title id and the old one removed (a new task is in the list's
+  next section read at once), so its row is made finished, with the app.
 
 ### One module, and the cleanup (0.95)
 

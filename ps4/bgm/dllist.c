@@ -95,6 +95,7 @@ static struct {
     int32_t pctSeen;     // the first real task it was seen in
     struct {
         volatile int32_t task;
+        volatile int swapped;      // its finished placeholder (the app's title id) in (1.37)
         volatile int32_t oldTask;  // the one it replaced (dllRepair), still the list's row's for a while (1.33)
         int item;
         uint64_t t0, b0;  // when it began to come, and its bytes then
@@ -929,7 +930,11 @@ static uint64_t dllHeadSize(const char* url, const char* extra) {
     return code >= 200 && code < 300 && known == 0 ? size : 0;
 }
 
-static int32_t dllRegister(int i) {
+static int32_t dllRegisterAs(int i, const char* title);
+static int32_t dllRegister(int i) { return dllRegisterAs(i, NULL); }
+
+// title: the title id in its content id, NULL for one of its own.
+static int32_t dllRegisterAs(int i, const char* title) {
     static uint32_t serial;
     __typeof__(g_dls.item[0])* it = &g_dls.item[i];
     // A content id of its own each time: XXYYYY-TITLEID_00-<16 letters and digits>.
@@ -941,8 +946,12 @@ static int32_t dllRegister(int i) {
     // doesn't start it again.
     if (!serial) serial = (uint32_t)(sysNowUs() / 1000u);
     const uint32_t n = serial++;
-    fmt(id, sizeof(id), "IV0000-SCDL%05u_00-SCDL%03u%09lu", n % 100000u, n % 1000u,
-        (unsigned long)(sysNowUs() / 1000u % 1000000000u));
+    if (title)
+        fmt(id, sizeof(id), "IV0000-%.9s_00-SCDL%03u%09lu", title, n % 1000u,
+            (unsigned long)(sysNowUs() / 1000u % 1000000000u));
+    else
+        fmt(id, sizeof(id), "IV0000-SCDL%05u_00-SCDL%03u%09lu", n % 100000u, n % 1000u,
+            (unsigned long)(sysNowUs() / 1000u % 1000000000u));
     BgftParam p;
     memset(&p, 0, sizeof(p));
     p.userId = g_bgft.user;
@@ -1122,6 +1131,7 @@ static void dlListBegin(void) {
         g_dll.e[k].shownIn = 0;
         g_dll.e[k].lastParam = 0;
         g_dll.e[k].oldTask = 0;
+        g_dll.e[k].swapped = 0;
         g_dll.e[k].task = task;
         __atomic_store_n(&g_dll.count, k + 1, __ATOMIC_RELEASE);
     }
@@ -1175,6 +1185,35 @@ static void dlListCheck(void) {
         BgftProgress pr;
         memset(&pr, 0, sizeof(pr));
         g_bgft.progress(t, &pr);
+    }
+}
+
+// An item finished (1.37): its row made again, with the app's title id.
+// The list builds a row's look once, with the title id the task had then:
+// 1.36's songs 4-6, finished in section 3 with rows made while they were
+// coming (their own title id, no app), read nothing, though 4 and 5 were
+// asked for again with the app's; songs 1-3, made again in section 9 with
+// it, read "Installed.". A new task is in the list's next section read at
+// once (every registration so far); the old one goes. Songs still coming
+// keep their own (Cancel and Delete takes one only). Not with
+// dl-list-own-title.
+static void dlListDone(int i) {
+    if (strlen(g_dls.app) != 9 || sysExists(SC_BGM_DIR "/dl-list-own-title")) return;
+    for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
+        if (g_dll.e[k].item != i || g_dll.e[k].swapped || g_dll.e[k].task <= 0 || g_dll.e[k].movedOut) continue;
+        g_dll.e[k].swapped = 1;
+        const int32_t old = g_dll.e[k].task;
+        const int32_t task = dllRegisterAs(i, g_dls.app);
+        if (task <= 0) return;
+        g_dll.e[k].lastParam = 0;
+        g_dll.e[k].logged = 0;
+        g_dll.e[k].shownIn = 0;
+        g_dll.e[k].oldTask = old;
+        __atomic_store_n(&g_dll.e[k].task, task, __ATOMIC_RELEASE);
+        logLine("dllist: task %d finished: made again as task %d, title %s", old, task, g_dls.app);
+        dllUnregister(old);
+        dllSave();
+        return;
     }
 }
 

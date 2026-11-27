@@ -77,6 +77,7 @@ static void dlListIdle(void);        // dllist.c (1.15)
 static void dlListForget(void);      // dllist.c (1.29)
 static int dlListShown(void);        // dllist.c (1.31)
 static void dlListCheck(void);       // dllist.c (1.32)
+static void dlListDone(int i);       // dllist.c (1.37)
 
 // %XX back to its byte.
 static void dlDecode(char* s) {
@@ -561,6 +562,7 @@ static void* dlMain(void* arg) {
             dlStatus();
             dlProgress();
             if (g_dls.item[i].state == DLS_DONE) {
+                dlListDone(i);  // its row made again, "Installed." (1.37)
                 done++;
                 if (g_dls.count > 1) dlNotifyUnlisted("Downloaded: %s (%d of %d)", g_dls.item[i].title, done, g_dls.count);
             } else if (g_dls.item[i].state != DLS_WAITING && g_dls.item[i].state != DLS_CANCELLED) {
