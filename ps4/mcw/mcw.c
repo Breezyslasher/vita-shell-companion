@@ -1196,7 +1196,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 32
+#define MONO_HOOKS 34
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -2825,6 +2825,13 @@ static void monoHooks(void) {
          "DbNotify.RegistDbEventCallback"},
         {"Sce.Vsh.Accessor.Db", "Sce.Vsh.Accessor.Db", "DbItemAccessor", "DbEventHandler", 1, 25,
          "DbItemAccessor.DbEventHandler"},
+        // 1.45: what marks the Downloads list's and the tile's accessors
+        // updated (their IsUpdated returns what only Update sets), and who
+        // calls it: the caller named from the return address.
+        {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "NotificationDbAccessor", "Update", 0, 26,
+         "NotificationDbAccessor.Update"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadSummaryAccessor", "Update", 0, 26,
+         "DownloadSummaryAccessor.Update"},
     };
     // The download service's (kind 17), logged only when asked (0.87): with a
     // download going, Notifications > Downloads crashed the shell under
@@ -2999,6 +3006,23 @@ void mcwPost(Frame* f) {
     }
     if (f->hook->json == 25) {
         dbHandlerSeen(f);
+        return;
+    }
+    if (f->hook->json == 26) {
+        static uint32_t seen;
+        if (seen++ >= 200) return;
+        const uint64_t* cs = f->callerStack;
+        uint64_t ret = 0;
+        if (cs && hookReadable(cs - 1, 8) == 8) ret = cs[-1];
+        char* who = NULL;
+        if (ret && g_dump.jitFind && g_dump.jitMethod && g_dump.fullName && g_setupAgain.domain) {
+            void* ji = g_dump.jitFind(g_setupAgain.domain, (void*)(uintptr_t)ret);
+            void* m = ji ? g_dump.jitMethod(ji) : NULL;
+            who = m ? g_dump.fullName(m, 1) : NULL;
+        }
+        say("updated: %s(%p), called from %lx %s  [#%u, thread %d]", f->hook->name, (void*)(uintptr_t)f->gpr[0],
+            (unsigned long)ret, who ? who : "(not named)", seen, scePthreadGetthreadid());
+        logLine("dllist: %s, called from %s", f->hook->name, who ? who : "(not named)");  // beside the list's reads
         return;
     }
 #endif

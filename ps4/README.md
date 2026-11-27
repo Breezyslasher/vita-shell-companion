@@ -446,6 +446,20 @@ service's are, not the managed wrappers 0.85 hooked.
   `NotificationDbAccessor` subscribes with its own `m_dbInfo` (path 0x58,
   table 0x60), which its `GetDbTableForNotification` returns. 1.44 reads
   those when the base's are empty.
+- **1.44 on the PS4:** the posts were heard, 0.015 s on, by the accessors
+  that had heard events before: all subscribed to notification.db's
+  `popup_window` and `popup_window_<user>` tables (the notification
+  pop-ups). The Downloads list read no section after any of them; with the
+  swap off, finished songs left section 3 only at the list's next read for
+  other reasons (up to 23 s on). No Downloads accessor heard a database
+  event in any log. 1.45: the swap again by default (`dl-list-noswap` to
+  not), the post only with `dl-list-post`; and, to read what does tell
+  the list and the tile, `NotificationDbAccessor.Update` and
+  `DownloadSummaryAccessor.Update` (what their `IsUpdated` returns) hooked,
+  each call logged with its caller, named from the return address. Also:
+  a new list's removals no longer let the old tasks through with the
+  service's own params (1.44: `1248:200c1 1249:280c1 ...` in a read
+  between the first removal and the last).
 
 ### One module, and the cleanup (0.95)
 

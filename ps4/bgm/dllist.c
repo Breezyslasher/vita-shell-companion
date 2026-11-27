@@ -83,6 +83,8 @@ static struct {
     uint64_t endedUs;  // when the last list ended, 0 if one is going
     int restored;      // its entries are from before a reboot (1.29)
     uint32_t titleLogged;
+    int32_t dropping[DLL_MAX];  // tasks being removed (dllRemoveAll), left out of answers (1.45)
+    volatile int nDropping;
     volatile int posting;  // the list told of changes (DbNotify, 1.42): finished ones leave section 3 at once
     int moveNow;       // dl-list-move-now: finished ones out of section 3 at once (1.39, a test)
     int noPausedParam; // dl-list-param-nopause: paused only in the progress answers (1.35, a test)
@@ -392,6 +394,25 @@ void dlListQueryHook(Frame* f) {
             }
             if (w != cnt) {
                 logLine("dllist: section 5: %u of ours taken out of the failed ones", cnt - w);
+                *(uint32_t*)(uintptr_t)f->gpr[3] = w;
+                cnt = w;
+            }
+        }
+        // Tasks being removed (dllRemoveAll), out of any answer (1.45).
+        if (h == &g_dll.query[1] && g_dll.nDropping && cnt && cnt <= 960 &&
+            hookReadable(res, (size_t)cnt * 8) == (size_t)cnt * 8 && (hookProt(res) & 2) && (hookProt(num) & 2)) {
+            uint32_t w = 0;
+            for (uint32_t j = 0; j < cnt; j++) {
+                int32_t id;
+                memcpy(&id, res + j * 8, 4);
+                int drop = 0;
+                for (int d = 0; d < g_dll.nDropping; d++) drop |= id > 0 && g_dll.dropping[d] == id;
+                if (!drop) {
+                    if (w != j) memmove((uint8_t*)res + w * 8, res + j * 8, 8);
+                    w++;
+                }
+            }
+            if (w != cnt) {
                 *(uint32_t*)(uintptr_t)f->gpr[3] = w;
                 cnt = w;
             }
@@ -1066,7 +1087,7 @@ static void dllRepair(void) {
         dllSave();
         // The list and the Notifications tile told, as the service tells
         // them of its own (1.42): they read their sections again.
-        if (!sysExists(SC_BGM_DIR "/dl-list-nopost") && mcwDbNotifyKnown()) {
+        if (sysExists(SC_BGM_DIR "/dl-list-post") && mcwDbNotifyKnown()) {  // (1.45: only asked for)
             g_dll.posting = 1;  // before the post: the reads it brings come at once
             mcwDbNotifyPostAttached();
         }
@@ -1170,6 +1191,11 @@ static void dlListBegin(void) {
 static void dllRemoveAll(void) {
     const int n = g_dll.count;
     if (!n) return;
+    // Left out of every section answer while they go (1.45: 1.44's log, the
+    // first removal had the list read section 3 and the other five came
+    // with the service's own params, 0x280c1).
+    for (int k = 0; k < n && k < DLL_MAX; k++) g_dll.dropping[k] = g_dll.e[k].task;
+    __atomic_store_n(&g_dll.nDropping, n < DLL_MAX ? n : DLL_MAX, __ATOMIC_RELEASE);
     __atomic_store_n(&g_dll.count, 0, __ATOMIC_RELEASE);
     sysSleepMs(50);  // a call answering one of them, done
     for (int k = 0; k < n; k++) dllUnregister(g_dll.e[k].task);
@@ -1229,7 +1255,12 @@ static void dlListDone(int i) {
     // (1.42: not when the list can be told directly, DbNotify with the
     // subscriptions' own strings, unless dl-list-swap: its new row is made
     // in section 9 then, after it finished.)
-    if (mcwDbNotifyKnown() && !sysExists(SC_BGM_DIR "/dl-list-swap")) return;
+    // (1.45: always again. 1.44's log: the posts reached their subscribers,
+    // the notification pop-ups' (popup_window tables), and the Downloads
+    // list read nothing after them; no Downloads accessor heard a database
+    // event in any log. A task registered or removed is what has it read
+    // its sections at once (0.02 s, every swap). dl-list-noswap: not.)
+    if (sysExists(SC_BGM_DIR "/dl-list-noswap")) return;
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
         if (g_dll.e[k].item != i || g_dll.e[k].swapped || g_dll.e[k].task <= 0 || g_dll.e[k].movedOut) continue;
         g_dll.e[k].swapped = 1;
