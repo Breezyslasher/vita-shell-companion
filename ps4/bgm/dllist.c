@@ -28,6 +28,8 @@
 
 int mcwHookNative(Hook* h, void* fn, const char** why);  // mcw.c, under its install lock
 int mcwDbNotifyPost(void);  // mcw.c (1.19): the list told its table changed
+int mcwDbNotifyPostAttached(void);  // mcw.c (1.42): the same from the downloads' thread
+int mcwDbNotifyKnown(void);         // mcw.c (1.42): the subscriptions' strings seen
 int scePthreadGetthreadid(void);
 
 #define DLL_MAX 64
@@ -81,6 +83,7 @@ static struct {
     uint64_t endedUs;  // when the last list ended, 0 if one is going
     int restored;      // its entries are from before a reboot (1.29)
     uint32_t titleLogged;
+    volatile int posting;  // the list told of changes (DbNotify, 1.42): finished ones leave section 3 at once
     int moveNow;       // dl-list-move-now: finished ones out of section 3 at once (1.39, a test)
     int noPausedParam; // dl-list-param-nopause: paused only in the progress answers (1.35, a test)
     volatile int wantPost;  // an item changed state: tell the list (1.19)
@@ -428,7 +431,8 @@ void dlListQueryHook(Frame* f) {
                         // own param (1.39's log: 1169:200c1 at 138.778).
                         if (g_dll.e[k].swapped && g_dll.e[k].oldTask == id && id > 0) out = 1;
                         if (g_dll.e[k].task == id && id > 0 && dllSection(k) != 3 &&
-                            (g_dll.e[k].shownIn == dllSection(k) || g_dll.moveNow || g_dll.e[k].swapped)) {
+                            (g_dll.e[k].shownIn == dllSection(k) || g_dll.moveNow || g_dll.e[k].swapped ||
+                             g_dll.posting)) {
                             out = 1;
                             if (!g_dll.e[k].movedOut) {
                                 g_dll.e[k].movedOut = 1;
@@ -1058,7 +1062,15 @@ static void dllRepair(void) {
         dllUnregister(old);
         changed = 1;
     }
-    if (changed) dllSave();
+    if (changed) {
+        dllSave();
+        // The list and the Notifications tile told, as the service tells
+        // them of its own (1.42): they read their sections again.
+        if (!sysExists(SC_BGM_DIR "/dl-list-nopost") && mcwDbNotifyKnown()) {
+            g_dll.posting = 1;  // before the post: the reads it brings come at once
+            mcwDbNotifyPostAttached();
+        }
+    }
 }
 
 // What ours answer, set (1.29: also for those restored after a reboot).
@@ -1214,6 +1226,10 @@ static void dlListCheck(void) {
 // dl-list-own-title.
 static void dlListDone(int i) {
     if (strlen(g_dls.app) != 9 || sysExists(SC_BGM_DIR "/dl-list-own-title")) return;
+    // (1.42: not when the list can be told directly, DbNotify with the
+    // subscriptions' own strings, unless dl-list-swap: its new row is made
+    // in section 9 then, after it finished.)
+    if (mcwDbNotifyKnown() && !sysExists(SC_BGM_DIR "/dl-list-swap")) return;
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
         if (g_dll.e[k].item != i || g_dll.e[k].swapped || g_dll.e[k].task <= 0 || g_dll.e[k].movedOut) continue;
         g_dll.e[k].swapped = 1;

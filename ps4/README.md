@@ -415,6 +415,23 @@ service's are, not the managed wrappers 0.85 hooked.
   runs). With `dl-list-move-now` it left section 3 in the first read and
   was in section 9's 0.05-0.1 s on. 1.41: a song made again leaves
   section 3 at once without the file.
+- **1.42, telling the list and the tile as the service does** (the 1.40
+  dump, `methods5.map`): `NotificationDbAccessor` is a
+  `NotificationDbBaseAccessor`, a `DbItemAccessor`. Its
+  `EnableDbNotification`/`SetDbTable` subscribe through
+  `DbNotify.RegistDbEventCallback(dbPath, tableName, EventCallback2)`;
+  `DbNotify.OnEvent` takes an event's DbPath and TableName and calls the
+  callback when both equal the subscription's (case aside), nothing else
+  checked; `DbItemAccessor.DbEventHandler` sets `isUpdatedFlg` and calls
+  `Update()` (vtable 0xa0), and the list and the tile read their sections
+  again. 1.19-1.23 posted with a guessed table. 1.42 hooks
+  `RegistDbEventCallback` (the strings each subscriber uses, logged and
+  kept) and `DbItemAccessor.DbEventHandler` (each event heard, logged),
+  and as a song changes state posts `DbNotify.Post` with the
+  subscriptions' own strings, from the downloads' thread attached to Mono.
+  With that, a finished song leaves section 3 at once and is not made
+  again (1.38's swap only with `dl-list-swap`, or if no subscription was
+  seen). `dl-list-nopost` turns the post off.
 
 ### One module, and the cleanup (0.95)
 

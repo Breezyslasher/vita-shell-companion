@@ -1196,7 +1196,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 30
+#define MONO_HOOKS 32
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -2225,6 +2225,36 @@ static void monoLog(Frame* f) {
 // that accessor's own GetDbPath(), its table its TableName, "item" (and the
 // file's one table, "notification", too). Nothing is written to the
 // database. On a thread of the shell's (the list's, in a hook): 1 if posted.
+// The subscriptions seen (1.42): DbNotify.RegistDbEventCallback(dbPath,
+// tableName, callback), static: its strings in the first two arguments.
+static struct {
+    char path[8][160], table[8][64];
+    volatile int n;
+} g_dbReg;
+
+static void dbRegistSeen(Frame* f) {
+    char path[160] = "", table[64] = "";
+    monoText(f->gpr[0], path, sizeof(path));
+    monoText(f->gpr[1], table, sizeof(table));
+    int known = 0;
+    for (int i = 0; i < g_dbReg.n; i++)
+        if (eq(g_dbReg.path[i], path) && eq(g_dbReg.table[i], table)) known = 1;
+    say("dbnotify: subscription (\"%s\", \"%s\")%s  [thread %d]", path, table, known ? " again" : "",
+        scePthreadGetthreadid());
+    if (!known && g_dbReg.n < 8 && path[0] && table[0]) {
+        fmt(g_dbReg.path[g_dbReg.n], sizeof(g_dbReg.path[0]), "%s", path);
+        fmt(g_dbReg.table[g_dbReg.n], sizeof(g_dbReg.table[0]), "%s", table);
+        __atomic_store_n(&g_dbReg.n, g_dbReg.n + 1, __ATOMIC_RELEASE);
+    }
+}
+
+// 1 once a subscription to notification.db has been seen (1.42).
+int mcwDbNotifyKnown(void) {
+    for (int i = 0; i < g_dbReg.n; i++)
+        if (contains(g_dbReg.path[i], "notification.db")) return 1;
+    return 0;
+}
+
 int mcwDbNotifyPost(void) {
     static int tried, turn;
     static void *post, *getPath, *ways[4];
@@ -2252,6 +2282,22 @@ int mcwDbNotifyPost(void) {
         say("dbnotify: DbNotify %p, Post %p; NotificationDbAccessor %p, GetDbPath %p = \"%s\"%s", ncls, post, bcls,
             getPath, path, exc ? " (an exception)" : "");
     }
+    // 1.42: with the strings the subscriptions were made with, Post only.
+    if (mcwDbNotifyKnown() && ways[0]) {
+        int ok = 0;
+        for (int i = 0; i < g_dbReg.n; i++) {
+            if (!contains(g_dbReg.path[i], "notification.db")) continue;
+            void* args[2] = {g_row.stringNew(g_setupAgain.domain, g_dbReg.path[i]),
+                             g_row.stringNew(g_setupAgain.domain, g_dbReg.table[i])};
+            void* exc = NULL;
+            g_mono.invoke(ways[0], NULL, args, &exc);
+            if (!exc) ok = 1;
+            say("dbnotify: Post(\"%s\", \"%s\")%s  [thread %d]", g_dbReg.path[i], g_dbReg.table[i],
+                exc ? ": an exception" : "", scePthreadGetthreadid());
+        }
+        logLine("dllist: told the list (DbNotify.Post, the subscriptions' own strings)");
+        return ok;
+    }
     if (!path[0]) return 0;
     int w = turn++ % 4;
     for (int tries = 0; tries < 4 && !ways[w]; tries++) w = turn++ % 4;
@@ -2267,6 +2313,20 @@ int mcwDbNotifyPost(void) {
             exc ? ": an exception" : "", scePthreadGetthreadid());
     }
     logLine("dllist: told the list (DbNotify.%s)", wayNames[w]);  // in bgm.log too, beside its re-reads
+    return ok;
+}
+#endif
+
+#ifdef SC_COMPANION
+// The same from a thread Mono doesn't know (1.42: the downloads' own, as a
+// song changes state, so the Notifications tile hears it with the
+// Downloads list closed): attached for the call, detached after.
+int mcwDbNotifyPostAttached(void) {
+    if (!mcwDbNotifyKnown() || !g_setupAgain.attach || !g_setupAgain.domain) return 0;
+    void* thread = ((FnMonoPtr)g_setupAgain.attach)(g_setupAgain.domain);
+    if (!thread) return 0;
+    const int ok = mcwDbNotifyPost();
+    if (g_setupAgain.detach) ((FnMonoDetach)g_setupAgain.detach)(thread);
     return ok;
 }
 #endif
@@ -2714,6 +2774,16 @@ static void monoHooks(void) {
          "DownloadItemAccessor2.GetTaskParam"},
         {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "DownloadItemAccessor", "GetTotalCount", 0, 17,
          "DownloadItemAccessor.GetTotalCount"},
+        // 1.42: what the Downloads list and the Notifications tile listen
+        // for (the debug dump, methods5.map): DbItemAccessor subscribes
+        // with DbNotify.RegistDbEventCallback(dbPath, tableName, callback);
+        // DbNotify.OnEvent calls it for an event whose DbPath and TableName
+        // match (case aside), and its DbEventHandler marks the accessor
+        // updated, and the list and the tile read their sections again.
+        {"Sce.Vsh.Accessor.Db.Notify", "Sce.Vsh.Accessor.Db.Notify", "DbNotify", "RegistDbEventCallback", 3, 24,
+         "DbNotify.RegistDbEventCallback"},
+        {"Sce.Vsh.Accessor.Db", "Sce.Vsh.Accessor.Db", "DbItemAccessor", "DbEventHandler", 1, 25,
+         "DbItemAccessor.DbEventHandler"},
     };
     // The download service's (kind 17), logged only when asked (0.87): with a
     // download going, Notifications > Downloads crashed the shell under
@@ -2880,6 +2950,17 @@ void mcwPost(Frame* f) {
     }
     if (f->hook->json == 23) {
         dlListAppSizeHook(f);
+        return;
+    }
+    if (f->hook->json == 24) {
+        dbRegistSeen(f);
+        return;
+    }
+    if (f->hook->json == 25) {
+        static uint32_t seen;
+        if (seen++ < 80)
+            say("dbnotify: an accessor (%p) told its table changed  [#%u, thread %d]", (void*)(uintptr_t)f->gpr[0],
+                seen, scePthreadGetthreadid());
         return;
     }
 #endif
