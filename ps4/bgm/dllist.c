@@ -415,12 +415,16 @@ void dlListQueryHook(Frame* f) {
                         // answer (1.16): 1.15's left section 3 at 55.4 s, the
                         // list asked for section 9 at 79.9 s, and between
                         // them they were in neither, gone from the screen.
+                        // (1.41: at once too once made again (dlListDone):
+                        // its registration has the list read section 3 and
+                        // section 9 within 0.1 s (1.39's log, both ways),
+                        // so it isn't out of both for long.)
                         // (1.39: with dl-list-move-now, at once: the
                         // Notifications tile counts every section 3 task
                         // not Run as waiting, finished ones too, and read
                         // "Downloading: 1 Waiting: 5" till all were done.)
                         if (g_dll.e[k].task == id && id > 0 && dllSection(k) != 3 &&
-                            (g_dll.e[k].shownIn == dllSection(k) || g_dll.moveNow)) {
+                            (g_dll.e[k].shownIn == dllSection(k) || g_dll.moveNow || g_dll.e[k].swapped)) {
                             out = 1;
                             if (!g_dll.e[k].movedOut) {
                                 g_dll.e[k].movedOut = 1;

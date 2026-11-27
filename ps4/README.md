@@ -409,6 +409,12 @@ service's are, not the managed wrappers 0.85 hooked.
   (`code/methods5.map`, `code5.bin`) adds `NotificationDbAccessor`'s
   parent classes (`mono_class_get_parent`) and `DbNotify`, to read what
   the subscription takes.
+- **1.39 on the PS4:** a finished song's new registration (1.38) is what
+  has the list read again: section 3 within 0.02 s of it, section 9 0.05 s
+  after, and the song out of section 3 0.1 s after that (all six, both
+  runs). With `dl-list-move-now` it left section 3 in the first read and
+  was in section 9's 0.05-0.1 s on. 1.41: a song made again leaves
+  section 3 at once without the file.
 
 ### One module, and the cleanup (0.95)
 
