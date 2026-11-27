@@ -467,6 +467,15 @@ service's are, not the managed wrappers 0.85 hooked.
   finished), so finished ones stayed in section 3 till the list read for
   other reasons (58.8 s, 64.7 s, ... 105.8 s). 1.46 logs each way
   `dlListDone` leaves without making one again.
+- **1.46 on the PS4:** every finished song was made again and out of
+  section 3 within 0.05 s. Six placeholders from the run before (1273-1278)
+  were still with the service, `dl-list-tasks.txt` gone with the module's
+  other files (the music cache was read again too), and were shown with
+  the service's own params; Resume on them had the service fail all six.
+  1.47: at the module's start and at each new list, the service's tasks in
+  sections 3, 5 and 9 whose content id is ours (`..._00-SCDL...`, from
+  `sceBgftServiceIntGetTaskInfoValueString(task, 0xf)`) and not this run's
+  are removed.
 
 ### One module, and the cleanup (0.95)
 

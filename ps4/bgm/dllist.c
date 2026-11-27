@@ -1144,6 +1144,7 @@ static void dllAnswers(void) {
 }
 
 static void dllRemoveAll(void);
+static void dllSweep(const char* when);
 
 // A list beginning: a placeholder for each of its url and pages items.
 static void dlListBegin(void) {
@@ -1151,6 +1152,7 @@ static void dlListBegin(void) {
     g_dll.endedUs = 0;
     dllRemoveAll();  // the last list's, shown finished till now
     if (sysExists(SC_BGM_DIR "/dl-nolist") || !dllSetup()) return;
+    dllSweep("a new list");  // and any left over we didn't know of (1.47)
     // What ours answer (1.03), from the shell's own declarations
     // (Sce.Vsh.Orbis.Bgft: TaskProgress, TaskParam and their enums) and
     // every value logged so far:
@@ -1315,8 +1317,53 @@ static void dlListForget(void) {
     g_dls.count = 0;
 }
 
+// Placeholders of ours the service still has and we don't know of (1.47):
+// 1.46's boot had six from the run before (dl-list-tasks.txt gone with the
+// rest of the module's files), shown with the service's own params, and
+// Resume on them had the service fail them ("Cannot download"). Ours by
+// their content id: XXYYYY-TITLEID_00-SCDL... (the label's first four,
+// every placeholder since 0.96). Sections 3, 5 and 9 asked; removed unless
+// an entry of this run's.
+static void dllSweep(const char* when) {
+    if (!bgftSetup()) return;
+    typedef int (*FnQuerySection)(int, uint32_t, int, uint32_t*, void*);
+    typedef int (*FnValueString)(int32_t, int, char*);
+    const int lib = libLoad("libSceBgft.sprx");
+    FnQuerySection query = (FnQuerySection)anySym(lib, "sceBgftServiceIntDownloadQueryTaskSection");
+    FnValueString valueString = (FnValueString)anySym(lib, "sceBgftServiceIntGetTaskInfoValueString");
+    FnBgftUnregister unregister = (FnBgftUnregister)anySym(lib, "sceBgftServiceIntDownloadUnregisterTask");
+    if (!query || !valueString || !unregister) return;
+    static uint8_t res[960 * 8];
+    static const int sections[3] = {3, 5, 9};
+    int removed = 0;
+    for (int si = 0; si < 3; si++) {
+        uint32_t cnt = 0;
+        memset(res, 0, sizeof(res));
+        if (query(0, 960, sections[si], &cnt, res) < 0 || cnt > 960) continue;
+        for (uint32_t j = 0; j < cnt; j++) {
+            int32_t id;
+            memcpy(&id, res + j * 8, 4);
+            if (id <= 0) continue;
+            int mine = 0;
+            for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) mine |= g_dll.e[k].task == id;
+            if (mine) continue;
+            static char cid[512];
+            memset(cid, 0, sizeof(cid));
+            if (valueString(id, 0xf, cid) < 0) continue;
+            cid[sizeof(cid) - 1] = 0;
+            if (strlen(cid) < 24 || memcmp(cid + 16, "_00-SCDL", 8)) continue;
+            const int rc = unregister(id);
+            logLine("dllist: %s: task %d (%.36s) of ours, not known: removed 0x%08X", when, id, cid, (unsigned)rc);
+            removed++;
+        }
+    }
+    if (removed) logLine("dllist: %s: %d left over removed", when, removed);
+}
+
 // At the module's start: any placeholders left from an earlier boot (or a
 // crash), removed. Only when there are some: nothing is hooked otherwise.
+// (1.47: and any the service has that the list file didn't name.)
 static void dlListLeftovers(void) {
     if (sysExists(DLL_TASKS)) dllSetup();
+    dllSweep("at start");
 }
