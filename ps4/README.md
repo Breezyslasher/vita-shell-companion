@@ -476,6 +476,13 @@ service's are, not the managed wrappers 0.85 hooked.
   sections 3, 5 and 9 whose content id is ours (`..._00-SCDL...`, from
   `sceBgftServiceIntGetTaskInfoValueString(task, 0xf)`) and not this run's
   are removed.
+- **1.48, the service's event channel:** `libSceBgft` has no call that
+  sets a task's progress (all 109 exports read), but it has
+  `sceBgftServiceIntGetNotificationEvent`, `...GetNotificationParam` and
+  `...AbortNotificationEvent`: something in the shell waits on them, very
+  likely what has the Downloads list read again when a task is registered
+  or removed. Hooked, logged only (arguments, answer, 32 bytes at each
+  pointer), to read what an event is before sending any.
 
 ### One module, and the cleanup (0.95)
 

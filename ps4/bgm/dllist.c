@@ -78,6 +78,7 @@ static struct {
     Hook ctl[15];   // start, resume, pause, stop, unregister and the Int ones: the list's buttons (1.15, 1.29)
     volatile int selfCall;  // our own pause of a task, not the list's (1.29)
     Hook appSize[3];  // the service's app data size call (1.25)
+    Hook notif[3];    // the service's notification event calls, logged (1.48)
     uint32_t appSizeLogged;
     int dlThread;   // the downloads' thread, whose calls are ours
     uint64_t endedUs;  // when the last list ended, 0 if one is going
@@ -672,6 +673,25 @@ void dlListCtlHook(Frame* f) {
     }
 }
 
+// The service's notification event calls (1.48), kind 27: each, its first
+// 300, with its arguments, its answer, and 32 bytes at each argument that
+// points at memory, after the call.
+void dlListNotifHook(Frame* f) {
+    static uint32_t seen;
+    if (seen++ >= 300) return;
+    char dump[4][100];
+    for (int a = 0; a < 4; a++) {
+        dump[a][0] = 0;
+        const uint8_t* p = (const uint8_t*)(uintptr_t)f->gpr[a];
+        if ((uintptr_t)p < 0x10000 || hookReadable(p, 32) != 32) continue;
+        size_t at = 0;
+        for (int b = 0; b < 32; b++) at += (size_t)fmt(dump[a] + at, sizeof(dump[a]) - at, "%02x", p[b]);
+    }
+    logLine("dllist: %s(%lx, %lx, %lx, %lx) = 0x%08X  [thread %d]  a0 %s  a1 %s  a2 %s  a3 %s", f->hook->name,
+            (unsigned long)f->gpr[0], (unsigned long)f->gpr[1], (unsigned long)f->gpr[2], (unsigned long)f->gpr[3],
+            (unsigned)f->retRax, scePthreadGetthreadid(), dump[0], dump[1], dump[2], dump[3]);
+}
+
 // After the service's app data size call (taskId, out size), kind 23
 // (1.25): for ours, the song's size, so the list's row (Game) has an
 // AppDataSize and isn't "Calculating...". Logged: its first calls.
@@ -831,6 +851,26 @@ static int dllSetup(void) {
         const char* why = "";
         const int rc = mcwHookNative(h, fn, &why);
         logLine("dllist: %s %p: %s%s", anames[i], fn, rc == 0 ? "hooked" : "not hooked: ", rc == 0 ? "" : why);
+    }
+    // The service's notification events (1.48), logged only: what the shell
+    // waits on, likely what has the Downloads list read again when a task
+    // is registered or removed (every swap: a read within 0.02 s).
+    static const char* const nnames[3] = {"sceBgftServiceIntGetNotificationEvent",
+                                          "sceBgftServiceIntGetNotificationParam",
+                                          "sceBgftServiceIntAbortNotificationEvent"};
+    for (int i = 0; i < 3; i++) {
+        void* fn = anySym(lib, nnames[i]);
+        if (!fn) {
+            logLine("dllist: %s: not found", nnames[i]);
+            continue;
+        }
+        Hook* h = &g_dll.notif[i];
+        h->name = nnames[i] + 10;
+        h->json = 27;
+        const char* why = "";
+        const int rc = mcwHookNative(h, fn, &why);
+        logLine("dllist: %s %p: %s%s", nnames[i], fn, rc == 0 ? "hooked (logged only)" : "not hooked: ",
+                rc == 0 ? "" : why);
     }
     // The list's buttons (1.15).
     // 1.29: and the Int ones. 1.28's Download Now, Pause and delete called
