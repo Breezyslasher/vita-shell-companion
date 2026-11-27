@@ -423,6 +423,10 @@ void dlListQueryHook(Frame* f) {
                         // Notifications tile counts every section 3 task
                         // not Run as waiting, finished ones too, and read
                         // "Downloading: 1 Waiting: 5" till all were done.)
+                        // The task it replaced (1.41): its removal not gone
+                        // through yet, it came in one read with the service's
+                        // own param (1.39's log: 1169:200c1 at 138.778).
+                        if (g_dll.e[k].swapped && g_dll.e[k].oldTask == id && id > 0) out = 1;
                         if (g_dll.e[k].task == id && id > 0 && dllSection(k) != 3 &&
                             (g_dll.e[k].shownIn == dllSection(k) || g_dll.moveNow || g_dll.e[k].swapped)) {
                             out = 1;
