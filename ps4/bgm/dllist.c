@@ -1251,7 +1251,12 @@ static void dlListCheck(void) {
 // keep their own (Cancel and Delete takes one only). Not with
 // dl-list-own-title.
 static void dlListDone(int i) {
-    if (strlen(g_dls.app) != 9 || sysExists(SC_BGM_DIR "/dl-list-own-title")) return;
+    // Each way out logged (1.46: 1.45 made none again, with no reason seen).
+    if (strlen(g_dls.app) != 9 || sysExists(SC_BGM_DIR "/dl-list-own-title")) {
+        logLine("dllist: item %d finished: not made again (app \"%s\", dl-list-own-title %d)", i, g_dls.app,
+                sysExists(SC_BGM_DIR "/dl-list-own-title"));
+        return;
+    }
     // (1.42: not when the list can be told directly, DbNotify with the
     // subscriptions' own strings, unless dl-list-swap: its new row is made
     // in section 9 then, after it finished.)
@@ -1260,9 +1265,17 @@ static void dlListDone(int i) {
     // list read nothing after them; no Downloads accessor heard a database
     // event in any log. A task registered or removed is what has it read
     // its sections at once (0.02 s, every swap). dl-list-noswap: not.)
-    if (sysExists(SC_BGM_DIR "/dl-list-noswap")) return;
+    if (sysExists(SC_BGM_DIR "/dl-list-noswap")) {
+        logLine("dllist: item %d finished: not made again (dl-list-noswap)", i);
+        return;
+    }
     for (int k = 0; k < g_dll.count && k < DLL_MAX; k++) {
-        if (g_dll.e[k].item != i || g_dll.e[k].swapped || g_dll.e[k].task <= 0 || g_dll.e[k].movedOut) continue;
+        if (g_dll.e[k].item != i) continue;
+        if (g_dll.e[k].swapped || g_dll.e[k].task <= 0 || g_dll.e[k].movedOut) {
+            logLine("dllist: item %d finished: not made again (entry %d: swapped %d, task %d, moved %d)", i, k,
+                    g_dll.e[k].swapped, (int)g_dll.e[k].task, g_dll.e[k].movedOut);
+            return;
+        }
         g_dll.e[k].swapped = 1;
         const int32_t old = g_dll.e[k].task;
         // Its own title id still (1.38): with the app's the service said
@@ -1281,6 +1294,7 @@ static void dlListDone(int i) {
         dllSave();
         return;
     }
+    logLine("dllist: item %d finished: not made again (no entry of %d)", i, g_dll.count);
 }
 
 // The list's items have rows in Notifications > Downloads (1.31): song

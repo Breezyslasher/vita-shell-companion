@@ -460,6 +460,13 @@ service's are, not the managed wrappers 0.85 hooked.
   a new list's removals no longer let the old tasks through with the
   service's own params (1.44: `1248:200c1 1249:280c1 ...` in a read
   between the first removal and the last).
+- **1.45 on the PS4:** `NotificationDbAccessor.Update` and
+  `DownloadSummaryAccessor.Update` were hooked and never called: the
+  Downloads list's and the tile's reads are not set off by their
+  `IsUpdated`. And no song was made again (no registration after any
+  finished), so finished ones stayed in section 3 till the list read for
+  other reasons (58.8 s, 64.7 s, ... 105.8 s). 1.46 logs each way
+  `dlListDone` leaves without making one again.
 
 ### One module, and the cleanup (0.95)
 
