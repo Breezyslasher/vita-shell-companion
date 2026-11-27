@@ -2304,6 +2304,7 @@ static struct {
     FnMonoFieldOffset fieldOffset;
     FnMonoIter nested;
     FnMonoFieldName className;
+    void* (*parent)(void*);  // mono_class_get_parent (1.40)
 } g_dump;
 
 #ifdef SC_DEBUG  // the code dump (0.49): SC_DEBUG builds only (0.95)
@@ -2340,8 +2341,8 @@ static uint64_t followStub(uint64_t t) {
 }
 
 static void codeDump(void* domain, void* imageLoaded, void* classFromName, void* compile) {
-    if (sysExists(CODE_DIR "/methods4.map")) {
-        say("code: code/methods4.map is there already: not again");
+    if (sysExists(CODE_DIR "/methods5.map")) {
+        say("code: code/methods5.map is there already: not again");
         return;
     }
     if (!g_dump.methods || !g_dump.fullName || !g_dump.jitFind || !g_dump.jitStart ||
@@ -2376,8 +2377,8 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
         skips[n > 0 ? n : 0] = 0;
         sysClose(fd);
     }
-    const int map = sysOpen(CODE_DIR "/methods4.map.new", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
-    const int bin = sysOpen(CODE_DIR "/code4.bin", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    const int map = sysOpen(CODE_DIR "/methods5.map.new", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
+    const int bin = sysOpen(CODE_DIR "/code5.bin", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
     if (map < 0 || bin < 0) return;
     // 1.24: the Downloads list's own code, to read what it shows for a task
     // (what reads "Calculating...", "Preparing to download...", a percent,
@@ -2402,6 +2403,11 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
         {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "TaskParam"},
         {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "DownloadItemAccessor2"},
         {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "NotificationDbAccessor"},
+        // 1.40: what tells the list and the Notifications tile to read their
+        // downloads again: NotificationDbAccessor.Update() only sets
+        // m_isUpdated, from a subscription its constructor makes in its
+        // parent class (below, by mono_class_get_parent), and DbNotify.
+        {"Sce.Vsh.Accessor.Db.Notify", "Sce.Vsh.Accessor.Db.Notify", "DbNotify"},
     };
     // The string class, to name the strings a method loads (msg_... ids).
     void* corlib = ((FnMonoName)imageLoaded)("mscorlib");
@@ -2432,6 +2438,27 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
                         g_dump.className ? g_dump.className(n) : "?");
                     classes[nClasses++] = n;
                 }
+            }
+        }
+    }
+    // NotificationDbAccessor's parents, up to 4, each with its nested
+    // classes (1.40).
+    {
+        void* img = ((FnMonoName)imageLoaded)("Sce.Vsh.Orbis.BgftAccessor");
+        void* c = img ? ((FnMonoClass)classFromName)(img, "Sce.Vsh.Orbis.Bgft", "NotificationDbAccessor") : NULL;
+        for (int up = 0; up < 4 && c && g_dump.parent && nClasses < 256; up++) {
+            c = g_dump.parent(c);
+            const char* pn = c && g_dump.className ? g_dump.className(c) : NULL;
+            if (!c || !pn || (contains(pn, "Object") && strlen(pn) == 6)) break;
+            dumpPut(map, "parent %d of NotificationDbAccessor: %s %p", up + 1, pn, c);
+            const int top = nClasses;
+            fmt(names[nClasses], sizeof(names[0]), "%s", pn);
+            classes[nClasses++] = c;
+            void* iter = NULL;
+            void* n;
+            while (g_dump.nested && nClasses < 256 && (n = g_dump.nested(classes[top], &iter))) {
+                fmt(names[nClasses], sizeof(names[0]), "%s/%s", pn, g_dump.className ? g_dump.className(n) : "?");
+                classes[nClasses++] = n;
             }
         }
     }
@@ -2536,10 +2563,10 @@ static void codeDump(void* domain, void* imageLoaded, void* classFromName, void*
     sysClose(bin);
     sysClose(map);
     sysUnlink(CODE_DIR "/dumping");
-    sysRename(CODE_DIR "/methods4.map.new", CODE_DIR "/methods4.map");
-    say("code: %d methods, %lu bytes, %d calls named: code/methods4.map and code/code4.bin",
+    sysRename(CODE_DIR "/methods5.map.new", CODE_DIR "/methods5.map");
+    say("code: %d methods, %lu bytes, %d calls named: code/methods5.map and code/code5.bin",
         methods, at, calls);
-    notify("Debug: the Downloads list's code is in ShellCompanion/ps4/code (methods4.map, code4.bin)");
+    notify("Debug: the Downloads list's code is in ShellCompanion/ps4/code (methods5.map, code5.bin)");
 }
 
 #endif  // SC_DEBUG
@@ -2584,6 +2611,7 @@ static void monoHooks(void) {
     if (!sceKernelDlsym(mono, "mono_field_get_offset", &p)) g_dump.fieldOffset = (FnMonoFieldOffset)p;
     if (!sceKernelDlsym(mono, "mono_class_get_nested_types", &p)) g_dump.nested = (FnMonoIter)p;
     if (!sceKernelDlsym(mono, "mono_class_get_name", &p)) g_dump.className = (FnMonoFieldName)p;
+    if (!sceKernelDlsym(mono, "mono_class_get_parent", &p)) g_dump.parent = (void* (*)(void*))p;
     say("mono: object class %p, field by name %p, get %p, set %p, fields %p, field name %p, invoke %p",
         (void*)g_mono.objectClass, (void*)g_mono.fieldByName, (void*)g_mono.get, (void*)g_mono.set,
         (void*)g_mono.fields, (void*)g_mono.fieldName, (void*)g_mono.invoke);

@@ -397,6 +397,18 @@ service's are, not the managed wrappers 0.85 hooked.
   till all were done. 1.39, a test: with `dl-list-move-now` a finished one
   leaves section 3 at once (1.15 did, and rows were gone till the list
   next read section 9, 24 s on).
+- **What has the list and the tile read again (1.40):** both read through
+  `DownloadItemAccessor2`, a `NotificationDbAccessor` (notification.db's
+  "DOWNLOAD" items). Its `Update()` only sets `m_isUpdated` (0x71), which
+  `IsUpdated()` returns; the list and the tile read their sections again
+  when it is set. It is set from a subscription its constructor makes in
+  its parent class (a call with the accessor, its db info and 2): the
+  service's writes to notification.db for its own tasks set it, ours
+  never do. 1.21-1.23 posted `DbNotify` with guessed arguments and the
+  list did not read again. The 1.40 debug build's dump
+  (`code/methods5.map`, `code5.bin`) adds `NotificationDbAccessor`'s
+  parent classes (`mono_class_get_parent`) and `DbNotify`, to read what
+  the subscription takes.
 
 ### One module, and the cleanup (0.95)
 
