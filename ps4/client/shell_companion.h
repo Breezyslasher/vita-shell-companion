@@ -20,6 +20,8 @@
  *   ScQueueStatus st;
  *   scReadQueueStatus(&st);                          // where it had got to
  *
+ * The calls may be made from more than one thread (one runs at a time).
+ *
  * Plain C, libc only. Apache-2.0 (client/LICENSE), as the Vita client, so
  * that apps under any licence can link it; the modules are the project's own.
  */
@@ -47,7 +49,9 @@ int scInit(const char* titleId, const char* name);
 // hook the shell twice). It is taken from the app's package (at its root),
 // else from /data/GoldHEN/plugins/, copied there and loaded with GoldHEN's
 // PROCESS_PRX_LOAD. Jailbreaks the app first (GoldHEN) if /data cannot be
-// written. 0 when both run; else -1, what happened in what, for a log.
+// written, and does not undo it: the app stays out of its sandbox until it
+// exits (the later calls need /data). 0 when both run; else -1, what
+// happened in what, for a log.
 int scOpen(char* what, size_t size);
 
 // 1 if the player answers (its heartbeat), else 0.
@@ -96,8 +100,9 @@ typedef struct ScQueue {
 
 // The queue, written whole (queue.txt): MP3 and 16-bit WAV, up to 10000
 // tracks (the Music section groups them in up to 1000 albums; a local file's
-// tags are read once and cached). A field may not hold a tab or a line break (they are made
-// spaces). 0, or -1 if it could not be written.
+// tags are read once and cached). A field may not hold a tab, a line break or
+// a | (they are made spaces). Every track needs local or url: -1, nothing
+// written, if one has neither. 0, or -1 if it could not be written.
 int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
 
 // ── Handing over and taking back ─────────────────────────────────────────────
@@ -107,12 +112,17 @@ int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
 int scMusicPlay(void);
 
 // As the app opens, its own player ready: the player stops and keeps where it
-// was, for scReadQueueStatus (state "stopped", positionMs). 0, or -1.
+// was, for scReadQueueStatus (state "stopped", positionMs). Sent even when the
+// player's heartbeat is late (it may be waiting on a server); waits up to 5 s
+// for a status written since that says "stopped". 0 then; -1 if it did not
+// say so in time (it will stop once it reads it), or there is no player.
 int scMusicTakeBack(void);
 
 // A command to the player, as the quick menu sends them: "play", "pause",
 // "toggle", "next", "prev", "stop", "volume=<0-32768>", "repeat=<0 none, 1
-// all, 2 one>", "shuffle=<0|1>", "index=<n>". 0, or -1.
+// all, 2 one>", "shuffle=<0|1>", "index=<n>". Each call's commands are
+// written whole into a file of their own (cmd, else cmd.<ms>-<pid>-<n>),
+// which the player reads in order. 0, or -1.
 int scCommand(const char* command);
 
 typedef struct ScQueueStatus {
@@ -192,7 +202,8 @@ int scUpdateInstallPkg(const char* pkg, int relaunch);
 int scReadUpdateResult(int* result, char* why, size_t whySize);
 
 // "+" pressed while the app was away, oldest first, each taken out of the
-// file as it is read: up to cap into events, how many in *count. 0, or -1.
+// file as it is read: up to cap into events, how many in *count; those past
+// cap are kept for the next call. 0, or -1.
 typedef struct ScPlusEvent {
     uint64_t ms;           // when (the monotonic clock, ms)
     int saved;             // 1 "+" lit, 0 put out
