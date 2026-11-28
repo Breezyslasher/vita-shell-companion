@@ -24,7 +24,7 @@
 #include "../client/shell_companion.h"
 #include "font8x8_basic.h"
 
-#define APP_VERSION "1.54"
+#define APP_VERSION "1.55"
 
 // ---- the system's functions, declared here ----
 // Not from OpenOrbis's orbis/ headers, which differ between its versions
@@ -601,10 +601,6 @@ static void draw(void) {
     y += LINE;
     text(x, y, FG, "OPTIONS  write a test tone into music/ again");
     y += LINE;
-    text(x, y, FG, "L2     background downloads test: 3 songs to ShellCompanion/ps4/downloads");
-    y += LINE;
-    text(x, y, FG, "R2     take the downloads back (stops them), their status in app.log");
-    y += LINE;
     text(x, y, FG, "L3     self-update from test-update.txt (a .pkg path or URL), then close");
 
     y += LINE;
@@ -626,69 +622,6 @@ static void draw(void) {
 // What GoldHEN's jailbreak replaced (the SDK's jailbreak_backup), to put
 // back: the music service refuses a jailbroken app, it seems.
 static struct JailbreakBackup g_jb;
-
-// Background downloads (0.82), through the client library: three test
-// songs and three pages, into /data/ShellCompanion/ps4/downloads/. Its
-// own downloads.txt (lines of URLs) is used instead if there is one.
-static void testDownloads(void) {
-    char what[512];
-    const int rc = scOpen(what, sizeof(what));
-    say("scOpen: %d: %s", rc, what);
-    static ScDownload items[16];
-    static char urls[16][512], files[16][256], titles[16][64], ids[16][16], icons[16][512];
-    int n = 0;
-    FILE* f = fopen(SC_BGM_DIR "/test-downloads.txt", "r");
-    char line[512];
-    while (f && n < 16 && fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r' || line[len - 1] == ' ')) line[--len] = 0;
-        // A URL, or a package on the console (0.99: /data/....pkg).
-        if (strncmp(line, "http", 4) && line[0] != '/') continue;
-        // An icon after it, a space or tab between (1.29): a PNG on the
-        // console or a URL, for its row in Notifications > Downloads.
-        icons[n][0] = 0;
-        char* gap = strpbrk(line, " \t");
-        if (gap) {
-            *gap++ = 0;
-            while (*gap == ' ' || *gap == '\t') gap++;
-            snprintf(icons[n], sizeof(icons[n]), "%s", gap);
-        }
-        snprintf(urls[n], sizeof(urls[n]), "%s", line);
-        const char* name = strrchr(line, '/');
-        snprintf(files[n], sizeof(files[n]), "/data/ShellCompanion/ps4/downloads/%s", name ? name + 1 : "file");
-        char* q = strchr(files[n], '?');
-        if (q) *q = 0;
-        snprintf(titles[n], sizeof(titles[n]), "%s", name ? name + 1 : line);
-        n++;
-    }
-    if (f) fclose(f);
-    if (!n) {
-        for (int i = 0; i < 3; i++) {
-            icons[n][0] = 0;
-            snprintf(urls[n], sizeof(urls[n]), "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-%d.mp3", i + 1);
-            snprintf(files[n], sizeof(files[n]), "/data/ShellCompanion/ps4/downloads/SoundHelix-Song-%d.mp3", i + 1);
-            snprintf(titles[n], sizeof(titles[n]), "SoundHelix Song %d", i + 1);
-            n++;
-        }
-    }
-    for (int i = 0; i < n; i++) {
-        snprintf(ids[i], sizeof(ids[i]), "test%d", i + 1);
-        // A .pkg goes to the PS4's own download service (0.89).
-        const char* q = strchr(urls[i], '?');
-        const size_t ul = q ? (size_t)(q - urls[i]) : strlen(urls[i]);
-        const int pkg = ul > 4 && !strncasecmp(urls[i] + ul - 4, ".pkg", 4);
-        items[i] = (ScDownload){.id = ids[i], .file = pkg ? NULL : files[i], .title = titles[i],
-                                .kind = pkg ? "pkg" : "url", .args = {urls[i], NULL, NULL},
-                                .icon = icons[i][0] ? icons[i] : NULL};
-    }
-    mkdir(SC_BGM_DIR "/downloads", 0777);
-    // Fetched again each test (0.97): a file there already is done at once.
-    for (int i = 0; i < n; i++)
-        if (items[i].file) unlink(items[i].file);
-    const int w = scWriteDownloads(1, NULL, items, (uint32_t)n);
-    const int s = scDownloadsStart();
-    say("Downloads handed over: %d item(s), written %d, started %d: see bgm.log and downloads/", n, w, s);
-}
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -758,20 +691,6 @@ int main(void) {
         if (down & ORBIS_PAD_BUTTON_TRIANGLE) sendCommand("stop\n");
         if (down & ORBIS_PAD_BUTTON_R1) sendCommand("next\n");
         if (down & ORBIS_PAD_BUTTON_L1) sendCommand("prev\n");
-        // Background downloads (0.82; the music service probes these
-        // buttons had are gone): L2 hands over a test list, R2 takes it back.
-        if (down & ORBIS_PAD_BUTTON_L2) testDownloads();
-        if (down & ORBIS_PAD_BUTTON_R2) {
-            const int rc = scDownloadsTakeBack();
-            int running = 0;
-            ScDownloadStatus st[8];
-            uint32_t n = 0;
-            scReadDownloadsStatus(&running, st, 8, &n);
-            say("Downloads taken back: %d; running %d", rc, running);
-            for (uint32_t i = 0; i < n; i++)
-                say("  %s: %s, %llu of %llu bytes%s", st[i].id, st[i].state, (unsigned long long)st[i].bytes,
-                    (unsigned long long)st[i].size, "");
-        }
         if (down & ORBIS_PAD_BUTTON_L3) {
             // Self-update (0.89): test-update.txt's first line, a package's
             // path (/data/...) or URL, installed once this app has gone.

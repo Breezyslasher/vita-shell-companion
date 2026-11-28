@@ -94,8 +94,6 @@ static int scWatchRunning_(void);
 static int scWriteQueue_(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
 static int scCommand_(const char* command);
 static int scReadQueueStatus_(ScQueueStatus* out);
-static int scWriteDownloads_(int notify, const char* headers, const ScDownload* items, uint32_t count);
-static int scReadDownloadsStatus_(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count);
 static int scUpdateInstallPkg_(const char* pkg, int relaunch);
 static int scReadUpdateResult_(int* result, char* why, size_t whySize);
 static int scReadPlusEvents_(ScPlusEvent* events, uint32_t cap, uint32_t* count);
@@ -521,11 +519,6 @@ static int scReadQueueStatus_(ScQueueStatus* out) {
     return 0;
 }
 
-// ── Background downloads ─────────────────────────────────────────────────────
-
-#define DL_LIST SC_BGM_DIR "/downloads.txt"
-#define DL_STATUS SC_BGM_DIR "/downloads-status.txt"
-
 // A field %-encoded where it holds a tab, a line break or a %.
 static size_t putEncoded(char* out, size_t at, size_t cap, const char* s) {
     static const char hex[] = "0123456789ABCDEF";
@@ -540,118 +533,6 @@ static size_t putEncoded(char* out, size_t at, size_t cap, const char* s) {
         }
     }
     return at;
-}
-
-static int scWriteDownloads_(int notify, const char* headers, const ScDownload* items, uint32_t count) {
-    if (!items && count) return -1;
-    if (count > 200) count = 200;
-    const size_t cap = 4096 + (size_t)count * 4096;
-    char* out = (char*)malloc(cap);
-    if (!out) return -1;
-    size_t at = (size_t)snprintf(out, cap, "notify=%d\nheaders=", notify ? 1 : 0);
-    at = putEncoded(out, at, cap, headers);
-    out[at++] = '\n';
-    // The app's title id: its icon beside its files in Notifications >
-    // Downloads (1.15).
-    if (g_titleId[0]) at += (size_t)snprintf(out + at, cap - at, "app=%s\n", g_titleId);
-    for (uint32_t i = 0; i < count; i++) {
-        const ScDownload* d = &items[i];
-        if (!d->kind) continue;
-        // A package's file is where it is (its URL or path): the PS4 puts it.
-        const char* file = d->file && d->file[0] ? d->file : !strcmp(d->kind, "pkg") ? d->args[0] : NULL;
-        if (!file || !file[0]) continue;
-        at += (size_t)snprintf(out + at, cap - at, "item=");
-        at = putEncoded(out, at, cap, d->id);
-        out[at++] = '\t';
-        at = putEncoded(out, at, cap, file);
-        at += (size_t)snprintf(out + at, cap - at, "\t%llu\t", (unsigned long long)d->size);
-        at = putEncoded(out, at, cap, d->title);
-        out[at++] = '\t';
-        at = putEncoded(out, at, cap, d->kind);
-        for (int a = 0; a < 3; a++) {
-            out[at++] = '\t';
-            at = putEncoded(out, at, cap, d->args[a]);
-        }
-        out[at++] = '\n';
-        // Its own icon (1.29): a line of its own after the item, which
-        // earlier modules pass over.
-        if (d->icon && d->icon[0]) {
-            at += (size_t)snprintf(out + at, cap - at, "icon=");
-            at = putEncoded(out, at, cap, d->icon);
-            out[at++] = '\n';
-        }
-    }
-    at += (size_t)snprintf(out + at, cap - at, "end\n");
-    const int rc = writeAll(DL_LIST, out, at);
-    free(out);
-    return rc;
-}
-
-int scDownloadsStart(void) {
-    return scCommand("dl_start\n");
-}
-
-int scDownloadsTakeBack(void) {
-    if (!scPlayerRunning()) return 0;  // nothing in the shell to stop
-    if (scCommand("dl_takeback\n") != 0) return -1;
-    for (int w = 0; w < 50; w++) {
-        int running = 1;
-        uint32_t n = 0;
-        if (scReadDownloadsStatus(&running, NULL, 0, &n) == 0 && !running) return 0;
-        usleep(100000);
-    }
-    return -1;
-}
-
-static int readDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count);
-
-static int scReadDownloadsStatus_(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count) {
-    lock();
-    const int rc = readDownloadsStatus(running, items, cap, count);
-    unlock();
-    return rc;
-}
-
-static int readDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count) {
-    static char text[200 * 160 + 128];
-    if (count) *count = 0;
-    if (readAll(DL_STATUS, text, sizeof(text)) <= 0) return -1;
-    char v[16];
-    if (running) *running = field(text, "running", v, sizeof(v)) ? atoi(v) : 0;
-    uint32_t n = 0;
-    for (char* p = text; *p;) {
-        char* e = p;
-        while (*e && *e != '\n') e++;
-        const char keep = *e;
-        *e = 0;
-        if (!strncmp(p, "item=", 5) && items && n < cap) {
-            ScDownloadStatus* s = &items[n];
-            memset(s, 0, sizeof(*s));
-            char* f[7] = {0};
-            int k = 0;
-            char* q = p + 5;
-            f[k++] = q;
-            for (; *q && k < 7; q++)
-                if (*q == '\t') {
-                    *q = 0;
-                    f[k++] = q + 1;
-                }
-            snprintf(s->id, sizeof(s->id), "%s", f[0]);
-            if (k > 1) snprintf(s->state, sizeof(s->state), "%s", f[1]);
-            if (k > 2) s->bytes = strtoull(f[2], NULL, 10);
-            if (k > 3) s->size = strtoull(f[3], NULL, 10);
-            if (k > 6) {
-                s->pagesDone = (uint32_t)strtoul(f[6], NULL, 10);
-                const char* slash = strchr(f[6], '/');
-                if (slash) s->pageCount = (uint32_t)strtoul(slash + 1, NULL, 10);
-            }
-            n++;
-        }
-        *e = keep;
-        p = *e ? e + 1 : e;
-    }
-    if (count) *count = n;
-    return 0;
 }
 
 // ── "+" pressed while the app was away ───────────────────────────────────────
@@ -812,20 +693,6 @@ int scCommand(const char* command) {
 int scReadQueueStatus(ScQueueStatus* out) {
     jbEnter();
     const int rc = scReadQueueStatus_(out);
-    jbLeave();
-    return rc;
-}
-
-int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count) {
-    jbEnter();
-    const int rc = scWriteDownloads_(notify, headers, items, count);
-    jbLeave();
-    return rc;
-}
-
-int scReadDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count) {
-    jbEnter();
-    const int rc = scReadDownloadsStatus_(running, items, cap, count);
     jbLeave();
     return rc;
 }

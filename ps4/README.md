@@ -23,7 +23,7 @@ Its files are in `/user/data/ShellCompanion/ps4/` (the same folder as
 `/user/data/GoldHEN/plugins/sc_bgm.prx` and loaded with GoldHEN's
 `PROCESS_PRX_LOAD` (system call 500, command 6).
 
-### The client puts the app back in its sandbox (1.54, not yet tried on a PS4)
+### The client puts the app back in its sandbox (1.54; 1.55 for main, without downloads; not yet tried on a PS4)
 
 `scOpen` jailbroke the app (GoldHEN's command 2) and never undid it, so an
 app such as VitaPlex ran out of its sandbox until it exited. Now each client
@@ -35,11 +35,10 @@ once, at the outermost. `scStayJailbroken(1)` keeps the old behaviour and
 `scClose()` restores at once. The test app jailbreaks itself, so the
 client leaves it as it is.
 
-### Background downloads back in development again (1.53)
+### Background downloads out again for the release (1.52)
 
-1.52 (main) is 1.51's fixes without background downloads. 1.53 puts the
-download code back on top of them, as at 1.51, for further work; it is not
-in a release yet.
+1.52 is 1.51's fixes without background downloads, as 1.49 was: the code
+taken out again (it stays in git at 1.50-1.51), for main.
 
 ### The review's bugs fixed (1.51, not yet tried on a PS4)
 
@@ -102,10 +101,17 @@ The client library:
   kept for the next call. A heartbeat slightly ahead of now counts as fresh.
 - The header says that `scOpen` leaves the app jailbroken.
 
-### Background downloads back in development (1.50)
+### Background downloads taken out (1.49)
 
-1.49 took them out for the first release (main). 1.50 puts the code back,
-as it was at 1.48, for further work; it is not in a release yet.
+Background downloads (0.82-1.48: `downloads.c`, the Notifications >
+Downloads placeholders in `dllist.c`, `ndbprobe.c`, a download list's `pkg`
+items, and the client library's `scWriteDownloads`, `scDownloadsStart`,
+`scDownloadsTakeBack`, `scReadDownloadsStatus`) are not in the first
+release: too unreliable yet. The notes on them below are kept as history,
+for another try; the code is in git before 1.49. What stays: streaming,
+"+", and self-update (`pkg.c`, `scUpdateInstallPkg`). The helpers `plus.c`
+shared with the downloads (`%`-decoding, header lines) are in `bgm.c` as
+`textDecode` and `httpHeaders`.
 
 ### A list's files in Notifications > Downloads (0.96, an experiment)
 
