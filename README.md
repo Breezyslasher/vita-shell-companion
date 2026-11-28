@@ -35,7 +35,7 @@ particular server.
 >
 > **PS4 (GoldHEN, tested on 11.50):** background music, local and streamed,
 > in the quick menu's Music tab, with covers, queue editing and a per-app
-> "+"; background downloads; a client library. See [docs/PS4.md](docs/PS4.md).
+> "+"; app self-update; a client library. See [docs/PS4.md](docs/PS4.md).
 
 > **Moving an app to this layout:** `client/` is now `vita/client/` and
 > `include/` is now `common/`. Build `vita/client/*.c` as before, and put
