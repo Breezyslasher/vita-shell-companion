@@ -48,11 +48,28 @@ int scInit(const char* titleId, const char* name);
 // than 3 s old; a module loads once a boot, and a second copy would play and
 // hook the shell twice). It is taken from the app's package (at its root),
 // else from /data/GoldHEN/plugins/, copied there and loaded with GoldHEN's
-// PROCESS_PRX_LOAD. Jailbreaks the app first (GoldHEN) if /data cannot be
-// written, and does not undo it: the app stays out of its sandbox until it
-// exits (the later calls need /data). 0 when both run; else -1, what
-// happened in what, for a log.
+// PROCESS_PRX_LOAD. 0 when both run; else -1, what happened in what, for a
+// log.
+//
+// The sandbox (1.54): the files these calls share with the shell are in
+// /user/data, which an app cannot reach from its sandbox. Each call here
+// that touches them jailbreaks the app (GoldHEN's JAILBREAK) on the way in
+// when /user/data cannot be written, and puts the sandbox back on the way
+// out (UNJAILBREAK, with the backup it kept), so the app is in its sandbox
+// between calls. While a call runs (scOpen up to ~3 s, scMusicTakeBack's
+// status reads) the whole app is out of it: another thread of the app
+// opening /app0 or its own /data paths then may not find them. Before 1.54,
+// scOpen jailbroke the app and left it so until it exited.
 int scOpen(char* what, size_t size);
+
+// 1: jailbroken now and kept so (as before 1.54), for an app that reaches
+// /user/data itself; 0: back to each call's own (the sandbox restored once
+// no call is running).
+void scStayJailbroken(int on);
+
+// The sandbox put back now if the app was left jailbroken (scStayJailbroken),
+// and each call's own after. 0, or -1 if GoldHEN refused.
+int scClose(void);
 
 // 1 if the player answers (its heartbeat), else 0.
 int scPlayerRunning(void);

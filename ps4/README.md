@@ -23,6 +23,18 @@ Its files are in `/user/data/ShellCompanion/ps4/` (the same folder as
 `/user/data/GoldHEN/plugins/sc_bgm.prx` and loaded with GoldHEN's
 `PROCESS_PRX_LOAD` (system call 500, command 6).
 
+### The client puts the app back in its sandbox (1.54; 1.55 for main, without downloads; not yet tried on a PS4)
+
+`scOpen` jailbroke the app (GoldHEN's command 2) and never undid it, so an
+app such as VitaPlex ran out of its sandbox until it exited. Now each client
+call that touches `/user/data` jailbreaks on the way in, only when
+`/user/data` cannot be written, and restores the sandbox on the way out
+with GoldHEN's command 3 (`GOLDHEN_SDK_CMD_UNJAILBREAK` in the GoldHEN
+plugin SDK's `GoldHEN.h`), using the backup it kept. Nested calls restore
+once, at the outermost. `scStayJailbroken(1)` keeps the old behaviour and
+`scClose()` restores at once. The test app jailbreaks itself, so the
+client leaves it as it is.
+
 ### Background downloads out again for the release (1.52)
 
 1.52 is 1.51's fixes without background downloads, as 1.49 was: the code
