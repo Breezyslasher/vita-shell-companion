@@ -38,6 +38,83 @@ __attribute__((noinline)) long sysCall(long num, long a, long b, long c, long d,
     return rax;
 }
 
+#ifdef SC_PRX
+// In a module, which may run inside SceShellUI, through libkernel, as the
+// projects that run modules there do (ps4-hen-rest: sceKernelOpen,
+// sceKernelMkdir; OpenOrbis's libc "uses libkernel instead of syscalls for
+// compatibility"). With system calls of its own the player never got as far
+// as its log inside the shell.
+int sceKernelOpen(const char* path, int flags, int mode);
+long sceKernelWrite(int fd, const void* buf, size_t n);
+long sceKernelRead(int fd, void* buf, size_t n);
+int sceKernelClose(int fd);
+int sceKernelMkdir(const char* path, int mode);
+int sceKernelFsync(int fd);
+int sceKernelUsleep(unsigned int us);
+int sceKernelClockGettime(int clock, void* ts);
+int sceKernelMmap(void* addr, size_t len, int prot, int flags, int fd, int64_t off, void** out);
+int sceKernelMunmap(void* addr, size_t len);
+int sceKernelUnlink(const char* path);
+int sceKernelRename(const char* from, const char* to);
+int64_t sceKernelLseek(int fd, int64_t off, int whence);
+int sceKernelGetdents(int fd, char* buf, int n);
+
+int sysOpen(const char* path, int flags, int mode) {
+    return sceKernelOpen(path, flags, mode);
+}
+int sysWrite(int fd, const void* buf, size_t n) {
+    return (int)sceKernelWrite(fd, buf, n);
+}
+int sysRead(int fd, void* buf, size_t n) {
+    return (int)sceKernelRead(fd, buf, n);
+}
+int sysClose(int fd) {
+    return sceKernelClose(fd);
+}
+int sysMkdir(const char* path, int mode) {
+    return sceKernelMkdir(path, mode);
+}
+int sysFsync(int fd) {
+    return sceKernelFsync(fd);
+}
+int sysExists(const char* path) {
+    const int fd = sysOpen(path, SC_O_RDONLY, 0);
+    if (fd < 0) return 0;
+    sysClose(fd);
+    return 1;
+}
+void sysSleepMs(uint32_t ms) {
+    sceKernelUsleep(ms * 1000u);
+}
+uint64_t sysNowUs(void) {
+    struct {
+        int64_t sec, nsec;
+    } t = {0, 0};
+    sceKernelClockGettime(4 /* CLOCK_MONOTONIC */, &t);
+    return (uint64_t)t.sec * 1000000u + (uint64_t)t.nsec / 1000u;
+}
+void* sysMap(size_t size) {
+    void* p = NULL;
+    const int rc = sceKernelMmap(NULL, size, 3 /* read, write */, 0x1000 | 0x2 /* anon, private */,
+                                 -1, 0, &p);
+    return rc < 0 ? NULL : p;
+}
+void sysUnmap(void* p, size_t size) {
+    sceKernelMunmap(p, size);
+}
+int sysUnlink(const char* path) {
+    return sceKernelUnlink(path);
+}
+int sysRename(const char* from, const char* to) {
+    return sceKernelRename(from, to);
+}
+int64_t sysSeek(int fd, int64_t off, int whence) {
+    return sceKernelLseek(fd, off, whence);
+}
+int sysGetdents(int fd, void* buf, size_t n) {
+    return sceKernelGetdents(fd, (char*)buf, (int)n);
+}
+#else
 int sysOpen(const char* path, int flags, int mode) {
     return (int)sysCall(5, (long)path, flags, mode, 0, 0, 0);
 }
@@ -80,6 +157,22 @@ void* sysMap(size_t size) {
                            -1, 0);
     return p < 0 && p > -4096 ? NULL : (void*)p;
 }
+void sysUnmap(void* p, size_t size) {
+    sysCall(73, (long)p, (long)size, 0, 0, 0, 0);
+}
+int sysUnlink(const char* path) {
+    return (int)sysCall(10, (long)path, 0, 0, 0, 0, 0);
+}
+int sysRename(const char* from, const char* to) {
+    return (int)sysCall(128, (long)from, (long)to, 0, 0, 0, 0);
+}
+int64_t sysSeek(int fd, int64_t off, int whence) {
+    return sysCall(478, fd, off, whence, 0, 0, 0);
+}
+int sysGetdents(int fd, void* buf, size_t n) {
+    return (int)sysCall(272, fd, (long)buf, (long)n, 0, 0, 0);
+}
+#endif
 void sysExit(int code) {
     sysCall(1, code, 0, 0, 0, 0, 0);
     for (;;) {
@@ -96,6 +189,23 @@ void* memcpy(void* d, const void* s, size_t n) {
     const uint8_t* q = (const uint8_t*)s;
     while (n--) *p++ = *q++;
     return d;
+}
+void* memmove(void* d, const void* s, size_t n) {
+    uint8_t* p = (uint8_t*)d;
+    const uint8_t* q = (const uint8_t*)s;
+    if (p < q) {
+        while (n--) *p++ = *q++;
+    } else {
+        while (n--) p[n] = q[n];
+    }
+    return d;
+}
+int memcmp(const void* a, const void* b, size_t n) {
+    const uint8_t* p = (const uint8_t*)a;
+    const uint8_t* q = (const uint8_t*)b;
+    for (; n; n--, p++, q++)
+        if (*p != *q) return *p - *q;
+    return 0;
 }
 size_t strlen(const char* s) {
     size_t n = 0;
@@ -130,7 +240,7 @@ void* libSym(int handle, const char* symbol) {
 
 // A function of libkernel, from the module loaded under either name, else
 // from any loaded module that has it.
-static void* kernelSym(const char* symbol) {
+__attribute__((unused)) static void* kernelSym(const char* symbol) {
     static int kernel;
     if (!kernel) kernel = libLoad("libkernel.sprx");
     if (!kernel) kernel = libLoad("libkernel_sys.sprx");
@@ -234,8 +344,14 @@ static uint64_t g_began;
 void logOpen(const char* name) {
     char path[128];
     g_began = sysNowUs();
+#ifdef SC_PRX
+    // A module may run inside the shell, which has /user/data, not /data.
+    sysMkdir("/user/data/ShellCompanion", 0777);
+    fmt(path, sizeof(path), "/user/data/ShellCompanion/%s", name);
+#else
     sysMkdir("/data/ShellCompanion", 0777);
     fmt(path, sizeof(path), "/data/ShellCompanion/%s", name);
+#endif
     g_log = sysOpen(path, SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
 }
 
@@ -265,10 +381,24 @@ typedef struct {
     char unk[1024];
 } NotifyRequest;
 
+#ifdef SC_PRX
+// In a module the system's loader links these, from libkernel, as GoldHEN's
+// plugins have them. Found by name at run time instead (kernelSym), the
+// player's thread was never made: scePthreadCreate did not come back.
+int sceKernelSendNotificationRequest(int device, void* req, size_t size, int blocking);
+int scePthreadCreate(void* thread, const void* attr, void* (*fn)(void*), void* arg,
+                     const char* name);
+int sceKernelGetSystemSwVersion(void* out);
+#endif
+
 void notify(const char* f, ...) {
     typedef int (*Send)(int, NotifyRequest*, size_t, int);
     static Send send;
+#ifdef SC_PRX
+    if (!send) send = (Send)sceKernelSendNotificationRequest;
+#else
     if (!send) send = (Send)kernelSym("sceKernelSendNotificationRequest");
+#endif
     static NotifyRequest req;
     memset(&req, 0, sizeof(req));
     req.targetId = -1;
@@ -282,7 +412,11 @@ void notify(const char* f, ...) {
 
 int threadStart(void* (*fn)(void*), void* arg, const char* name) {
     typedef int (*Create)(void* thread, const void* attr, void* (*)(void*), void*, const char*);
+#ifdef SC_PRX
+    Create create = (Create)scePthreadCreate;
+#else
     Create create = (Create)kernelSym("scePthreadCreate");
+#endif
     static uint64_t thread;
     return create ? create(&thread, NULL, fn, arg, name) : -1;
 }
@@ -296,7 +430,11 @@ void firmware(char* out, size_t cap) {
     typedef int (*Get)(void*);
     memset(&v, 0, sizeof(v));
     v.size = sizeof(v);
+#ifdef SC_PRX
+    Get get = (Get)sceKernelGetSystemSwVersion;
+#else
     Get get = (Get)kernelSym("sceKernelGetSystemSwVersion");
+#endif
     const int rc = get ? get(&v) : -1;
     if (rc < 0)
         fmt(out, cap, "unknown (0x%08X)", (unsigned)rc);

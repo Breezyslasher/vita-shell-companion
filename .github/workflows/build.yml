@@ -44,8 +44,8 @@ jobs:
             LICENSE
             NOTICE.txt
 
-  ps4-probes:
-    name: PS4 probes
+  ps4:
+    name: PS4 module and test app
     runs-on: ubuntu-latest
     container:
       image: openorbisofficial/toolchain:latest
@@ -59,12 +59,46 @@ jobs:
         run: |
           command -v git >/dev/null || (apt-get update && apt-get install -y --no-install-recommends git ca-certificates)
           sh ps4/probe/get_create_fself.sh
-      - name: Build
-        run: sh ps4/probe/build.sh
+      # The toolchain GoldHEN builds its own plugins with (its
+      # GoldHEN_Plugins_Repository CI): illusion0001's fork of OpenOrbis,
+      # whose create-fself, link.x and stubs differ from the official ones.
+      # A PS4 loaded GoldHEN's no_share_watermark.prx and refused every
+      # module built with the official toolchain. The modules and the test
+      # app are built with it; its SHA-256 is logged.
+      - name: GoldHEN's OpenOrbis toolchain (illusion0001's fork)
+        run: |
+          command -v curl >/dev/null || (apt-get update && apt-get install -y --no-install-recommends curl ca-certificates)
+          mkdir -p "$RUNNER_TEMP/oo-goldhen"
+          curl -sSLf -o "$RUNNER_TEMP/oo-goldhen.tar.gz" \
+            https://github.com/illusion0001/OpenOrbis-PS4-Toolchain/releases/latest/download/toolchain.tar.gz
+          sha256sum "$RUNNER_TEMP/oo-goldhen.tar.gz"
+          tar -xzf "$RUNNER_TEMP/oo-goldhen.tar.gz" -C "$RUNNER_TEMP/oo-goldhen"
+          rm "$RUNNER_TEMP/oo-goldhen.tar.gz"
+          ls "$RUNNER_TEMP/oo-goldhen/OpenOrbis/PS4Toolchain/bin/linux"
+      - name: Build the module and the test app (GoldHEN's toolchain)
+        run: |
+          export OO_PS4_TOOLCHAIN="$RUNNER_TEMP/oo-goldhen/OpenOrbis/PS4Toolchain"
+          export CREATE_FSELF="$OO_PS4_TOOLCHAIN/bin/linux/create-fself"
+          sh ps4/app/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: ps4-probes-${{ github.run_number }}
+          name: ps4-${{ github.run_number }}
           path: |
-            build-ps4/*.bin
+            build-ps4/*.pkg
             build-ps4/*.prx
+            docs/PS4.md
             ps4/README.md
+            NOTICE.txt
+      # The same with the debugging aids (SC_DEBUG=1: the code dump, ...),
+      # its own artifact, for research only.
+      - name: Build the debug module and test app (SC_DEBUG=1)
+        run: |
+          export OO_PS4_TOOLCHAIN="$RUNNER_TEMP/oo-goldhen/OpenOrbis/PS4Toolchain"
+          export CREATE_FSELF="$OO_PS4_TOOLCHAIN/bin/linux/create-fself"
+          SC_DEBUG=1 OUT=build-ps4-debug sh ps4/app/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ps4-debug-${{ github.run_number }}
+          path: |
+            build-ps4-debug/*.pkg
+            build-ps4-debug/*.prx

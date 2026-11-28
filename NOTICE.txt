@@ -15,3 +15,28 @@ resources/head.bin and package_installer.c's makeHeadBin), licensed under
 the GNU General Public License, version 3: vita/plugin/head_bin.h, and the VPK
 section of vita/plugin/main.cpp. Its inflater (common/sc_inflate.h) follows
 puff, by Mark Adler (zlib's contrib/puff, zlib licence).
+
+The PS4 background music module (ps4/bgm) decodes MP3 with minimp3, by
+lieff (https://github.com/lieff/minimp3, ps4/bgm/minimp3.h), dedicated to
+the public domain under CC0 1.0.
+
+The PS4 test app (ps4/app) carries OpenOrbis's libc.prx, libSceFios2.prx
+and right.sprx, from the OpenOrbis PS4 Toolchain v0.5.2
+(https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain, GPL-3.0), and draws
+its text with font8x8 by Daniel Hepper (public domain).
+
+The test app's test module (ps4/app/recipe) uses crt/crtprx.c of the
+GoldHEN Plugins SDK (https://github.com/GoldHEN/GoldHEN_Plugins_SDK, MIT
+licence, ps4/app/recipe/LICENSE-GoldHEN_Plugins_SDK).
+
+The test app's control module, ps4/app/control/no_share_watermark.prx, is
+GoldHEN's own plugin, unchanged, from GoldHEN_Plugins_Repository release
+1.188 (https://github.com/GoldHEN/GoldHEN_Plugins_Repository, GPL-3.0).
+
+The PS4 music watch (ps4/mcw) decodes instruction lengths with Hacker
+Disassembler Engine 64 (HDE64), copyright (c) 2008-2009 Vyacheslav Patkov,
+as carried by the GoldHEN Plugins SDK (ps4/mcw/hde64.c, hde64.h,
+table64.h). HDE's licence: redistribution and use in source and binary
+forms, with or without modification, are permitted provided that the
+copyright notice, this list of conditions and the following disclaimer are
+retained; the software is provided "as is", without warranty of any kind.

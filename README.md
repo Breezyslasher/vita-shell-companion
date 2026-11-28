@@ -31,8 +31,11 @@ plain URLs, headers and report templates. The plugin knows nothing about any
 particular server.
 
 > **Status:** the Vita plugin runs on a real Vita with VitaPlex: background
-> music, the quick menu's controls, background downloads and updates. A PS4
-> counterpart is begun in `ps4/`: its first probes; the two share `common/`.
+> music, the quick menu's controls, background downloads and updates.
+>
+> **PS4 (GoldHEN, tested on 11.50):** background music, local and streamed,
+> in the quick menu's Music tab, with covers, queue editing and a per-app
+> "+"; app self-update; a client library. See [docs/PS4.md](docs/PS4.md).
 
 > **Moving an app to this layout:** `client/` is now `vita/client/` and
 > `include/` is now `common/`. Build `vita/client/*.c` as before, and put
@@ -73,9 +76,10 @@ particular server.
 | `vita/plugin/` | the Vita plugin itself (GPL-3.0, based on [ElevenMPV-A](https://github.com/GrapheneCt/ElevenMPV-A)'s by GrapheneCt) |
 | `vita/client/` | the C library a Vita app links to load the plugin and talk to it (Apache-2.0) |
 | `vita/scripts/` | PAF header fetch and PAF stub generator |
-| `ps4/` | the PS4 counterpart: its probes, for background music and the quick menu, so far (`ps4/README.md`) |
+| `ps4/` | the PS4 counterpart: the player and the music watch loaded into SceShellUI, the client library (`ps4/client/`), a test app ([docs/PS4.md](docs/PS4.md); notes in `ps4/README.md`) |
 | `common/` | what both share: the protocol and file formats, and the plugin's own code for Sendspin (`sendspin_wire.h`), DEFLATE (`sc_inflate.h`), SHA-1 and MP3 framing |
-| `docs/PROTOCOL.md` | the protocol: commands, files, and the client's calls |
+| `docs/PROTOCOL.md` | the Vita protocol: commands, files, and the client's calls |
+| `docs/PS4.md` | the PS4 side: what it does, the client library, files and limits |
 
 ## Building
 
@@ -103,6 +107,6 @@ The CI does the same and uploads the `.suprx` as an artifact.
 | Part | Licence |
 |---|---|
 | The plugin | GPL-3.0 (`LICENSE`, `NOTICE.txt`) |
-| `vita/client/` | Apache-2.0 (`vita/client/LICENSE`), so apps under any licence can link it |
+| `vita/client/`, `ps4/client/` | Apache-2.0 (their `LICENSE`), so apps under any licence can link them |
 
 Apps only talk to the plugin through message pipes and files.

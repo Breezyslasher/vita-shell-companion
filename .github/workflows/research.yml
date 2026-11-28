@@ -1,0 +1,43 @@
+name: PS4 research
+
+# Fetches PS4 Developer Wiki pages this repository's PS4 work needs, and
+# prints the parts that matter into the job log: the session that writes
+# the PS4 code cannot reach the wiki itself. Run by hand, or on a push that
+# changes this file.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/research.yml
+
+jobs:
+  wiki:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch the wiki pages
+        run: |
+          set -u
+          UA="Mozilla/5.0 (X11; Linux x86_64) research-fetch"
+          W="https://www.psdevwiki.com/ps4/index.php"
+          get() { curl -sSL -A "$UA" --retry 3 -o "$2" "$1" || echo "fetch failed: $1"; }
+          get "$W?title=Param.sfo&action=raw" param.txt
+          get "$W?title=Error_Codes&action=raw" errors.txt
+          for q in MusicPlayerService MusicCoreServer BgmPlayer "background music"; do
+            get "https://www.psdevwiki.com/ps4/api.php?action=query&list=search&format=json&srlimit=20&srsearch=$(printf %s "$q" | sed 's/ /%20/g')" "search-$(printf %s "$q" | tr ' ' _).json"
+          done
+          ls -l
+      - name: Param.sfo (ATTRIBUTE tables, and anything on music)
+        run: |
+          wc -c param.txt; head -c 300 param.txt; echo
+          echo "=== ATTRIBUTE sections ==="
+          awk 'tolower($0) ~ /attribute/ {p=1} p {print} /^== / && NR>1 && p && tolower($0) !~ /attribute/ {p=0}' param.txt | head -400
+          echo "=== music / bgm lines ==="
+          grep -n -i -E 'music|bgm|spotify' param.txt | head -80
+      - name: Error codes (the music player service, 0x812F....)
+        run: |
+          wc -c errors.txt
+          grep -n -i -B1 -A4 -E '812F0|MUSIC_PLAYER' errors.txt | head -200
+      - name: Searches
+        run: |
+          for f in search-*.json; do echo "=== $f"; python3 -c "import json,sys; d=json.load(open(sys.argv[1])); [print('-', r['title'], ':', r['snippet'].replace('<span class=\"searchmatch\">','').replace('</span>','')[:300]) for r in d.get('query',{}).get('search',[])]" "$f" || head -c 500 "$f"; done
