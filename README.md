@@ -1,7 +1,11 @@
-# vita-shell-companion
+# playstation-shell-companion
 
-A PS Vita SceShell plugin that any homebrew app can load so its work keeps
-going after it closes:
+A shell plugin for the PS Vita (SceShell) and the PS4 (SceShellUI) that any
+homebrew app can load so its work keeps going after it closes. The PS4 side
+is summed up [below](#ps4) and in [docs/PS4.md](docs/PS4.md).
+
+## PS Vita
+
 
 - **Music row:** the quick menu's Music row shows the app's song and cover,
   with working ⏮ ⏯ ⏭.
@@ -37,12 +41,30 @@ particular server.
 > in the quick menu's Music tab, with covers, queue editing and a per-app
 > "+"; app self-update; a client library. See [docs/PS4.md](docs/PS4.md).
 
+## PS4
+
+A GoldHEN plugin, `sc_companion.prx`, loaded into SceShellUI by the app
+through its client library (`ps4/client/`):
+
+- **Background music:** the app's queue plays on in the shell: local MP3 and
+  WAV files, and HTTP(S) streams.
+- **The quick menu's Music tab:** the player as the music app, with Queue,
+  All songs, Liked and Albums, covers, play/pause, previous/next, shuffle,
+  repeat and volume, and editing the queue from the tab.
+- **"+" (R3):** Liked by default, or a call to the app's own server.
+- **Self-update:** the app's own `.pkg` installed through the PS4's download
+  service once the app has closed, and the app started again.
+
+Background downloads are not in the PS4's first release. Requirements,
+the calls, files and limits are in [docs/PS4.md](docs/PS4.md); the
+engineering notes in [`ps4/README.md`](ps4/README.md).
+
 > **Moving an app to this layout:** `client/` is now `vita/client/` and
 > `include/` is now `common/`. Build `vita/client/*.c` as before, and put
 > `common/` and `vita/client/` on the include path. Nothing in the files or
 > the protocol changed.
 
-## Using it in an app
+## Using it in a Vita app
 
 1. Add `common/` and `vita/client/` to the app's include path, and build
    `vita/client/shell_companion.c`, `vita/client/sc_files.c` and
@@ -83,6 +105,8 @@ particular server.
 
 ## Building
 
+### PS Vita
+
 You need [vitasdk](https://vitasdk.org), or the `vitasdk/vitasdk:2026.08`
 Docker image.
 
@@ -94,13 +118,35 @@ cmake --build build        # -> build/shell_companion.suprx, libshell_companion_
 
 The CI does the same and uploads the `.suprx` as an artifact.
 
+### PS4
+
+You need the [OpenOrbis toolchain](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain)
+(`OO_PS4_TOOLCHAIN` set).
+
+```sh
+sh ps4/bgm/build.sh        # -> build-ps4/sc_companion.prx
+sh ps4/app/build.sh        # -> the test app's package, with the module in it
+```
+
+The CI builds both, plus a debug build (`SC_DEBUG=1`), and uploads them as
+artifacts.
+
 ## Requirements on the console
+
+### PS Vita
 
 - **taiHEN:** HENkaku or Ensō.
 - **Unsafe homebrew:** the app that loads the plugin must be unsafe homebrew,
   since loading uses `taiLoadStartModuleForPidForUser`.
 - **Log:** `ux0:data/ShellCompanion/plugin.log`, one file a boot.
 - **No `config.txt` entry:** apps load the plugin themselves, once per boot.
+
+### PS4
+
+- **GoldHEN** (tested: 2.4b18 on firmware 11.50).
+- The app ships `sc_companion.prx` at its package's root; the client
+  library's `scOpen` loads it, once per boot.
+- **Logs:** `/data/ShellCompanion/ps4/bgm.log` and `mcw.log`.
 
 ## Licence
 
@@ -109,4 +155,5 @@ The CI does the same and uploads the `.suprx` as an artifact.
 | The plugin | GPL-3.0 (`LICENSE`, `NOTICE.txt`) |
 | `vita/client/`, `ps4/client/` | Apache-2.0 (their `LICENSE`), so apps under any licence can link them |
 
-Apps only talk to the plugin through message pipes and files.
+Apps only talk to the plugin through message pipes and files (on the PS4,
+files and a command file).
