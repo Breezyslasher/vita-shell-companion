@@ -23,17 +23,10 @@ Its files are in `/user/data/ShellCompanion/ps4/` (the same folder as
 `/user/data/GoldHEN/plugins/sc_bgm.prx` and loaded with GoldHEN's
 `PROCESS_PRX_LOAD` (system call 500, command 6).
 
-### Background downloads taken out (1.49)
+### Background downloads back in development (1.50)
 
-Background downloads (0.82-1.48: `downloads.c`, the Notifications >
-Downloads placeholders in `dllist.c`, `ndbprobe.c`, a download list's `pkg`
-items, and the client library's `scWriteDownloads`, `scDownloadsStart`,
-`scDownloadsTakeBack`, `scReadDownloadsStatus`) are not in the first
-release: too unreliable yet. The notes on them below are kept as history,
-for another try; the code is in git before 1.49. What stays: streaming,
-"+", and self-update (`pkg.c`, `scUpdateInstallPkg`). The helpers `plus.c`
-shared with the downloads (`%`-decoding, header lines) are in `bgm.c` as
-`textDecode` and `httpHeaders`.
+1.49 took them out for the first release (main). 1.50 puts the code back,
+as it was at 1.48, for further work; it is not in a release yet.
 
 ### A list's files in Notifications > Downloads (0.96, an experiment)
 

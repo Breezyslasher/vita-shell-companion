@@ -1,7 +1,7 @@
 # Shell Companion on PS4
 
-Shell Companion's PS4 side lets a homebrew app hand its music to the PS4's home
-screen (SceShellUI), so it carries on after the app has
+Shell Companion's PS4 side lets a homebrew app hand its music and its downloads
+to the PS4's home screen (SceShellUI), so they carry on after the app has
 closed. The quick menu's **Music** tab shows the app's queue as if it were a
 music app's: sections, playlists, albums, covers, the player's controls, and
 editing the queue. It's the PS4 counterpart of the Vita plugin; the
@@ -35,8 +35,13 @@ editing the queue. It's the PS4 counterpart of the Vita plugin; the
 - **"+" (R3):** adds the track to Liked by default. An app can also have it
   call its own server at once (a Plex favourite, say), and read every press
   back when it reopens.
-- **Self-update:** an app can install its own update (a `.pkg`) once it has
-  closed, through the PS4's own download service, and be started again.
+- **Background downloads:** a list of files fetched in the shell after the app
+  closes, continued where they stopped, retried, with notifications at the
+  start, at each quarter, as each item ends, and at the end.
+- **Packages and self-update:** a `.pkg` in a download list goes to the
+  PS4's own download service, which downloads and installs it with its
+  entry and progress bar in Notifications → Downloads. An app can install
+  its own update once it has closed, and be started again.
 - **Large libraries:** up to 10,000 tracks in 1,000 albums. A local file's
   tags are read once and cached.
 
@@ -61,6 +66,7 @@ scInit("ABCD00001", "My App");          // the app's title id, its name
 
 // As the app starts: whatever the shell was doing for us, back.
 scMusicTakeBack();
+scDownloadsTakeBack();
 ScQueueStatus st;
 if (scReadQueueStatus(&st) == 0) {
     // go on from st.index / st.track at st.positionMs
@@ -94,6 +100,9 @@ scMusicPlay();
 | `scCommand("next")` | `play`, `pause`, `toggle`, `next`, `prev`, `stop`, `volume=<0-32768>`, `repeat=<0-2>`, `shuffle=<0/1>`, `index=<n>`. |
 | `scReadQueueStatus(&st)` | State, place in the queue, the track's number in the queue written, position, length, tags, volume, repeat, shuffle. |
 | `scReadPlusEvents(events, cap, &n)` | "+" presses made while the app was away, then forgotten. |
+| `scWriteDownloads(notify, headers, items, count)` | A download list. |
+| `scDownloadsStart()` / `scDownloadsTakeBack()` | Hand it over / take it back (waits up to 5 s for the shell to stop). |
+| `scReadDownloadsStatus(&running, items, cap, &n)` | Each item's state and bytes. |
 | `scUpdateInstallPkg(pkg, relaunch)` | The app's own update (a `/data/...` path or URL), installed once the app has gone; the app exits right after. |
 | `scReadUpdateResult(&result, why, size)` | What came of it, read as the app starts again. |
 
@@ -134,6 +143,37 @@ ScQueue q = {.index = 0, .plus = &plus};
 - `containsUrl`, asked as each track begins, sets whether the "+" is lit: a
   2xx answer (holding `containsMatch`, if given) is "saved".
 
+### Downloads
+
+```c
+ScDownload d[] = {
+    {.id = "ep1", .file = "/data/MyApp/ep1.mp3", .title = "Episode 1", .kind = "url",
+     .args = {"https://server/ep1.mp3", NULL, NULL}},
+    {.id = "ch12", .file = "/data/MyApp/ch12/{page:3}.jpg", .title = "Chapter 12", .kind = "pages",
+     .args = {"https://server/ch12/{page}", "24,1", NULL}},
+};
+scWriteDownloads(1, "X-Token: …", d, 2);
+scDownloadsStart();
+```
+
+- **Kinds:** `url` (args: the URL, extra header lines) and `pages` (args: a
+  URL template with `{page}` or `{page:N}`, `count` or `count,first`, extra
+  header lines; the file a template too, each page its own file).
+- **Behaviour:** a partial file is continued with `Range`; 200 to a Range
+  rewrites it; 416 is complete; 503 is waited for (every 10 s, up to an
+  hour); 404 and 410 are `gone`; anything else is retried after 5, 15 and
+  60 s.
+- **Status:** `going`, `waiting`, `done`, `gone` or `failed`, with bytes and
+  size (and pages done for `pages`).
+- **`pkg`:** `args[0]` a package's URL or a path on the console, `args[1]`
+  extra header lines; `file` may be NULL. Its header (the first 4 KB) gives
+  the content id, type (`PS4GD`, `PS4AC`, `PS4AL`, `PS4DP`) and size. The
+  package is registered with the PS4's download service
+  (`sceBgftServiceIntDownloadRegisterTask` for a URL,
+  `…RegisterTaskByStorageEx` for a file) and started: the PS4 downloads and
+  installs it, shown in Notifications → Downloads. The item's status follows
+  the service's progress, its task id in the fifth field.
+
 ### Self-update
 
 ```c
@@ -161,6 +201,7 @@ Everything is in `/data/ShellCompanion/ps4/`:
 | `status.txt` | the player's status, every second |
 | `liked.txt` | Liked: a path or URL a line |
 | `plus-events.txt` | "+" presses not yet read by the app |
+| `downloads.txt`, `downloads-status.txt` | the download list and its status |
 | `update.txt`, `update-result.txt` | a self-update asked for, and what came of it |
 | `tags.txt` | the tag cache |
 | `ebgm/` | what the Music tab is answered from (lists, covers in `ebgm/art/`) |
@@ -170,9 +211,12 @@ Switches (an empty file of that name in the folder):
 | File | |
 |---|---|
 | `mcw-verbose` | log every call the music watch sees (mcw.log grows fast) |
+| `dl-nolist` | no entries in Notifications > Downloads for a list's files (an experiment, 0.96) |
+| `dl-list-keep` | keep finished entries in Notifications > Downloads until the next list (else removed 30 min after the list ends) |
+| `dl-list-bits.txt` | `going=0x…`, `waiting=0x…`, `done=0x…`: the state bits those entries are given |
 | `mcw-norowart` | no covers beside tracks |
 | `mcw-noqueuekeys` | no □/△ in track lists |
-| `https-noverify` | streams accept any HTTPS certificate |
+| `https-noverify` | streams and downloads accept any HTTPS certificate |
 
 ## Limits
 
@@ -181,9 +225,11 @@ Switches (an empty file of that name in the folder):
   failed in the shell.
 - **Covers:** tiles show JPEG and PNG; the shell appends `&w=192&h=192` to a
   tile's URL.
-- **Background downloads:** not in this release. They were built and taken
-  out as not reliable enough yet; the engineering notes in
-  [`ps4/README.md`](../ps4/README.md) keep what was learned.
+- **Download progress:** notifications for ordinary files. The PS4's own
+  Notifications → Downloads list (its download service) takes packages only:
+  a test with an MP3, served from the PS4 itself, was refused before the
+  service asked for a byte.
+- **Rest mode:** whether downloads carry on in rest mode isn't known yet.
 - **Starting position:** for a stream, the start position works only
   within what has been downloaded when it begins.
 
@@ -196,13 +242,17 @@ CI as a package:
   drive's root or the folder), every MP3/WAV in `music/`, a test tone, and
   the lines of `streams.txt`
   (`URL | title | artist | album | cover URL`).
+- **L2 / R2** hand over and take back a test download list (the URLs in
+  `test-downloads.txt`, a `.pkg` among them going to the PS4's service).
 - **L3** installs the package named in `test-update.txt` as a self-update,
   then closes the app.
 - **□ ⏯, △ stop, L1/R1 previous/next, R3** the quick menu's answers on or
   off, **OPTIONS** writes the test tone again.
 
 `SC_DEBUG=1 sh ps4/bgm/build.sh` builds the debugging aids in: the shell
-code dump and the assembly carver (`mcw.carve`).
+code dump, the assembly carver (`mcw.carve`), logging the Downloads list's
+calls (`mcw-bgftlog`, `mcw-bgftprogress`; these crashed the shell with a
+download going) and the media experiment (`bgft_probe`).
 
 Restart the PS4 after installing a new version: the modules load once a
 boot.
