@@ -14,14 +14,26 @@
  *     sent with #plus.method (GET by default, or POST, PUT, DELETE, PATCH),
  *     #plus.body and #plus.type, and #plus.headers ("Name: value" lines,
  *     %-encoded). Placeholders: {id}, {title}, {artist}, {album}, {file}
- *     (URL-encoded in a URL, escaped as in a JSON string in a body).
+ *     (URL-encoded in a URL, and in a body whose #plus.type is
+ *     application/x-www-form-urlencoded; escaped as in a JSON string in any
+ *     other body).
  *   - #plus.contains, a URL template asked when a track begins: a 2xx answer
  *     (whose body holds #plus.match, if given) makes the track saved, any
  *     other answer not, liked.txt kept so, which is what lights the "+".
  *
  * The requests run one at a time on a thread of their own (ScBgmPlus),
- * never holding up the music.
+ * never holding up the music. Each job is filled in when it is queued, on
+ * the player's thread, and carries its own copies of everything it needs
+ * (1.51): a reload (poolReset, plusReset) while a request is going frees
+ * the templates and track strings the thread used to read.
  */
+
+// A job's room (1.51: 2048 for a URL or body, cut silently, overflowed by a
+// %-encoded {file} URL).
+#define PLUS_URL 4096
+#define PLUS_BODY 4096
+#define PLUS_HEADERS 4096
+#define PLUS_MATCH 512
 
 static struct {
     int http;  // #plus.mode http
@@ -42,10 +54,18 @@ static int plusLine(const char* line, int len) {
     while (k < len && line[k] != ' ') k++;
     const char* key = line + 6;
     const int keyLen = k - 6;
-    char value[2048];
+    static char value[PLUS_URL];  // the player's thread only
     int vn = len - k - 1;
     if (vn < 0) vn = 0;
-    if (vn >= (int)sizeof(value)) vn = sizeof(value) - 1;
+    if (vn >= (int)sizeof(value)) {
+        // Cut, a template would send to the wrong place (1.51: cut silently).
+        char keyText[24];
+        int i = 0;
+        for (; i < keyLen && i + 1 < (int)sizeof(keyText); i++) keyText[i] = key[i];
+        keyText[i] = 0;
+        logLine("plus: #plus.%s: %d bytes, more than %d: not used", keyText, vn, (int)sizeof(value) - 1);
+        return 1;
+    }
     memcpy(value, line + k + 1, (size_t)vn);
     value[vn] = 0;
     dlDecode(value);
@@ -64,12 +84,15 @@ static int plusLine(const char* line, int len) {
     return 1;
 }
 
-// A template filled in for track lib: URL-encoded (url 1) or as it is.
-static void plusFill(const char* tmpl, int lib, int url, char* out, size_t cap) {
+// A template filled in for track lib: its values URL-encoded (url 1) or
+// escaped as in a JSON string (0). 1 if it all fitted in out, 0 if cut.
+static int plusFill(const char* tmpl, int lib, int url, char* out, size_t cap) {
     static const char hex[] = "0123456789ABCDEF";
     size_t o = 0;
     char idText[24];
-    for (const char* p = tmpl; *p && o + 4 < cap;) {
+    const char* p = tmpl;
+    int whole = 1;
+    for (; *p && o + 4 < cap;) {
         const char* v = NULL;
         int skip = 0;
         if (!memcmp(p, "{id}", 4)) {
@@ -115,16 +138,31 @@ static void plusFill(const char* tmpl, int lib, int url, char* out, size_t cap) 
                 out[o++] = hex[c & 15];
             }
         }
+        if (*v) whole = 0;
     }
+    if (*p) whole = 0;
     out[o] = 0;
+    return whole;
+}
+
+// 1 if a body of this Content-Type is form-encoded (its values then
+// URL-encoded, not JSON-escaped).
+static int plusFormType(const char* type) {
+    static const char want[] = "application/x-www-form-urlencoded";
+    for (size_t i = 0; i < sizeof(want) - 1; i++) {
+        char c = type[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != want[i]) return 0;
+    }
+    return 1;
 }
 
 typedef int (*FnHttpReq2)(int, const char*, const char*, uint64_t);
 
 // One request: its HTTP status, or a negative code; its body's start in
 // body (if given). method "" for GET.
-static int plusRequest(const char* method, const char* url, const char* body, const char* type, char* reply,
-                       size_t replyCap) {
+static int plusRequest(const char* method, const char* url, const char* body, const char* type,
+                       const char* headers, char* reply, size_t replyCap) {
     if (reply && replyCap) reply[0] = 0;
     if (!httpSetup()) return -1;
     static FnHttpReq2 req2;
@@ -150,7 +188,7 @@ static int plusRequest(const char* method, const char* url, const char* body, co
     if (req >= 0) {
         if (g_http.connectTimeout) g_http.connectTimeout(req, 10u * 1000000u);
         if (g_http.recvTimeout) g_http.recvTimeout(req, 15u * 1000000u);
-        dlHeaders(req, g_plus.headers);
+        dlHeaders(req, headers);
         if (bodyLen && g_http.addHeader) g_http.addHeader(req, "Content-Type", type && type[0] ? type : "application/json", 0);
         const int rc = g_http.send(req, bodyLen ? body : NULL, bodyLen);
         if (rc >= 0) {
@@ -210,66 +248,100 @@ static void plusLiked(const char* path, int on) {
     if (text) sysUnmap(text, mapped);
 }
 
-// The jobs, one at a time: 1 save, 2 delete, 3 contains, with the track.
+// The jobs, one at a time: 1 save, 2 delete, 3 contains, each filled in
+// when queued, on the player's thread (plusPressed, plusTrackBegun), with
+// copies of all it needs: nothing in g_pool or g_lib is read by the thread.
 #define PLUS_JOBS 16
+typedef struct {
+    int kind;
+    char url[PLUS_URL], body[PLUS_BODY], headers[PLUS_HEADERS], match[PLUS_MATCH];
+    char method[16], type[128];
+    char path[MAX_PATH], title[META_LEN];
+} PlusJob;
 static struct {
-    volatile int head, tail;
-    int kind[PLUS_JOBS], lib[PLUS_JOBS];
-    volatile int lock;
+    int head, tail;  // head the player's thread's, tail the "+" thread's
+    PlusJob* job;    // PLUS_JOBS of them, mapped at the first
     int started;
 } g_plusQ;
 
 static void* plusMain(void* arg) {
     (void)arg;
+    static char reply[4096];
     for (;;) {
-        while (g_plusQ.head == g_plusQ.tail) sysSleepMs(100);
-        const int at = g_plusQ.tail % PLUS_JOBS;
-        const int kind = g_plusQ.kind[at], lib = g_plusQ.lib[at];
-        g_plusQ.tail++;
-        if (lib < 0 || lib >= g_libCount) continue;
-        static char url[2048], body[2048], reply[4096];
-        const char* tmpl = kind == 1 ? g_plus.save : kind == 2 ? g_plus.del : g_plus.contains;
-        if (!tmpl[0]) continue;
-        plusFill(tmpl, lib, 1, url, sizeof(url));
+        while (__atomic_load_n(&g_plusQ.head, __ATOMIC_ACQUIRE) == g_plusQ.tail) sysSleepMs(100);
+        const PlusJob* j = &g_plusQ.job[g_plusQ.tail % PLUS_JOBS];
         char shown[160];
-        urlShown(url, shown, sizeof(shown));
-        if (kind == 3) {
-            const int code = plusRequest("GET", url, NULL, NULL, reply, sizeof(reply));
-            const int saved = code >= 200 && code < 300 && (!g_plus.match[0] || hasText(reply, g_plus.match));
-            plusLiked(g_tracks[lib], saved);
+        urlShown(j->url, shown, sizeof(shown));
+        if (j->kind == 3) {
+            const int code = plusRequest("GET", j->url, NULL, NULL, j->headers, reply, sizeof(reply));
+            const int saved = code >= 200 && code < 300 && (!j->match[0] || hasText(reply, j->match));
+            plusLiked(j->path, saved);
             logLine("plus: contains %s: HTTP %d: %s", shown, code, saved ? "saved" : "not saved");
         } else {
-            plusFill(g_plus.body, lib, 0, body, sizeof(body));
-            const int code = plusRequest(g_plus.method, url, body[0] ? body : NULL, g_plus.type, NULL, 0);
-            logLine("plus: %s %s: HTTP %d", kind == 1 ? "save" : "delete", shown, code);
+            const int code = plusRequest(j->method, j->url, j->body[0] ? j->body : NULL, j->type, j->headers, NULL, 0);
+            logLine("plus: %s %s: HTTP %d", j->kind == 1 ? "save" : "delete", shown, code);
             if (code < 200 || code > 299)
-                notify("%s failed (%d): %s", kind == 1 ? "Adding" : "Removing", code, g_lib[lib].title);
+                notify("%s failed (%d): %s", j->kind == 1 ? "Adding" : "Removing", code, j->title);
         }
+        __atomic_store_n(&g_plusQ.tail, g_plusQ.tail + 1, __ATOMIC_RELEASE);  // the slot is free again
     }
     return NULL;
 }
 
+// A copy of s into out, 1 if whole.
+static int plusCopy(char* out, size_t cap, const char* s) {
+    return fmt(out, cap, "%s", s ? s : "") < (int)cap;
+}
+
+// The player's thread only (it alone changes g_pool, g_lib and g_plus).
 static void plusQueue(int kind, int lib) {
-    while (__atomic_exchange_n(&g_plusQ.lock, 1, __ATOMIC_ACQUIRE)) sysSleepMs(1);
-    if (!g_plusQ.started) {
-        g_plusQ.started = threadStart(plusMain, NULL, "ScBgmPlus") >= 0;
+    if (lib < 0 || lib >= g_libCount) return;
+    const char* tmpl = kind == 1 ? g_plus.save : kind == 2 ? g_plus.del : g_plus.contains;
+    if (!tmpl[0]) return;
+    if (!g_plusQ.job) {
+        g_plusQ.job = (PlusJob*)sysMap(sizeof(PlusJob) * PLUS_JOBS);
+        if (!g_plusQ.job) return;
     }
-    if (g_plusQ.head - g_plusQ.tail < PLUS_JOBS) {
-        const int at = g_plusQ.head % PLUS_JOBS;
-        g_plusQ.kind[at] = kind;
-        g_plusQ.lib[at] = lib;
-        g_plusQ.head++;
+    if (!g_plusQ.started) g_plusQ.started = threadStart(plusMain, NULL, "ScBgmPlus") >= 0;
+    if (g_plusQ.head - __atomic_load_n(&g_plusQ.tail, __ATOMIC_ACQUIRE) >= PLUS_JOBS) {
+        logLine("plus: %d request(s) waiting already: %s not sent", PLUS_JOBS, g_lib[lib].title);
+        return;
     }
-    __atomic_store_n(&g_plusQ.lock, 0, __ATOMIC_RELEASE);
+    PlusJob* j = &g_plusQ.job[g_plusQ.head % PLUS_JOBS];
+    j->kind = kind;
+    const int form = plusFormType(g_plus.type);
+    int whole = plusFill(tmpl, lib, 1, j->url, sizeof(j->url));
+    j->body[0] = 0;
+    if (kind != 3) whole &= plusFill(g_plus.body, lib, form, j->body, sizeof(j->body));
+    whole &= plusCopy(j->headers, sizeof(j->headers), g_plus.headers);
+    whole &= plusCopy(j->match, sizeof(j->match), g_plus.match);
+    whole &= plusCopy(j->method, sizeof(j->method), g_plus.method);
+    whole &= plusCopy(j->type, sizeof(j->type), g_plus.type);
+    whole &= plusCopy(j->path, sizeof(j->path), g_tracks[lib]);
+    plusCopy(j->title, sizeof(j->title), g_lib[lib].title);
+    if (!whole) {
+        // Cut, it would be sent to the wrong place or with the wrong values.
+        logLine("plus: %s for %s too long for a request: not sent",
+                kind == 1 ? "save" : kind == 2 ? "delete" : "contains", j->title);
+        if (kind != 3) notify("%s failed (too long): %s", kind == 1 ? "Adding" : "Removing", j->title);
+        return;
+    }
+    __atomic_store_n(&g_plusQ.head, g_plusQ.head + 1, __ATOMIC_RELEASE);
 }
 
 // A press of "+" (plus_save=<lib>, plus_delete=<lib> from the music watch).
 static void plusPressed(int save, int lib) {
     if (lib < 0 || lib >= g_libCount) return;
     char line[1024];
-    const int n = fmt(line, sizeof(line), "%lu\t%s\t%s\t%s\n", (unsigned long)(sysNowUs() / 1000u), save ? "save" : "delete",
+    int n = fmt(line, sizeof(line), "%lu\t%s\t%s\t%s\n", (unsigned long)(sysNowUs() / 1000u), save ? "save" : "delete",
                       g_given[lib].id[0] ? g_given[lib].id : "", g_tracks[lib]);
-    const int fd = sysOpen(SC_BGM_DIR "/plus-events.txt", SC_O_WRONLY | SC_O_CREAT, 0666);
+    // fmt answers the length it wanted (1.51: that many were written, past
+    // line's end when cut); a cut line still ends in its newline.
+    if (n >= (int)sizeof(line)) {
+        n = (int)sizeof(line) - 1;
+        line[n - 1] = '\n';
+    }
+    const int fd = n > 0 ? sysOpen(SC_BGM_DIR "/plus-events.txt", SC_O_WRONLY | SC_O_CREAT, 0666) : -1;
     if (fd >= 0) {
         sysSeek(fd, 0, 2);
         sysWrite(fd, line, (size_t)n);

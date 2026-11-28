@@ -237,7 +237,8 @@ static void dlStatus(void) {
 // Header lines ("Name: value", \r\n or \n between) added to the request.
 static void dlHeaders(int req, const char* lines) {
     if (!g_http.addHeader || !lines) return;
-    char name[128], value[1024];
+    char name[128];
+    char value[4096];  // 1.51: 1024, a long token cut
     for (const char* p = lines; *p;) {
         const char* e = p;
         while (*e && *e != '\r' && *e != '\n') e++;

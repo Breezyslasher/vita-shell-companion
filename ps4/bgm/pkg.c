@@ -335,11 +335,20 @@ static const char* dlItemIcon(int i, char* out, size_t cap) {
 // /user/data/... it installed (1.05). pkgItem tries /data/... if that fails.
 static int g_pkgUserPaths = 1;  // 1.05: /data/... failed 0x80990004, /user/data/... installed
 
+// A package's path or URL as long as the client library lets an app give
+// one for an update (its update.txt is 1200 bytes): a signed or CDN URL is
+// longer than MAX_PATH (1.51).
+#define PKG_SOURCE_MAX 1280
+
+// pkgFollow's answer when the service has moved no byte for 10 min (1.51:
+// was 0, which self-update took as installed).
+#define PKG_STALLED (-4)
+
 static int32_t pkgRegister(const char* where, const char* extra, const char* name, const char* given) {
     if (!bgftSetup()) return -1;
     if (g_bgft.user == -1) bgftUser();
     const int local = where[0] == '/';
-    char path[MAX_PATH];
+    char path[PKG_SOURCE_MAX];
     fmt(path, sizeof(path), "%s",
         local && !g_pkgUserPaths && !memcmp(where, "/user/data/", 11) ? where + 5 : where);
     if (local) logLine("pkg: given to the service as %s", path);
@@ -389,8 +398,9 @@ static int32_t pkgRegister(const char* where, const char* extra, const char* nam
     return rc < 0 ? rc : task;
 }
 
-// Its progress until it ends (or stop says so): 0 done, 1 stopped, or the
-// error. bytes/size kept as it goes.
+// Its progress until it ends (or stop says so): 0 every byte transferred,
+// 1 stopped, PKG_STALLED after 10 min with no byte, or the service's error.
+// bytes/size kept as it goes.
 static int pkgFollow(int32_t task, uint64_t* bytes, uint64_t* size, volatile int* stop) {
     uint64_t lastChange = sysNowUs(), lastBytes = 0;
     for (;;) {
@@ -417,10 +427,41 @@ static int pkgFollow(int32_t task, uint64_t* bytes, uint64_t* size, volatile int
         if (len && got >= len) return 0;
         if (sysNowUs() - lastChange > 600000000u) {  // 10 min without a byte
             logLine("pkg: task %d: no progress for 10 min, left to the PS4", task);
-            return 0;
+            return PKG_STALLED;
         }
         for (int s = 0; s < 20 && !(stop && *stop); s++) sysSleepMs(100);
     }
+}
+
+// After every byte has come, the install: the service's answers watched for
+// up to secs s for an error (1.51: self-update waited a blind 15 s and
+// called it installed). Which progress bits mean "installed" is not known
+// for certain (README: finished tasks answered 0x188 and 0x213), so the
+// bits are only logged as they change; an error, or the progress call
+// failing, is what fails it. 0, or the error.
+static int pkgSettle(int32_t task, int secs) {
+    uint32_t lastBits = 0xFFFFFFFFu;
+    const uint64_t until = sysNowUs() + (uint64_t)secs * 1000000u;
+    while (sysNowUs() < until) {
+        BgftProgress pr;
+        memset(&pr, 0, sizeof(pr));
+        const int rc = g_bgft.progress(task, &pr);
+        if (rc < 0) {
+            logLine("pkg: task %d installing: progress 0x%08X", task, (unsigned)rc);
+            return rc;
+        }
+        if (pr.errorResult) {
+            logLine("pkg: task %d installing: error 0x%08X", task, (unsigned)pr.errorResult);
+            return pr.errorResult;
+        }
+        if (pr.bits != lastBits) {
+            lastBits = pr.bits;
+            logLine("pkg: task %d installing: bits 0x%x, preparing %d%%, local copy %d%%", task, pr.bits,
+                    pr.preparingPercent, pr.localCopyPercent);
+        }
+        sysSleepMs(1000);
+    }
+    return 0;
 }
 
 // ── Self-update ──────────────────────────────────────────────────────────────
@@ -472,7 +513,9 @@ typedef int (*FnLaunch)(const char*, const char**, LaunchParam*);
 static void* updateMain(void* arg) {
     (void)arg;
     static char text[4096];
-    char title[16] = "", source[MAX_PATH] = "", v[8] = "";
+    static char source[PKG_SOURCE_MAX];
+    char title[16] = "", v[8] = "";
+    source[0] = 0;
     if (readText(UPDATE_FILE, text, sizeof(text)) > 0) {
         statusFieldBgm(text, "title", title, sizeof(title));
         statusFieldBgm(text, "source", source, sizeof(source));
@@ -487,7 +530,7 @@ static void* updateMain(void* arg) {
     sysSleepMs(3000);
     notify("Updating %s", title[0] ? title : "the app");
     // The app's /data path is /user/data here.
-    char where[MAX_PATH];
+    static char where[PKG_SOURCE_MAX + 8];
     fmt(where, sizeof(where), "%s%s", !memcmp(source, "/data/", 6) ? "/user" : "", source);
     const int32_t task = pkgRegister(where, NULL, title, NULL);
     if (task < 0) {
@@ -499,7 +542,18 @@ static void* updateMain(void* arg) {
         return NULL;
     }
     uint64_t bytes = 0, size = 0;
-    const int rc = pkgFollow(task, &bytes, &size, NULL);
+    int rc = pkgFollow(task, &bytes, &size, NULL);
+    if (rc == PKG_STALLED) {
+        char why[128];
+        fmt(why, sizeof(why), "the PS4's download stopped moving (%lu of %lu bytes after 10 min with none)",
+            (unsigned long)bytes, (unsigned long)size);
+        updateResult(rc, why);
+        notify("Update failed: the download stopped");
+        g_updateRunning = 0;
+        return NULL;
+    }
+    // Every byte has come: the install itself, watched for an error.
+    if (!rc) rc = pkgSettle(task, 30);
     if (rc) {
         char why[96];
         fmt(why, sizeof(why), "the PS4's download or install failed (0x%08X)", (unsigned)rc);
@@ -508,9 +562,7 @@ static void* updateMain(void* arg) {
         g_updateRunning = 0;
         return NULL;
     }
-    // Installed once the copy is whole; a moment more for the install itself.
-    sysSleepMs(15000);
-    updateResult(0, "installed");
+    updateResult(0, "installed (the PS4 reported no error in 30 s after the download)");
     if (v[0] == '1' && title[0]) {
         FnLaunch launch = (FnLaunch)anySym(0, "sceSystemServiceLaunchApp");
         LaunchParam lp;
