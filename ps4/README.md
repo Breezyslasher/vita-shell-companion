@@ -23,6 +23,67 @@ Its files are in `/user/data/ShellCompanion/ps4/` (the same folder as
 `/user/data/GoldHEN/plugins/sc_bgm.prx` and loaded with GoldHEN's
 `PROCESS_PRX_LOAD` (system call 500, command 6).
 
+### The review's bugs fixed (1.51, not yet tried on a PS4)
+
+The fixes for the bugs in the review of `Ps4-Alpha-.0.0.1`. Each one is
+built from what the code does; none has been run on a console yet.
+
+The player (`bgm.c`):
+- **Resume:** `#position` waits for the stream as it comes, instead of
+  stopping at what has arrived (~5 s) and starting the next song. It
+  applies only to `#start`'s track, once.
+- **A slow or unreachable server:** while a stream is waited for,
+  `status.txt` is written every second. A command that comes meanwhile is
+  read at once; the download goes on and is taken up again after it.
+  After 5 tracks in a row that would not open, the player stops.
+- **Streams with no length (Plex transcodes):** 64 MB is taken (then 32,
+  then 16, as memory allows), about 27 min at 320 kbit/s, instead of 16 MB.
+  `dur_ms` is known once the stream has all come.
+- **queue.txt:** a path over the limit (now 1535 bytes, from 767) is kept
+  as a track that will not open, so later places don't shift. `|`
+  separates fields only on a line with no tab.
+- **Start:** the module starts stopped and writes its status first. A
+  queue left from before no longer plays at boot; apps hand over with
+  `reload` and `play` as before.
+- **Shuffle** plays every track once before any again. `next` counts, and
+  `prev` goes back to the track that played before.
+- **Commands:** the client's commands each come in a file of their own,
+  `cmd.<ms>-<pid>-<n>`, when one is already waiting; the player reads `cmd`
+  and then those, oldest first. The music watch and the player share a
+  lock around `cmd`.
+- A stopped download's 16 MB can no longer be left with nobody to free it.
+  ID3 text cut at its buffer no longer ends partway through a character.
+
+"+" and self-update (`plus.c`, `pkg.c`):
+- A "+" job carries its own copies of what it sends, so a reload while it
+  runs can't free them. Templates have 4 KB, and one that doesn't fit is
+  not sent (logged). Form-encoded bodies (`#plus.type
+  application/x-www-form-urlencoded`) are URL-encoded.
+- Self-update: 10 min with no progress is a failure (`PKG_STALLED`).
+  After the download, the service is watched for an error for 30 s
+  instead of waiting a fixed 15 s. The update source can be 1279 bytes.
+
+The music watch (`mcw.c`, `hook.c`):
+- The front page and other answers are read whole, whatever their size.
+- liked.txt is read whole and rewritten only after a whole read, under a
+  lock. The 4 MB pool is mapped once, under a lock.
+- The playing track's id is its library number (`track=`).
+- A page's `total` counts every row. `editsWait` keeps edits made while it
+  waits. `track=-1` reads as -1. Row-art handles are freed when their slot
+  is used again. The 341-byte fields aren't cut partway through a character.
+- Hooks are written with one 8-byte store, and the thunk passes r10 through.
+- Still as it was: the real web API request still goes out before its
+  answer is replaced.
+
+The client library:
+- `scMusicTakeBack` sends `takeback` even when the heartbeat is old, and
+  waits up to 5 s for `stopped`.
+- `scWriteQueue` refuses (-1) a track with neither `local` nor `url`, and
+  turns `|` into a space.
+- The calls that use static buffers take a lock. "+" events past `cap` are
+  kept for the next call. A heartbeat slightly ahead of now counts as fresh.
+- The header says that `scOpen` leaves the app jailbroken.
+
 ### Background downloads back in development (1.50)
 
 1.49 took them out for the first release (main). 1.50 puts the code back,
