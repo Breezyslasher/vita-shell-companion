@@ -49,7 +49,7 @@ static FnSetVolume g_aoVolume;
 #define RATE 48000
 #define GRAIN 1024  // frames a grain, ~21 ms
 #define MAX_TRACKS 10000  // 0.84: 512 before; the tables hold pointers into g_pool
-#define MAX_PATH 768  // a path, or a URL (0.72), Plex's with its token
+#define MAX_PATH 1536  // a path, or a URL (0.72), Plex's with its token; 768 before 1.51
 #define MAX_FILE (96u << 20)
 
 enum { ST_STOPPED, ST_PLAYING, ST_PAUSED };
@@ -110,6 +110,7 @@ static int g_queueRev;  // counts the queue's changes, in status.txt (queue_rev)
 // client library's ScQueue.positionMs), and where the music was when an app
 // took it back (the "takeback" command), for status.txt's pos_ms (0.81).
 static uint64_t g_seekMs, g_heldPosMs;
+static int g_seekLib = -1;  // the track #position is for: #start's (1.51)
 // A streamed track's tags as queue.txt gives them (0.72): URL, then title,
 // artist, album and a cover's URL, tab-separated; "" where not given.
 #define GIVEN_TEXT 160
@@ -186,14 +187,43 @@ static int32_t g_volume = 32768;
 // Repeat (0 none, 1 all, 2 one) and shuffle (0, 1), as the quick menu sets
 // them (repeat=<n>, shuffle=<n> as cmd).
 static int g_repeat, g_shuffle;
-static int g_played;  // tracks played since the queue began, for shuffle
 static uint32_t g_rand = 0x9E3779B9u;
+// Shuffle (1.51): each track of the library heard since shuffling began (or
+// the queue was replaced), so that a shuffled queue plays every track once
+// before any again; and the tracks begun, for prev to go back through.
+static uint8_t g_heard[MAX_TRACKS];
+#define HIST_MAX 256
+static int g_hist[HIST_MAX], g_histN;
 
+static void heardReset(void) {
+    memset(g_heard, 0, sizeof(g_heard));
+    g_histN = 0;
+}
+
+// A place in the queue, at random, whose track has not been heard: or -1
+// when every one has.
 static int otherTrack(void) {
-    if (g_count < 2) return g_index;
+    int left = 0;
+    for (int i = 0; i < g_count; i++) left += !g_heard[g_q[i]];
+    if (!left) return -1;
     g_rand = g_rand * 1664525u + 1013904223u + (uint32_t)sysNowUs();
-    const int r = (int)((g_rand >> 8) % (uint32_t)(g_count - 1));
-    return r >= g_index ? r + 1 : r;
+    int r = (int)((g_rand >> 8) % (uint32_t)left);
+    for (int i = 0; i < g_count; i++)
+        if (!g_heard[g_q[i]] && r-- == 0) return i;
+    return -1;
+}
+
+// The next place when shuffling: one not heard, or, with every one heard,
+// all again (wrap 1) or -1.
+static int shuffleNext(int wrap) {
+    int at = otherTrack();
+    if (at < 0 && wrap) {
+        const int cur = g_index < g_count ? g_q[g_index] : -1;
+        memset(g_heard, 0, sizeof(g_heard));
+        if (cur >= 0 && g_count > 1) g_heard[cur] = 1;  // not the same one straight away
+        at = otherTrack();
+    }
+    return at;
 }
 
 // ---- a source: a whole file in memory, decoded a frame at a time ----
@@ -332,14 +362,23 @@ static void urlShown(const char* url, char* out, size_t cap) {
     if (url[k] == '?' && k + 4 < cap) fmt(out + k, cap - k, "?...");
 }
 
-#define DL_FIRST (16u << 20)  // what is taken when the server gives no length
+// What is taken when the server gives no length (a Plex transcode, chunked):
+// 1.51, the most of these that can be had, 64 MB first (~27 min at 320
+// kbit/s); 16 MB before, which cut songs over ~7 min.
+static const uint32_t g_dlTry[] = {64u << 20, 32u << 20, 16u << 20};
+#define DL_FIRST (64u << 20)
 static struct {
-    volatile int running, stop, ready, failed, done, orphan;
+    volatile int running, stop, ready, failed, done;
+    // Who frees the buffer (1.51): the download thread at its end and the
+    // player when it gives up on it each swap this to 1; the one that finds
+    // it 1 already is the second, and frees it if the other did not.
+    volatile int claim;
     volatile size_t have;  // bytes in buf
     uint64_t total;        // its length, 0 if not known
     uint8_t* buf;
     size_t cap;
     int code;
+    uint64_t t0;  // when it began, for srcFetch's 30 s
     char url[MAX_PATH];
 } g_dl;
 
@@ -376,10 +415,16 @@ static void* dlThread(void* arg) {
             (sysNowUs() - t0) / 1000u);
     if (g_dl.code < 200 || g_dl.code > 299) goto fail;
     g_dl.total = known == 0 ? len : 0;
-    g_dl.cap = known == 0 && len ? (size_t)len : DL_FIRST;
-    if (g_dl.cap > MAX_FILE) g_dl.cap = MAX_FILE;
-    g_dl.cap = (g_dl.cap + 0x3FFF) & ~(size_t)0x3FFF;
-    mine = (uint8_t*)sysMap(g_dl.cap);
+    if (known == 0 && len) {
+        g_dl.cap = len > MAX_FILE ? MAX_FILE : (size_t)len;
+        g_dl.cap = (g_dl.cap + 0x3FFF) & ~(size_t)0x3FFF;
+        mine = (uint8_t*)sysMap(g_dl.cap);
+    } else {
+        for (unsigned t = 0; !mine && t < sizeof(g_dlTry) / sizeof(g_dlTry[0]); t++) {
+            g_dl.cap = g_dlTry[t];
+            mine = (uint8_t*)sysMap(g_dl.cap);
+        }
+    }
     mineCap = g_dl.cap;
     g_dl.buf = mine;
     if (!g_dl.buf) {
@@ -399,6 +444,8 @@ static void* dlThread(void* arg) {
         __atomic_store_n(&g_dl.have, g_dl.have + (size_t)n, __ATOMIC_RELEASE);
     }
     if (g_dl.have >= g_dl.cap && !g_dl.total) logLine("stream %s: cut at %lu bytes", shown, (uint64_t)g_dl.cap);
+    // Its length, now that it is known, for the duration (1.51).
+    if (!g_dl.total && !g_dl.stop) g_dl.total = g_dl.have;
     logLine("stream %s: %lu bytes in %lu ms%s", shown, (uint64_t)g_dl.have, (sysNowUs() - t0) / 1000u,
             g_dl.stop ? ", stopped" : "");
     g_dl.done = 1;
@@ -412,8 +459,8 @@ out:
     if (req >= 0) g_http.delReq(req);
     if (conn >= 0) g_http.delConn(conn);
     if (tmpl >= 0) g_http.delTmpl(tmpl);
-    // Given up on by the player meanwhile (srcClose): its memory is freed here.
-    if (g_dl.orphan && mine) sysUnmap(mine, mineCap);
+    // Given up on by the player meanwhile (dlStop): its memory is freed here.
+    if (__atomic_exchange_n(&g_dl.claim, 1, __ATOMIC_ACQ_REL) && mine) sysUnmap(mine, mineCap);
     __atomic_store_n(&g_dl.running, 0, __ATOMIC_RELEASE);
     return NULL;
 }
@@ -421,20 +468,33 @@ out:
 // The download stopped: 1, or 0 if it is still running after ms (it frees
 // its memory itself then).
 static int dlStop(uint32_t ms) {
-    if (!g_dl.running) return 1;
     g_dl.stop = 1;
+    if (!g_dl.running) {  // ended, its claim made; or never begun
+        __atomic_store_n(&g_dl.claim, 1, __ATOMIC_RELEASE);
+        return 1;
+    }
     for (uint32_t w = 0; w < ms && g_dl.running; w += 10) sysSleepMs(10);
-    if (!g_dl.running) return 1;
-    g_dl.orphan = 1;
+    // The thread claimed it first: it has ended, or is past its own check,
+    // and has left the memory to us.
+    if (__atomic_exchange_n(&g_dl.claim, 1, __ATOMIC_ACQ_REL)) {
+        while (g_dl.running) sysSleepMs(1);  // its last few lines
+        return 1;
+    }
     logLine("stream: still reading after %u ms, left to end on its own", ms);
     return 0;
 }
 
+// The download given up on, and its memory freed (now, or by its thread
+// when it ends).
+static void dlDrop(void) {
+    if (!g_dl.buf && !g_dl.running) return;
+    if (dlStop(2000) && g_dl.buf) sysUnmap(g_dl.buf, g_dl.cap);
+    g_dl.buf = NULL;
+}
+
 static void srcClose(void) {
     if (g_src.streamed) {
-        // Its memory is the download's.
-        if (dlStop(2000) && g_dl.buf) sysUnmap(g_dl.buf, g_dl.cap);
-        g_dl.buf = NULL;
+        dlDrop();  // its memory is the download's
     } else if (g_src.data) {
         sysUnmap(g_src.data, g_src.mapped);
     }
@@ -540,6 +600,17 @@ static uint32_t be32(const uint8_t* p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
+// Text cut by fmt to its buffer: a character cut partway dropped (1.51).
+static void utf8Trim(char* s) {
+    size_t i = strlen(s), back = 0;
+    while (i > 0 && back < 4 && ((uint8_t)s[i - 1] & 0xC0) == 0x80) i--, back++;
+    if (!i) return;
+    const uint8_t lead = (uint8_t)s[i - 1];
+    if (lead < 0xC0) return;
+    const size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
+    if (back + 1 < need) s[i - 1] = 0;
+}
+
 static size_t putUtf8(char* out, size_t at, size_t cap, uint32_t c) {
     if (c < 0x80) {
         if (at + 1 < cap) out[at++] = (char)c;
@@ -595,6 +666,7 @@ static void id3Text(const uint8_t* b, size_t n, char* out, size_t cap) {
         }
     }
     out[o < cap ? o : cap - 1] = 0;
+    utf8Trim(out);  // a UTF-8 frame's bytes, cut at cap (1.51)
     for (size_t i = 0; out[i]; i++)
         if (out[i] == '\n' || out[i] == '\r') out[i] = ' ';
 }
@@ -640,25 +712,48 @@ static void id3Read(const uint8_t* d, size_t n) {
     }
 }
 
+// A stream waited for, left running while a command is read (1.51): taken
+// up again when the same URL is opened next, else given up on.
+static int g_fetchHeld;
+static uint64_t g_lastStatus;
+static void writeStatus(void);
+static int cmdWaiting(void);
+
+// While waiting on a stream (1.51): status.txt kept fresh, as the client
+// counts a player more than 3 s quiet as gone; and 1 once a command has
+// come, so that the wait is left for it to be read.
+static int waitTick(void) {
+    if (sysNowUs() - g_lastStatus > 1000000u) writeStatus();
+    return cmdWaiting();
+}
+
 // A stream's start: its download begun, and its first bytes waited for
-// (an ID3 tag's whole, cover and all, and 192 KB of audio past it). 1, or 0.
+// (an ID3 tag's whole, cover and all, and 192 KB of audio past it). 1, or 0,
+// or -1 if a command came first (the download goes on, g_fetchHeld).
 static int srcFetch(const char* url) {
     char shown[160];
     urlShown(url, shown, sizeof(shown));
-    for (uint32_t w = 0; g_dl.running && w < 15000; w += 50) sysSleepMs(50);  // one before it, ending
-    if (g_dl.running) {
-        logLine("stream %s: the one before still ends", shown);
-        return 0;
+    if (g_fetchHeld) {
+        g_fetchHeld = 0;  // srcOpen has seen it is this one
+    } else {
+        for (uint32_t w = 0; g_dl.running && w < 15000; w += 50) {  // one before it, ending
+            if (waitTick()) return -1;
+            sysSleepMs(50);
+        }
+        if (g_dl.running) {
+            logLine("stream %s: the one before still ends", shown);
+            return 0;
+        }
+        memset((void*)&g_dl, 0, sizeof(g_dl));
+        fmt(g_dl.url, sizeof(g_dl.url), "%s", url);
+        g_dl.t0 = sysNowUs();
+        g_dl.running = 1;
+        if (threadStart(dlThread, NULL, "ScBgmFetch") < 0) {
+            g_dl.running = 0;
+            logLine("stream %s: no thread", shown);
+            return 0;
+        }
     }
-    memset((void*)&g_dl, 0, sizeof(g_dl));
-    fmt(g_dl.url, sizeof(g_dl.url), "%s", url);
-    g_dl.running = 1;
-    if (threadStart(dlThread, NULL, "ScBgmFetch") < 0) {
-        g_dl.running = 0;
-        logLine("stream %s: no thread", shown);
-        return 0;
-    }
-    const uint64_t t0 = sysNowUs();
     size_t want = 192 * 1024;
     while (!g_dl.done) {
         const size_t have = __atomic_load_n(&g_dl.have, __ATOMIC_ACQUIRE);
@@ -669,17 +764,20 @@ static int srcFetch(const char* url) {
             if (tag + 192 * 1024 > want) want = tag + 192 * 1024;
         }
         if (g_dl.ready && have >= want) break;
-        if (sysNowUs() - t0 > 30000000u) {
+        if (sysNowUs() - g_dl.t0 > 30000000u) {
             logLine("stream %s: 30 s and only %lu bytes", shown, (uint64_t)have);
-            if (dlStop(2000) && g_dl.buf) sysUnmap(g_dl.buf, g_dl.cap);
-            g_dl.buf = NULL;
+            dlDrop();
             return 0;
+        }
+        if (waitTick()) {
+            logLine("stream %s: a command came, %lu bytes in; read first", shown, (uint64_t)have);
+            g_fetchHeld = 1;
+            return -1;
         }
         sysSleepMs(20);
     }
     if (!g_dl.ready || (g_dl.failed && !g_dl.have)) {
-        if (dlStop(2000) && g_dl.buf) sysUnmap(g_dl.buf, g_dl.cap);
-        g_dl.buf = NULL;
+        dlDrop();
         return 0;
     }
     g_src.streamed = 1;
@@ -687,7 +785,7 @@ static int srcFetch(const char* url) {
     g_src.mapped = g_dl.cap;
     g_src.size = __atomic_load_n(&g_dl.have, __ATOMIC_ACQUIRE);
     logLine("stream %s: playing from %lu bytes, after %lu ms", shown, (uint64_t)g_src.size,
-            (sysNowUs() - t0) / 1000u);
+            (sysNowUs() - g_dl.t0) / 1000u);
     return 1;
 }
 
@@ -698,13 +796,25 @@ static void srcGrow(void) {
     if (g_src.type == SRC_WAV) g_src.wavEnd = g_src.wavFull > g_src.size ? g_src.size : g_src.wavFull;
 }
 
+static int sameText(const char* a, const char* b) {
+    const size_t n = strlen(a);
+    return n == strlen(b) && !memcmp(a, b, n);
+}
+
+// A track opened: 1, 0 if it will not, or -1 if its stream is still
+// coming and a command has come meanwhile (srcFetch).
 static int srcOpen(const char* path) {
     srcClose();
+    if (g_fetchHeld && (!isUrl(path) || !sameText(g_dl.url, path))) {
+        g_fetchHeld = 0;  // a stream waited for, not this one
+        dlDrop();
+    }
     char shownPath[160];
     urlShown(path, shownPath, sizeof(shownPath));
     size_t got = 0;
     if (isUrl(path)) {
-        if (!srcFetch(path)) return 0;
+        const int r = srcFetch(path);
+        if (r <= 0) return r;
         got = g_src.size;
     } else {
     const int fd = sysOpen(path, SC_O_RDONLY, 0);
@@ -896,7 +1006,7 @@ static void textDecode(char* s) {
 // Header lines ("Name: value", \r\n or \n between) added to a request.
 static void httpHeaders(int req, const char* lines) {
     if (!g_http.addHeader || !lines) return;
-    char name[128], value[1024];
+    char name[128], value[4096];
     for (const char* p = lines; *p;) {
         const char* e = p;
         while (*e && *e != '\r' && *e != '\n') e++;
@@ -932,11 +1042,26 @@ static void addTrack(const char* path, size_t len) {
     // URL<tab>title<tab>artist<tab>album<tab>cover URL (0.72); | between
     // them too (0.80), easier to type than a tab, for a URL that starts the
     // line (a path keeps any | it has).
-    const int url = isUrl(path);
+    // 1.51: | only on a line with no tab, so that a title with one in it
+    // (written by an app with tabs) keeps its fields.
+    int url = isUrl(path);
+    for (size_t i = 0; url && i < len; i++)
+        if (path[i] == '\t') url = 0;
 #define SEP(c) ((c) == '\t' || (url && (c) == '|'))
     size_t end = 0;
     while (end < len && !SEP(path[end])) end++;
-    if (end >= MAX_PATH) return;
+    if (end >= MAX_PATH) {
+        // Too long to open: kept, as a track that will not open, so that
+        // the places after it (#start, status.txt's index) stay the app's
+        // (1.51; dropped before).
+        logLine("queue: track %d's path is %lu bytes, over %d: it will not open", g_libCount,
+                (unsigned long)end, MAX_PATH - 1);
+        g_tracks[g_libCount] = "";
+        g_given[g_libCount].title = g_given[g_libCount].artist = g_given[g_libCount].album = "";
+        g_given[g_libCount].cover = g_given[g_libCount].id = "";
+        g_libCount++;
+        return;
+    }
     // The URL without spaces after it.
     size_t u = end;
     while (u && path[u - 1] == ' ') u--;
@@ -1072,6 +1197,8 @@ static void loadQueue(void) {
     g_count = g_libCount;
     g_queueRev++;
     if (start < g_count) g_index = start;
+    g_seekLib = g_count ? g_q[g_index] : -1;
+    heardReset();
     writeLibrary();
 }
 
@@ -1745,7 +1872,7 @@ static int libPick(const char* id, int n, int lib) {
     if (n < 0 || n >= count) return -1;
     memcpy(g_q, g_list, sizeof(int) * (size_t)count);
     g_count = count;
-    g_played = 0;
+    heardReset();
     writeQueue();
     logLine("queue: now %s, %d track(s)", id, count);
     return n;
@@ -1785,7 +1912,6 @@ static void queueInsert(int at, int lib) {
 // An app's own update through the PS4's download service (0.89).
 #include "pkg.c"
 
-static uint64_t g_lastStatus;
 
 static void writeStatus(void) {
     static char text[4096];
@@ -1846,33 +1972,85 @@ static int portOpen(void) {
     return 1;
 }
 
-// Opens the track at g_index, or the next that opens: 1, or 0 when none
-// is left.
-static int openTrack(void) {
-    for (; g_index < g_count; g_index++) {
-        if (srcOpen(curPath())) {
-            g_heldPosMs = 0;
-            if (g_seekMs && g_src.hz) {
-                // Into it as far as queue.txt's #position says: decoded and
-                // passed over (0.81).
-                const uint64_t want = g_seekMs * (uint64_t)g_src.hz / 1000u;
-                int16_t skip[2];
-                while (g_src.framesRead < want && srcFrame(skip)) {
-                }
-                logLine("began %lu ms into it", (unsigned long)(g_src.framesRead * 1000u / (uint64_t)g_src.hz));
+// A track being opened whose stream is still coming, left while a command
+// is read (1.51): the main loop opens it again after.
+static int g_pendingOpen;
+static int g_fails;  // tracks in a row that would not open (1.51)
+#define FAILS_MAX 5
+
+// Into a track as far as queue.txt's #position says (0.81): decoded and
+// passed over. A stream is waited for as it comes (1.51: before, the skip
+// ended at what had come, ~5 s in, and the next track began).
+static void seekInto(uint64_t ms) {
+    const uint64_t want = ms * (uint64_t)g_src.hz / 1000u;
+    int16_t skip[2];
+    while (g_src.framesRead < want) {
+        if (g_src.streamed && !g_dl.done && g_src.size < g_src.off + 64 * 1024) {
+            srcGrow();
+            if (g_src.size >= g_src.off + 64 * 1024) continue;
+            if (waitTick()) {
+                logLine("a command came while going into it: played from here");
+                break;
             }
-            g_seekMs = 0;
-            rsStart();
+            sysSleepMs(20);
+            continue;
+        }
+        if (!srcFrame(skip)) break;
+    }
+    logLine("began %lu ms into it", (unsigned long)(g_src.framesRead * 1000u / (uint64_t)g_src.hz));
+}
+
+// Opens the track at g_index, or the next that opens: 1; 0 when none is
+// left, or FAILS_MAX in a row would not (1.51: a server that is off no
+// longer holds the player for the whole queue); -1 when a command has come
+// first (g_pendingOpen).
+static int openTrack(void) {
+    g_pendingOpen = 0;
+    while (g_index < g_count) {
+        const int r = srcOpen(curPath());
+        if (r < 0) {
+            g_pendingOpen = 1;
+            return -1;
+        }
+        if (r > 0) {
+            g_fails = 0;
+            g_heldPosMs = 0;
             const int lib = g_q[g_index];
+            if (g_seekMs && lib == g_seekLib && g_src.hz) seekInto(g_seekMs);
+            g_seekMs = 0;  // #start's track only, and only once
+            rsStart();
             if (isUrl(curPath())) {
                 // Its tags from the queue where the stream has none (0.72).
                 if (!g_meta.title[0]) fmt(g_meta.title, META_LEN, "%s", g_lib[lib].title);
                 if (!g_meta.artist[0]) fmt(g_meta.artist, META_LEN, "%s", g_lib[lib].artist);
                 if (!g_meta.album[0]) fmt(g_meta.album, META_LEN, "%s", g_lib[lib].album);
             }
+            utf8Trim(g_meta.title);
+            utf8Trim(g_meta.artist);
+            utf8Trim(g_meta.album);
+            // Heard, for shuffle; and begun, for prev (1.51).
+            g_heard[lib] = 1;
+            if (!g_histN || g_hist[g_histN - 1] != lib) {
+                if (g_histN == HIST_MAX) {
+                    memmove(g_hist, g_hist + 1, sizeof(int) * (HIST_MAX - 1));
+                    g_histN--;
+                }
+                g_hist[g_histN++] = lib;
+            }
             notify("Now playing: %s", g_lib[lib].title[0] ? g_lib[lib].title : baseName(curPath()));
             plusTrackBegun(lib);
             return 1;
+        }
+        if (++g_fails >= FAILS_MAX) {
+            logLine("%d tracks in a row would not open: stopped", g_fails);
+            notify("Background music: %d tracks in a row would not open", g_fails);
+            return 0;
+        }
+        g_index++;
+        // Between tries, a command first (1.51).
+        if (g_index < g_count && cmdWaiting()) {
+            g_pendingOpen = 1;
+            return -1;
         }
     }
     return 0;
@@ -1880,12 +2058,33 @@ static int openTrack(void) {
 
 static void stop(const char* why) {
     srcClose();
+    if (g_fetchHeld) {
+        g_fetchHeld = 0;
+        dlDrop();
+    }
+    g_pendingOpen = 0;
+    g_fails = 0;
     portClose();
     g_state = ST_STOPPED;
     logLine("stopped: %s", why);
 }
 
 static int g_quit;
+
+// A track opened for a command: the state given (also while its stream is
+// still coming, 1.51), or stopped, saying why.
+static void openAs(int state, const char* why) {
+    g_fails = 0;
+    if (openTrack()) g_state = state;
+    else stop(why);
+}
+
+// The place of a track of the library in the queue, or -1.
+static int queuePlace(int lib) {
+    for (int i = 0; i < g_count; i++)
+        if (g_q[i] == lib) return i;
+    return -1;
+}
 
 // One command, a word.
 static void runCommand(const char* text, int n) {
@@ -1895,8 +2094,7 @@ static void runCommand(const char* text, int n) {
         if (g_state == ST_STOPPED) {
             if (!g_count) loadQueue();
             if (g_index >= g_count) g_index = 0;
-            if (openTrack()) g_state = ST_PLAYING;
-            else stop("nothing in the queue would open");
+            openAs(ST_PLAYING, "nothing in the queue would open");
         } else {
             g_state = ST_PLAYING;
         }
@@ -1908,11 +2106,21 @@ static void runCommand(const char* text, int n) {
     } else if (IS("next") || IS("prev")) {
         if (!g_count) return;
         const uint64_t posMs = g_src.hz ? g_src.framesRead * 1000u / (uint64_t)g_src.hz : 0;
-        if (IS("next")) g_index = g_shuffle ? otherTrack() : g_index + 1 < g_count ? g_index + 1 : 0;
-        else if (posMs < 3000) g_index = g_index > 0 ? g_index - 1 : g_count - 1;
+        if (IS("next")) {
+            if (!g_shuffle) g_index = g_index + 1 < g_count ? g_index + 1 : 0;
+            else {
+                const int at = shuffleNext(1);  // one not heard yet (1.51)
+                if (at >= 0) g_index = at;
+            }
+        } else if (posMs < 3000 && g_shuffle && g_histN >= 2 && queuePlace(g_hist[g_histN - 2]) >= 0) {
+            // Shuffling: back to the one that played before it (1.51).
+            g_histN--;
+            g_index = queuePlace(g_hist[--g_histN]);
+        } else if (posMs < 3000) {
+            g_index = g_index > 0 ? g_index - 1 : g_count - 1;
+        }
         // (prev after 3 s starts the track again, as players do)
-        if (g_state == ST_STOPPED) g_state = ST_PAUSED;
-        if (!openTrack()) stop("nothing after it would open");
+        openAs(g_state == ST_STOPPED ? ST_PAUSED : g_state, "nothing after it would open");
     } else if (IS("stop")) {
         stop("asked");
     } else if (n > 10 && (!memcmp(text, "plus_save=", 10) || !memcmp(text, "plus_delete=", 12))) {
@@ -1937,7 +2145,7 @@ static void runCommand(const char* text, int n) {
         const int was = g_state;
         stop("reloading");
         loadQueue();
-        if (was != ST_STOPPED && openTrack()) g_state = ST_PLAYING;
+        if (was != ST_STOPPED) openAs(ST_PLAYING, "nothing in the queue would open");
     } else if (n > 6 && !memcmp(text, "index=", 6)) {
         // A track of the queue by its number, from 0, playing: the Music
         // section's choice, through the music watch (PlaySpUri's index).
@@ -1946,8 +2154,7 @@ static void runCommand(const char* text, int n) {
         if (!g_count) loadQueue();
         if (g_count) {
             g_index = v < g_count ? v : 0;
-            if (openTrack()) g_state = ST_PLAYING;
-            else stop("that track would not open");
+            openAs(ST_PLAYING, "that track would not open");
         }
     } else if (n > 5 && !memcmp(text, "pick=", 5)) {
         // pick=<playlist id>:<n>: a track chosen in the Music section,
@@ -1967,8 +2174,7 @@ static void runCommand(const char* text, int n) {
                 at >= 0 && at < g_count ? g_q[at] : -1);
         if (at >= 0) {
             g_index = at;
-            if (openTrack()) g_state = ST_PLAYING;
-            else stop("that track would not open");
+            openAs(ST_PLAYING, "that track would not open");
         }
     } else if (n >= 5 && (!memcmp(text, "move=", 5) || !memcmp(text, "remove=", 7) ||
                          !memcmp(text, "next=", 5) || !memcmp(text, "add=", 4))) {
@@ -2000,6 +2206,7 @@ static void runCommand(const char* text, int n) {
                     const int was = g_state;
                     srcClose();
                     if (g_index >= g_count) g_index = 0;
+                    g_fails = 0;
                     if (!g_count || (was != ST_STOPPED && !openTrack())) stop("its track was removed");
                     else if (was == ST_PAUSED && g_state != ST_STOPPED) g_state = ST_PAUSED;
                     if (was == ST_STOPPED) g_state = ST_STOPPED;
@@ -2019,7 +2226,9 @@ static void runCommand(const char* text, int n) {
         g_repeat = text[7] == '1' ? 1 : text[7] == '2' ? 2 : 0;
     } else if (n > 8 && !memcmp(text, "shuffle=", 8)) {
         g_shuffle = text[8] == '1';
-        g_played = 0;
+        // Every track not heard yet but the one playing (1.51).
+        heardReset();
+        if (g_state != ST_STOPPED && g_index < g_count) g_heard[g_q[g_index]] = 1;
     } else if (n > 7 && !memcmp(text, "volume=", 7)) {
         int32_t v = 0;
         for (int i = 7; i < n && text[i] >= '0' && text[i] <= '9'; i++) v = v * 10 + (text[i] - '0');
@@ -2032,13 +2241,11 @@ static void runCommand(const char* text, int n) {
 #undef IS
 }
 
-// The commands in cmd, one a line, if it is there. It is renamed first, so
-// that a command written meanwhile is not lost, nor one read half written.
-static void command(void) {
+// One file's commands, one a line; the file deleted.
+static void commandFile(const char* path) {
     static char text[4096];  // 0.86: 256, and commands are added to cmd since 0.67
-    if (sysRename(SC_BGM_CMD, SC_BGM_CMD ".work") < 0) return;
-    const int len = readText(SC_BGM_CMD ".work", text, sizeof(text));
-    sysUnlink(SC_BGM_CMD ".work");
+    const int len = readText(path, text, sizeof(text));
+    sysUnlink(path);
     for (int at = 0; at < len;) {
         int end = at;
         while (end < len && text[end] != '\n' && text[end] != '\r' && text[end] != ' ') end++;
@@ -2047,7 +2254,82 @@ static void command(void) {
         if (end > at) runCommand(text + at, end - at);
         at = next;
     }
-    writeStatus();
+}
+
+// The client's commands written while one waited (1.51): cmd.<ms>-<pid>-<n>,
+// each a whole file, renamed into place (not .work, ours, nor .new, one
+// being written). Their names, sorted, oldest first; how many.
+#define CMD_FILES 64
+static int cmdNamed(char names[][64]) {
+    const int fd = sysOpen(SC_BGM_DIR, SC_O_RDONLY | SC_O_DIRECTORY, 0);
+    if (fd < 0) return 0;
+    static uint8_t buf[0x2000];
+    int count = 0, n;
+    while ((n = sysGetdents(fd, buf, sizeof(buf))) > 0) {
+        for (int at = 0; at < n;) {
+            const uint16_t reclen = le16(buf + at + 4);
+            const uint8_t namlen = buf[at + 7];
+            const char* name = (const char*)buf + at + 8;
+            if (!reclen) break;
+            at += reclen;
+            if (namlen < 5 || namlen >= 64 || memcmp(name, "cmd.", 4)) continue;
+            if ((namlen == 8 && !memcmp(name + 4, "work", 4)) ||
+                (namlen > 4 && !memcmp(name + namlen - 4, ".new", 4)))
+                continue;
+            if (!names) return 1;  // only asked whether there is one
+            if (count >= CMD_FILES) continue;
+            memcpy(names[count], name, namlen);
+            names[count][namlen] = 0;
+            count++;
+        }
+    }
+    sysClose(fd);
+    for (int i = 1; i < count; i++) {
+        char tmp[64];
+        memcpy(tmp, names[i], 64);
+        int j = i - 1;
+        for (; j >= 0 && cmpName(names[j], tmp) > 0; j--) memcpy(names[j + 1], names[j], 64);
+        memcpy(names[j + 1], tmp, 64);
+    }
+    return count;
+}
+
+// A command waiting: cmd, or (looked for every fifth time, as it reads the
+// folder) one of the client's named ones.
+static int cmdWaiting(void) {
+    static unsigned calls;
+    if (sysExists(SC_BGM_CMD)) return 1;
+    return (calls++ % 5) == 0 && cmdNamed(NULL);
+}
+
+// The commands in cmd, one a line, if it is there. It is renamed first, so
+// that a command written meanwhile is not lost, nor one read half written.
+// Then the client's named ones (1.51).
+volatile int g_cmdLock;  // the music watch's too (mcw.c sendPlayer)
+
+static void command(void) {
+    int any = 0;
+    while (__atomic_exchange_n(&g_cmdLock, 1, __ATOMIC_ACQUIRE)) sysSleepMs(1);
+    const int moved = sysRename(SC_BGM_CMD, SC_BGM_CMD ".work") >= 0;
+    __atomic_store_n(&g_cmdLock, 0, __ATOMIC_RELEASE);
+    if (moved) {
+        commandFile(SC_BGM_CMD ".work");
+        any = 1;
+    }
+    static char names[CMD_FILES][64];
+    static unsigned calls;
+    // The folder read only now and then while playing (~every 0.4 s), and
+    // always after cmd, as the client names its file when one waits.
+    if (any || (calls++ % 5) == 0) {
+        const int count = cmdNamed(names);
+        for (int i = 0; i < count; i++) {
+            char path[128];
+            fmt(path, sizeof(path), SC_BGM_DIR "/%s", names[i]);
+            commandFile(path);
+            any = 1;
+        }
+    }
+    if (any) writeStatus();
 }
 
 static void* player(void* arg) {
@@ -2065,9 +2347,13 @@ static void* player(void* arg) {
     }
     logLine("sceAudioOutInit: 0x%08X", (unsigned)init());  // already done in the shell: fine
 
+    // 1.51: the status first, and stopped, nothing opened: an app hands
+    // its queue over with reload and play (scMusicHandOver). Before, a
+    // queue.txt left from before played as soon as the module loaded, and
+    // the first status came only after its stream had (scOpen waits 3 s).
+    writeStatus();
     loadQueue();
-    if (g_count && openTrack()) g_state = ST_PLAYING;
-    else notify("Background music: ready. Put tracks in " SC_BGM_MUSIC);
+    if (!g_count) notify("Background music: ready. Put tracks in " SC_BGM_MUSIC);
     writeStatus();
 
     uint32_t grains = 0;
@@ -2075,12 +2361,23 @@ static void* player(void* arg) {
         if (g_state != ST_PLAYING) {
             if (g_state == ST_PAUSED) portClose();  // the port, back for others while paused
             command();
+            // A track still being opened (1.51), paused meanwhile.
+            if (g_pendingOpen && g_state == ST_PAUSED && !openTrack()) stop("nothing after it would open");
             if (sysNowUs() - g_lastStatus > 1000000u) writeStatus();
             sysSleepMs(100);
             continue;
         }
-        if ((grains++ & 3) == 0) command();  // ~every 85 ms
+        if (g_pendingOpen || (grains++ & 3) == 0) command();  // ~every 85 ms
         if (g_state != ST_PLAYING) continue;
+        if (g_pendingOpen) {
+            // Its stream waited for again, after the command (1.51).
+            if (!openTrack()) {
+                heardReset();
+                stop("nothing after it would open");
+            }
+            if (sysNowUs() - g_lastStatus > 1000000u) writeStatus();
+            continue;
+        }
         if (!portOpen()) {
             stop("no port");
             continue;
@@ -2106,19 +2403,23 @@ static void* player(void* arg) {
         if (frames < GRAIN) {
             // The track ended: again (repeat one), another (shuffle), the
             // next; past the end, the first (repeat all) or the end.
-            g_played++;
             int ended = 0;
             if (g_repeat == 2) {
             } else if (g_shuffle) {
-                if (g_played >= g_count && !g_repeat) ended = 1;
-                else g_index = otherTrack();
+                // One not heard yet; with every one heard, all again
+                // (repeat all) or the end (1.51: picked with replacement
+                // before, so some played twice and others not at all).
+                const int at = shuffleNext(g_repeat == 1);
+                if (at < 0) ended = 1;
+                else g_index = at;
             } else if (++g_index >= g_count) {
                 if (g_repeat) g_index = 0;
                 else ended = 1;
             }
+            g_fails = 0;
             if (ended || !openTrack()) {
                 g_index = 0;
-                g_played = 0;
+                heardReset();
                 stop("the end of the queue");
                 notify("Background music: the queue has ended");
             }

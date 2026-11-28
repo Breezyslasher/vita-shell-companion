@@ -5,7 +5,7 @@
  * mcwPost, and returns what the function returned. The thunk keeps every
  * argument register (rdi, rsi, rdx, rcx, r8, r9, rax, xmm0-7) and copies 8
  * of the caller's stack arguments, so a function of up to 14 integer
- * arguments sees what it was called with; rax, rdx and xmm0 are returned
+ * arguments sees what it was called with (r10 too, 1.51); rax, rdx and xmm0 are returned
  * as the function left them.
  */
 
@@ -32,7 +32,7 @@ typedef struct {
     uint64_t t0;            // 0x0E8: mcwPre's
     uint32_t seq;           // 0x0F0
     uint32_t flags;         // 0x0F4
-    uint64_t pad;           // 0x0F8
+    uint64_t r10;           // 0x0F8: the caller's r10, given to the function again
     int32_t preLen[6];      // 0x100: bytes in pre[i], 0 for no pointer
     uint8_t pre[6][HOOK_PRE_BYTES];  // 0x118
 } Frame;

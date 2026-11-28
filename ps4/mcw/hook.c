@@ -29,6 +29,7 @@ int sceKernelQueryMemoryProtection(void* addr, void** start, void** end, int* pr
 _Static_assert(sizeof(Frame) <= HOOK_FRAME_SIZE && HOOK_FRAME_SIZE % 16 == 0, "the thunk's frame");
 _Static_assert(__builtin_offsetof(Frame, retRax) == 0xC0, "Frame.retRax");
 _Static_assert(__builtin_offsetof(Frame, callerStack) == 0xE0, "Frame.callerStack");
+_Static_assert(__builtin_offsetof(Frame, r10) == 0xF8, "Frame.r10");
 _Static_assert(__builtin_offsetof(Hook, stub) == 0, "Hook.stub");
 
 const char* g_hookHow = "nothing yet";
@@ -64,6 +65,9 @@ __asm__(".text\n"
         "  movdqu %xmm5, 0x90(%rsp)\n"
         "  movdqu %xmm6, 0xA0(%rsp)\n"
         "  movdqu %xmm7, 0xB0(%rsp)\n"
+        // r10 kept (Frame.r10) for the function: Mono passes its IMT/RGCTX
+        // argument there. (r11 is the entry's, the Hook.)
+        "  movq %r10, 0xF8(%rsp)\n"
         "  leaq 16(%rbp), %r10\n"
         "  movq %r10, 0xE0(%rsp)\n"
         "  movq %rsp, %rdi\n"
@@ -93,6 +97,7 @@ __asm__(".text\n"
         "  movdqu 0xE0(%rsp), %xmm6\n"
         "  movdqu 0xF0(%rsp), %xmm7\n"
         "  movq 0x78(%rsp), %r11\n"
+        "  movq 0x138(%rsp), %r10\n"
         "  movq 0x70(%rsp), %rax\n"
         "  callq *(%r11)\n"  // Hook.stub: the function
         "  addq $0x40, %rsp\n"
@@ -151,7 +156,15 @@ static int writeCode(void* dst, const void* src, size_t n) {
     const size_t span = (size_t)((uintptr_t)dst + n - page);
     const int was = hookProt(dst);
     if (sceKernelMprotect((void*)page, span, 7) == 0) {
-        memcpy(dst, src, n);
+        if (n == 8 && ((uintptr_t)dst & 63) <= 56) {
+            // One store (1.51): inside one cache line, a thread running
+            // the function sees the old 8 bytes or the new, never half.
+            uint64_t v;
+            memcpy(&v, src, 8);
+            __asm__ volatile("movq %1, %0" : "=m"(*(volatile uint64_t*)dst) : "r"(v) : "memory");
+        } else {
+            memcpy(dst, src, n);
+        }
         sceKernelMprotect((void*)page, span, was > 0 ? was : 5);
         g_hookHow = "code written after sceKernelMprotect";
     } else {
@@ -408,7 +421,24 @@ int hookInstall(Hook* h, void* target, const char** why) {
     } else {
         jumpAbs(jmp, (uint64_t)(uintptr_t)slot);
     }
-    const int rc = writeCode(target, jmp, patch);
+    // The jump's bytes past the first 8 (the 14-byte jump's last 6) first,
+    // then the first 8 in one store, the bytes after the jump as they were
+    // (1.51; a plain copy before, which a thread running the function's
+    // first instructions could see half written).
+    int rc = 0;
+    uint8_t word[8];
+    if (hookReadable(fn, 8) == 8) {
+        memcpy(word, fn, 8);
+        memcpy(word, jmp, patch < 8 ? patch : 8);
+        if (patch > 8) rc = writeCode((void*)(uintptr_t)(fn + 8), jmp + 8, patch - 8);
+        if (rc == 0) {
+            rc = writeCode(target, word, 8);
+            if (rc != 0 && patch > 8)  // the tail as it was: the function unchanged
+                writeCode((void*)(uintptr_t)(fn + 8), h->original + 8, patch - 8);
+        }
+    } else {
+        rc = writeCode(target, jmp, patch);
+    }
     if (rc != 0) {
         *why = rc == -2 ? "the function could not be written (mprotect and PROCESS_RW refused)"
                         : "the function did not change when written";

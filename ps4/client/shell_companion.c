@@ -8,6 +8,7 @@
 
 #include "shell_companion.h"
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -24,6 +25,16 @@
 
 static char g_titleId[16];
 static char g_name[64];
+
+// One caller at a time in the calls that use static buffers (two threads of
+// the app would garble each other's results): a spin lock, libc only.
+static int g_lock;
+static void lock(void) {
+    while (__atomic_exchange_n(&g_lock, 1, __ATOMIC_ACQUIRE)) usleep(1000);
+}
+static void unlock(void) {
+    __atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE);
+}
 
 // ── System calls: GoldHEN's (500) and the clock ──────────────────────────────
 
@@ -154,9 +165,10 @@ static int field(const char* text, const char* key, char* out, size_t cap) {
 static int beatFresh(const char* path) {
     char text[4096], v[32];
     if (readAll(path, text, sizeof(text)) <= 0 || !field(text, "beat_ms", v, sizeof(v))) return 0;
-    const uint64_t beat = strtoull(v, NULL, 10), now = nowMs();
-    // A beat from before this boot reads later than now, or long ago.
-    return beat <= now + 1000 && now - beat < 3000;
+    // Signed: a beat a little ahead of now (written between the two
+    // reads) is fresh; one from before this boot reads far ahead, or long ago.
+    const int64_t age = (int64_t)(nowMs() - strtoull(v, NULL, 10));
+    return age > -1000 && age < 3000;
 }
 
 // ── Setting up ───────────────────────────────────────────────────────────────
@@ -251,13 +263,24 @@ static int waitFor(int (*running)(void), unsigned ms) {
     return running();
 }
 
+static int openLocked(char* what, size_t size);
+
 int scOpen(char* what, size_t size) {
+    lock();
+    const int rc = openLocked(what, size);
+    unlock();
+    return rc;
+}
+
+static int openLocked(char* what, size_t size) {
     if (what && size) what[0] = 0;
     if (!g_titleId[0]) {
         note(what, size, "scInit first.");
         return -1;
     }
-    // Out of the sandbox, to reach /data and GoldHEN's calls.
+    // Out of the sandbox, to reach /data and GoldHEN's calls. Not undone:
+    // the app keeps reaching /data (status, "+" events) until it exits
+    // (shell_companion.h, scOpen).
     if (access("/user/data", W_OK) != 0) scSys(500, 2 /* JAILBREAK */, (long)&g_jb, 0);
     mkdir("/user/data/ShellCompanion", 0777);
     mkdir(SC_BGM_DIR, 0777);
@@ -298,9 +321,11 @@ int scOpen(char* what, size_t size) {
 
 static size_t putEncoded(char* out, size_t at, size_t cap, const char* s);
 
-// A field, its tabs and line breaks made spaces.
+// A field, its tabs, line breaks and | made spaces (on a URL's line the
+// player takes | as a separator too).
 static size_t putField(char* out, size_t at, size_t cap, const char* s) {
-    for (; s && *s && at + 1 < cap; s++) out[at++] = (*s == '\t' || *s == '\n' || *s == '\r') ? ' ' : *s;
+    for (; s && *s && at + 1 < cap; s++)
+        out[at++] = (*s == '\t' || *s == '\n' || *s == '\r' || *s == '|') ? ' ' : *s;
     return at;
 }
 
@@ -316,6 +341,9 @@ int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count) {
     }
     for (uint32_t i = 0; i < count; i++) {
         const ScTrack* t = &tracks[i];
+        // A track with nowhere to play it from: refused, as leaving it out
+        // would move #start and every place after it onto other tracks.
+        if (!(t->local && t->local[0]) && !(t->url && t->url[0])) return -1;
         const char* f[7] = {t->local, t->url, t->title, t->artist, t->album, t->coverUrl, t->id};
         cap += 16;
         for (int k = 0; k < 7; k++) cap += f[k] ? strlen(f[k]) : 0;
@@ -340,7 +368,6 @@ int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count) {
     for (uint32_t i = 0; i < count; i++) {
         const ScTrack* t = &tracks[i];
         const char* where = t->local && t->local[0] ? t->local : t->url;
-        if (!where || !where[0]) continue;
         // The shell's path: /data is /user/data inside it.
         if (!strncmp(where, "/data/", 6)) at = putField(out, at, cap, "/user");
         at = putField(out, at, cap, where);
@@ -360,15 +387,55 @@ int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count) {
 
 // ── Handing over and taking back ─────────────────────────────────────────────
 
+// 1 if a command file of its own name (below) waits for the player.
+static int namedWaiting(void) {
+    DIR* d = opendir(SC_BGM_DIR);
+    if (!d) return 0;
+    int any = 0;
+    for (struct dirent* e; !any && (e = readdir(d));) {
+        const size_t len = strlen(e->d_name);
+        any = !strncmp(e->d_name, "cmd.", 4) && strcmp(e->d_name, "cmd.work") &&
+              !(len > 4 && !strcmp(e->d_name + len - 4, ".new"));
+    }
+    closedir(d);
+    return any;
+}
+
+// Each command file written whole beside the others, then put in place in
+// one step, so the player never reads (and deletes) one half written: cmd
+// when there is none and no other waits, else cmd.<ms>-<pid>-<n>, which the
+// player reads after cmd, in name order (the ms 13 digits, so that order is
+// the order sent).
 int scCommand(const char* command) {
     if (!command || !command[0]) return -1;
-    // Added to what is there; the player renames cmd before it reads it.
-    const int fd = open(SC_BGM_CMD, O_WRONLY | O_CREAT | O_APPEND, 0666);
-    if (fd < 0) return -1;
+    static unsigned seq;
+    lock();
+    const unsigned n0 = seq++;
+    unlock();
     const size_t n = strlen(command);
-    const int ok = write(fd, command, n) == (ssize_t)n && (command[n - 1] == '\n' || write(fd, "\n", 1) == 1);
+    const int nl = command[n - 1] != '\n';
+    char name[160], tmp[176];
+    snprintf(name, sizeof(name), "%s.%013llu-%d-%u", SC_BGM_CMD, (unsigned long long)nowMs(), (int)scSys(20 /* getpid */, 0, 0, 0), n0);
+    snprintf(tmp, sizeof(tmp), "%s.new", name);
+    const int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return -1;
+    const int ok = write(fd, command, n) == (ssize_t)n && (!nl || write(fd, "\n", 1) == 1);
     close(fd);
-    return ok ? 0 : -1;
+    chmod(tmp, 0666);
+    if (!ok) {
+        unlink(tmp);
+        return -1;
+    }
+    // cmd if free (link does not replace it, unlike rename), else its own name.
+    if (!namedWaiting() && scSys(9 /* link */, (long)tmp, (long)SC_BGM_CMD, 0) == 0) {
+        unlink(tmp);
+        return 0;
+    }
+    if (rename(tmp, name) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
 }
 
 int scMusicPlay(void) {
@@ -376,22 +443,30 @@ int scMusicPlay(void) {
 }
 
 int scMusicTakeBack(void) {
-    if (!scPlayerRunning()) return -1;
+    // Sent even when the heartbeat is late: the player may be waiting on a
+    // slow or unreachable server, and takes it when it is back. Only a
+    // player never there (no status at all) is not asked.
+    if (access(SC_BGM_STATUS, F_OK) != 0) return -1;
+    const uint64_t sent = nowMs();
     if (scCommand("takeback\n") != 0) return -1;
-    // Until the player has said so, briefly.
-    for (int w = 0; w < 20; w++) {
+    // Until the player has said so in a status written since: up to 5 s.
+    for (int w = 0; w < 100; w++) {
         ScQueueStatus st;
-        if (scReadQueueStatus(&st) == 0 && !strcmp(st.state, "stopped")) return 0;
+        if (scReadQueueStatus(&st) == 0 && st.beatMs >= sent && !strcmp(st.state, "stopped")) return 0;
         usleep(50000);
     }
-    return 0;
+    return -1;
 }
 
 int scReadQueueStatus(ScQueueStatus* out) {
     if (!out) return -1;
     memset(out, 0, sizeof(*out));
     static char text[8192];
-    if (readAll(SC_BGM_STATUS, text, sizeof(text)) <= 0) return -1;
+    lock();
+    if (readAll(SC_BGM_STATUS, text, sizeof(text)) <= 0) {
+        unlock();
+        return -1;
+    }
     char v[64];
     field(text, "state", out->state, sizeof(out->state));
     if (field(text, "index", v, sizeof(v))) out->index = atoi(v);
@@ -407,6 +482,7 @@ int scReadQueueStatus(ScQueueStatus* out) {
     if (field(text, "repeat", v, sizeof(v))) out->repeat = atoi(v);
     if (field(text, "shuffle", v, sizeof(v))) out->shuffle = atoi(v);
     if (field(text, "beat_ms", v, sizeof(v))) out->beatMs = strtoull(v, NULL, 10);
+    unlock();
     return 0;
 }
 
@@ -430,20 +506,34 @@ static size_t putEncoded(char* out, size_t at, size_t cap, const char* s) {
 
 #define PLUS_EVENTS SC_BGM_DIR "/plus-events.txt"
 
+static int readPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count);
+
 int scReadPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count) {
+    lock();
+    const int rc = readPlusEvents(events, cap, count);
+    unlock();
+    return rc;
+}
+
+static int readPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count) {
     if (count) *count = 0;
-    // Taken first, so that a press meanwhile goes to a new file.
+    // Taken first, so that a press meanwhile goes to a new file. What was not
+    // read last time (past cap) stays in the .work file, older than any press
+    // since: read before the file is taken again.
     char work[128];
     snprintf(work, sizeof(work), "%s.work", PLUS_EVENTS);
-    if (rename(PLUS_EVENTS, work) != 0) return access(PLUS_EVENTS, F_OK) == 0 ? -1 : 0;
+    if (access(work, F_OK) != 0 && rename(PLUS_EVENTS, work) != 0)
+        return access(PLUS_EVENTS, F_OK) == 0 ? -1 : 0;
     static char text[256 * 1024];
     const int len = readAll(work, text, sizeof(text));
+    if (len < 0) return -1;
     uint32_t n = 0;
-    for (char* p = text; len > 0 && *p;) {
+    char* p = text;
+    while (*p && (!events || n < cap)) {
         char* e = p;
         while (*e && *e != '\n') e++;
-        const char keep = *e;
-        *e = 0;
+        if (!*e && len == (int)sizeof(text) - 1) break;  // cut by the buffer: next time
+        if (*e) *e++ = 0;
         char* f[4] = {p, NULL, NULL, NULL};
         int k = 1;
         for (char* q = p; *q && k < 4; q++)
@@ -451,19 +541,38 @@ int scReadPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count) {
                 *q = 0;
                 f[k++] = q + 1;
             }
-        if (k == 4 && events && n < cap) {
+        if (k == 4 && events) {
             ScPlusEvent* ev = &events[n++];
             ev->ms = strtoull(f[0], NULL, 10);
             ev->saved = !strcmp(f[1], "save");
             snprintf(ev->id, sizeof(ev->id), "%s", f[2]);
             snprintf(ev->file, sizeof(ev->file), "%s", f[3]);
         }
-        *e = keep;
-        p = *e ? e + 1 : e;
+        p = e;
     }
-    unlink(work);
+    // The rest of the file (past cap, or past the buffer) kept for next time,
+    // written whole beside it and moved in.
+    const size_t done = (size_t)(p - text);
+    int rc = 0;
+    const int in = open(work, O_RDONLY);
+    const off_t size = in >= 0 ? lseek(in, 0, SEEK_END) : 0;
+    if (size <= (off_t)done) {
+        if (in >= 0) close(in);
+        unlink(work);
+    } else {
+        const size_t want = (size_t)size - done;
+        char* rest = (char*)malloc(want);
+        size_t got = 0;
+        if (rest && lseek(in, (off_t)done, SEEK_SET) == (off_t)done) {
+            ssize_t k;
+            while (got < want && (k = read(in, rest + got, want - got)) > 0) got += (size_t)k;
+        }
+        close(in);
+        if (got != want || writeAll(work, rest, got) != 0) rc = -1;
+        free(rest);
+    }
     if (count) *count = n;
-    return 0;
+    return n ? 0 : rc;
 }
 
 // ── Self-update ──────────────────────────────────────────────────────────────
@@ -481,7 +590,7 @@ int scUpdateInstallPkg(const char* pkg, int relaunch) {
 }
 
 int scReadUpdateResult(int* result, char* why, size_t whySize) {
-    static char text[1024];
+    char text[1024];
     if (readAll(UPDATE_RESULT, text, sizeof(text)) <= 0) return -1;
     char v[24];
     if (result) *result = field(text, "result", v, sizeof(v)) ? atoi(v) : -1;

@@ -328,6 +328,7 @@ static struct {
     volatile uint32_t state;  // 2 playing, 3 paused
     volatile uint64_t durS, posS;
     volatile uint32_t index, count;
+    volatile int32_t lib;      // the playing track's library number (status.txt track=), -1 not known
     volatile uint32_t volume;  // 0 to 32768, as the quick menu sets it
     volatile uint32_t repeat, shuffle;  // SceMusicCoreRepeatMode, SceMusicCoreShuffle
     volatile uint32_t owed;  // events owed: 1 << type
@@ -336,7 +337,7 @@ static struct {
     volatile int lock;
     char file[800], name[300], artist[300], album[300], cover[1048];  // file, cover: URLs too (0.72)
     uint64_t artOff, artLen;
-} g_fake;
+} g_fake = {.lib = -1};
 
 static int eq(const char* a, const char* b) {
     while (*a && *a == *b) a++, b++;
@@ -352,6 +353,12 @@ static void statusField(const char* text, const char* key, char* out, size_t cap
             p += n + 1;
             size_t k = 0;
             while (*p && *p != '\n' && k + 1 < cap) out[k++] = *p++;
+            // Cut: not inside a character (1.51: a long CJK title ended in
+            // half of one).
+            if (((uint8_t)*p & 0xC0) == 0x80) {
+                while (k && ((uint8_t)out[k - 1] & 0xC0) == 0x80) k--;
+                if (k) k--;  // its first byte
+            }
             out[k] = 0;
             return;
         }
@@ -420,6 +427,10 @@ static void fakeRefresh(void) {
             g_fake.durS = toU64(v) / 1000u;
             statusField(text, "index", v, sizeof(v));
             g_fake.index = (uint32_t)toU64(v);
+            statusField(text, "track", v, sizeof(v));
+            const int32_t lib = v[0] >= '0' && v[0] <= '9' ? (int32_t)toU64(v) : -1;
+            if (lib != g_fake.lib) owe(EV_SP_TRACK);  // its id changes (a move keeps the index)
+            g_fake.lib = lib;
             statusField(text, "count", v, sizeof(v));
             g_fake.count = (uint32_t)toU64(v);
             statusField(text, "volume", v, sizeof(v));
@@ -491,19 +502,29 @@ static void put64At(uint8_t* p, size_t at, uint64_t v) {
     memcpy(p + at, &v, 8);
 }
 static void putStr(uint8_t* p, size_t at, size_t cap, const char* s) {
-    const size_t n = strlen(s);
-    memcpy(p + at, s, n < cap - 1 ? n : cap - 1);
+    size_t n = strlen(s);
+    if (n > cap - 1) {
+        n = cap - 1;  // cut, not inside a character (1.51)
+        while (n && ((uint8_t)s[n] & 0xC0) == 0x80) n--;
+    }
+    memcpy(p + at, s, n);
 }
 
 #define SC_O_APPEND_ 0x0008
+// The player's, in this module too (bgm.c): held while cmd is written here
+// and while the player renames it to read it (1.51), so that a command is
+// never written into the file the player has already read.
+extern volatile int g_cmdLock;
 static void sendPlayer(const char* cmd) {
     // Added to what is there (0.67): two commands in one player's turn
     // (~85 ms) are both kept. The player renames cmd before it reads it.
+    while (__atomic_exchange_n(&g_cmdLock, 1, __ATOMIC_ACQUIRE)) sysSleepMs(1);
     const int fd = sysOpen(SC_BGM_CMD, SC_O_WRONLY | SC_O_CREAT | SC_O_APPEND_, 0666);
     if (fd >= 0) {
         sysWrite(fd, cmd, strlen(cmd));
         sysClose(fd);
     }
+    __atomic_store_n(&g_cmdLock, 0, __ATOMIC_RELEASE);
 }
 
 // The player's queue_rev (status.txt), counted on once for each edit of
@@ -517,7 +538,8 @@ static int statusInt(const char* key) {
     text[m > 0 ? m : 0] = 0;
     char v[24];
     statusField(text, key, v, sizeof(v));
-    return v[0] ? (int)toU64(v) : -1;
+    if (!v[0]) return -1;
+    return v[0] == '-' ? -(int)toU64(v + 1) : (int)toU64(v);  // track=-1 read as -1 (1.51: as 0)
 }
 
 static int queueRevNow(void) {
@@ -551,12 +573,10 @@ static struct {
 static int g_uiThread;
 static void editsWait(void) {
     lock(&g_edits.lock);
-    const int pending = g_edits.pending, want = g_edits.base + g_edits.pending;
+    const int pending = g_edits.pending, base = g_edits.base, want = base + pending;
+    if (pending && base < 0) g_edits.pending = 0;  // no queue_rev to wait on
     unlock(&g_edits.lock);
-    if (!pending || g_edits.base < 0) {
-        g_edits.pending = 0;
-        return;
-    }
+    if (!pending || base < 0) return;
     int rev = queueRevNow(), waited = 0;
     if (scePthreadGetthreadid() != g_uiThread)
         for (; rev < want && waited < 1500; waited += 50) {
@@ -564,8 +584,13 @@ static void editsWait(void) {
             rev = queueRevNow();
         }
     say("queue: %d edit(s) sent, queue_rev %d (wanted %d), %d ms waited", pending, rev, want, waited);
+    // Only the edits waited for are taken off (1.51: every edit was, one sent
+    // while this waited too). Those sent since count on from what was
+    // reached: want, or queue_rev if the player did not make them all.
     lock(&g_edits.lock);
-    g_edits.pending = 0;
+    g_edits.pending -= pending;
+    if (g_edits.pending < 0) g_edits.pending = 0;
+    g_edits.base = rev >= 0 && rev < want ? rev : want;
     unlock(&g_edits.lock);
 }
 
@@ -601,7 +626,9 @@ static int contains(const char* s, const char* part);
 typedef struct {
     int64_t id;     // the request's, 0 for a free slot
     uint32_t len, off;
-    char* body;     // EBGM_MAX bytes of g_ebgmPool
+    char* body;     // EBGM_MAX bytes of g_ebgmPool, or big
+    char* big;      // an answer larger than EBGM_MAX: mapped for it (1.51), bigCap bytes
+    size_t bigCap;
 } EbgmReq;
 static EbgmReq g_ebgm[EBGM_SLOTS];
 static volatile uint64_t g_jsonUntil;  // JSON keys are logged until then: 10 s after an answer
@@ -635,18 +662,28 @@ static EbgmReq* ebgmFind(int64_t id) {
 
 // After CreateRequest(ctx, apiGroup, path, method, content, int64* requestId).
 // A slot for request id, its answer text: the slot, or NULL.
-static EbgmReq* ebgmClaim(int64_t id) {
+// A free slot, its body in the pool. Under g_ebgmLock: the pool mapped once
+// (1.51: two threads could both map it, one mapping lost).
+static EbgmReq* ebgmFreeSlot(void) {
     if (!g_ebgmPool) g_ebgmPool = sysMap(EBGM_SLOTS * EBGM_MAX);
     if (!g_ebgmPool) return NULL;
+    for (int i = 0; i < EBGM_SLOTS; i++)
+        if (!g_ebgm[i].id) {
+            EbgmReq* r = &g_ebgm[i];
+            if (r->big) sysUnmap(r->big, r->bigCap);
+            r->big = NULL;
+            r->bigCap = 0;
+            r->body = g_ebgmPool + (size_t)i * EBGM_MAX;
+            r->len = r->off = 0;
+            return r;
+        }
+    return NULL;
+}
+
+static EbgmReq* ebgmClaim(int64_t id) {
     lock(&g_ebgmLock);
-    EbgmReq* r = NULL;
-    for (int i = 0; i < EBGM_SLOTS && !r; i++)
-        if (!g_ebgm[i].id) r = &g_ebgm[i];
-    if (r) {
-        r->body = g_ebgmPool + (size_t)(r - g_ebgm) * EBGM_MAX;
-        r->len = r->off = 0;
-        r->id = id;
-    }
+    EbgmReq* r = ebgmFreeSlot();
+    if (r) r->id = id;
     unlock(&g_ebgmLock);
     return r;
 }
@@ -659,43 +696,105 @@ static EbgmReq* ebgmClaim(int64_t id) {
 
 #define LIKED SC_BGM_DIR "/liked.txt"
 
-static int likedHas(const char* file, char* text, size_t cap) {
-    const int fd = sysOpen(LIKED, SC_O_RDONLY, 0);
-    int n = fd >= 0 ? sysRead(fd, text, cap - 1) : 0;
-    if (fd >= 0) sysClose(fd);
-    text[n > 0 ? n : 0] = 0;
+// A file whole, into memory mapped for it (its size rounded up, a 0 after
+// it), read until its end (1.51: liked.txt and the ebgm answers were one
+// read of at most 512 or 256 KB, and cut there): its length, *out and
+// *mapped for sysUnmap; 0 and *out NULL for no file; -1 if it could not be
+// read whole.
+static int64_t readWhole(const char* path, char** out, size_t* mapped) {
+    *out = NULL;
+    *mapped = 0;
+    const int fd = sysOpen(path, SC_O_RDONLY, 0);
+    if (fd < 0) return 0;
+    const int64_t size = sysSeek(fd, 0, 2);
+    if (size < 0 || sysSeek(fd, 0, 0) != 0) {
+        sysClose(fd);
+        return -1;
+    }
+    const size_t cap = ((size_t)size + 1 + 0x3FFFu) & ~(size_t)0x3FFFu;
+    char* b = (char*)sysMap(cap);
+    if (!b) {
+        sysClose(fd);
+        return -1;
+    }
+    int64_t got = 0;
+    int k = 0;
+    while (got < size && (k = sysRead(fd, b + got, (size_t)(size - got))) > 0) got += k;
+    sysClose(fd);
+    if (k < 0) {
+        sysUnmap(b, cap);
+        return -1;
+    }
+    b[got] = 0;
+    *out = b;
+    *mapped = cap;
+    return got;
+}
+
+// liked.txt, read and rewritten by one shell thread at a time (1.51: two
+// could share its buffers).
+static volatile int g_likedLock;
+
+static int likedLine(const char* p, const char* e, const char* file, size_t len) {
+    if (e > p && e[-1] == '\r') e--;
+    return (size_t)(e - p) == len && !memcmp(p, file, len);
+}
+
+static int likedIn(const char* text, int64_t n, const char* file) {
     const size_t len = strlen(file);
-    for (const char* p = text; *p;) {
+    for (const char* p = text, *end = text + (n > 0 ? n : 0); p < end;) {
         const char* e = p;
-        while (*e && *e != '\n') e++;
-        if ((size_t)(e - p) == len && !memcmp(p, file, len)) return 1;
-        p = *e ? e + 1 : e;
+        while (e < end && *e != '\n') e++;
+        if (likedLine(p, e, file, len)) return 1;
+        p = e + 1;
     }
     return 0;
 }
 
-static void likedSet(const char* file, int on) {
-    static char text[512 * 1024];  // liked.txt (0.84: 64 KB)
-    const int had = likedHas(file, text, sizeof(text));
-    if (on == had) return;
+// Whether file is in liked.txt. Under g_likedLock.
+static int likedHas(const char* file) {
+    char* text;
+    size_t mapped;
+    const int64_t n = readWhole(LIKED, &text, &mapped);
+    const int has = text ? likedIn(text, n, file) : 0;
+    if (text) sysUnmap(text, mapped);
+    return has;
+}
+
+// file put in liked.txt (on) or taken out: whether it is in it after.
+// Under g_likedLock. Not rewritten unless read whole and written whole.
+static int likedSet(const char* file, int on) {
+    char* text;
+    size_t mapped;
+    const int64_t n = readWhole(LIKED, &text, &mapped);
+    if (n < 0) return 0;
+    const int had = text ? likedIn(text, n, file) : 0;
+    if (on == had) {
+        if (text) sysUnmap(text, mapped);
+        return had;
+    }
     const int fd = sysOpen(LIKED ".tmp", SC_O_WRONLY | SC_O_CREAT | SC_O_TRUNC, 0666);
-    if (fd < 0) return;
+    int ok = fd >= 0;
     const size_t len = strlen(file);
-    for (const char* p = text; *p;) {
-        const char* e = p;
-        while (*e && *e != '\n') e++;
-        if (!((size_t)(e - p) == len && !memcmp(p, file, len)) && e > p) {
-            sysWrite(fd, p, (size_t)(e - p));
-            sysWrite(fd, "\n", 1);
+    if (ok && text)
+        for (const char* p = text, *end = text + n; p < end && ok;) {
+            const char* e = p;
+            while (e < end && *e != '\n') e++;
+            if (!likedLine(p, e, file, len) && e > p) {
+                ok = sysWrite(fd, p, (size_t)(e - p)) == (int)(e - p) && sysWrite(fd, "\n", 1) == 1;
+            }
+            p = e + 1;
         }
-        p = *e ? e + 1 : e;
+    if (ok && on) ok = sysWrite(fd, file, len) == (int)len && sysWrite(fd, "\n", 1) == 1;
+    if (fd >= 0) sysClose(fd);
+    if (text) sysUnmap(text, mapped);
+    if (!ok) {
+        sysUnlink(LIKED ".tmp");
+        say("ebgm: liked.txt not changed: it could not be written");
+        return had;
     }
-    if (on) {
-        sysWrite(fd, file, len);
-        sysWrite(fd, "\n", 1);
-    }
-    sysClose(fd);
     sysRename(LIKED ".tmp", LIKED);
+    return on;
 }
 
 // sub: the path after /v1/ebgm/. 1 if it was a library request, answered.
@@ -712,16 +811,20 @@ static int ebgmLibrary(const char* sub, int64_t id) {
     fmt(file, sizeof(file), "%s", g_fake.file);
     unlock(&g_fake.lock);
     if (!file[0]) return 0;
+    lock(&g_likedLock);
+    const int has = save || del ? likedSet(file, save) : likedHas(file);
+    unlock(&g_likedLock);
     if (save || del) {
-        likedSet(file, save);
         // The Liked list again (0.67), and the press, for the app's own
         // action (0.86: the player's plus.c), with the track's number.
+        // No number (track=-1, or no status): only the list (1.51: plus_..=-1,
+        // which the player read as track 0's).
         char cmd[48];
-        fmt(cmd, sizeof(cmd), "liked\nplus_%s=%d\n", save ? "save" : "delete", statusInt("track"));
+        const int lib = statusInt("track");
+        if (lib >= 0) fmt(cmd, sizeof(cmd), "liked\nplus_%s=%d\n", save ? "save" : "delete", lib);
+        else fmt(cmd, sizeof(cmd), "liked\n");
         sendPlayer(cmd);
     }
-    static char text[512 * 1024];  // liked.txt (0.84: 64 KB)
-    const int has = likedHas(file, text, sizeof(text));
     EbgmReq* r = ebgmClaim(id);
     if (!r) return 0;
     r->len = (uint32_t)fmt(r->body, EBGM_MAX, "{\"contains_in_library\":%s}", has ? "true" : "false");
@@ -755,7 +858,7 @@ static size_t tracksPage(const char* in, size_t n, int offset, int limit, char* 
     if (at + kn > n) return 0;
     at += kn;
     // The header is written last, its total counted first. Items: each a {...} at the array's top, strings minded.
-    int count = 0, kept = 0;
+    int count = 0, kept = 0, full = 0;
     char* body = out + 128;  // room before it for the header
     size_t bo = 0;
     while (at < n) {
@@ -779,9 +882,15 @@ static size_t tracksPage(const char* in, size_t n, int offset, int limit, char* 
                 }
             }
         }
-        if (count >= offset && kept < limit) {
+        if (count >= offset && kept < limit && !full) {
             const size_t len = at - start;
-            if (128 + bo + len + 8 >= cap) break;
+            // No room: the page ends here, and the rest is still counted
+            // for the total (1.51: the count stopped too, the total short).
+            if (128 + bo + len + 8 >= cap) {
+                full = 1;
+                count++;
+                continue;
+            }
             if (kept) body[bo++] = ',';
             memcpy(body + bo, in + start, len);
             bo += len;
@@ -855,13 +964,9 @@ static void ebgmCreated(Frame* f) {
             name[0], name[1], name[2], name[3]);
         return;
     }
-    if (!g_ebgmPool) g_ebgmPool = sysMap(EBGM_SLOTS * EBGM_MAX);
     lock(&g_ebgmLock);
-    EbgmReq* r = NULL;
-    for (int i = 0; i < EBGM_SLOTS && !r; i++)
-        if (!g_ebgm[i].id) r = &g_ebgm[i];
-    if (r && g_ebgmPool) {
-        r->body = g_ebgmPool + (size_t)(r - g_ebgm) * EBGM_MAX;
+    EbgmReq* r = ebgmFreeSlot();
+    if (r) {
         // A track list: read whole, and only the page asked for answered.
         static char* whole;
         if (!whole) whole = (char*)sysMap(TRACKS_MAX);
@@ -875,8 +980,27 @@ static void ebgmCreated(Frame* f) {
             if (paged) say("ebgm: tracks %d to %d of the list asked for", pageOffset, pageOffset + pageLimit - 1);
             else sysSeek(fd, 0, 0);
         }
-        const int n = paged ? (int)paged : sysRead(fd, r->body, EBGM_MAX);
-        r->len = n > 0 ? (uint32_t)n : 0;
+        size_t n = paged;
+        if (!paged) {
+            // The file whole (1.51: one read of at most EBGM_MAX, the front
+            // page of many albums cut there), in memory of its own if larger.
+            const int64_t size = sysSeek(fd, 0, 2);
+            sysSeek(fd, 0, 0);
+            size_t cap = EBGM_MAX;
+            if (size >= (int64_t)EBGM_MAX && size < 0x7FFFFFFF) {
+                const size_t want = ((size_t)size + 1 + 0x3FFFu) & ~(size_t)0x3FFFu;
+                char* big = (char*)sysMap(want);
+                if (big) {
+                    r->big = r->body = big;
+                    r->bigCap = cap = want;
+                } else {
+                    say("ebgm: %s: %ld bytes, no memory for them: cut at %u", path, (long)size, EBGM_MAX);
+                }
+            }
+            int k;
+            while (n < cap && (k = sysRead(fd, r->body + n, cap - n)) > 0) n += (size_t)k;
+        }
+        r->len = (uint32_t)n;
         r->off = 0;
         r->id = *idp;
     }
@@ -947,6 +1071,11 @@ static void ebgmApply(Frame* f) {
     } else if (eq(h->name, "sceNpWebApiDeleteRequest")) {
         lock(&g_ebgmLock);
         say("ebgm: request %lx done, %u of %u bytes read", (uint64_t)r->id, r->off, r->len);
+        if (r->big) sysUnmap(r->big, r->bigCap);
+        r->big = NULL;
+        r->bigCap = 0;
+        r->body = g_ebgmPool + (size_t)(r - g_ebgm) * EBGM_MAX;
+        r->len = r->off = 0;
         r->id = 0;
         unlock(&g_ebgmLock);
     }
@@ -1038,16 +1167,20 @@ static void fakeApply(Frame* f) {
         f->retRax = 0;
     } else if (eq(h->name, "GetSpTrackInfo")) {
         // SceMusicCoreSpTrackInfo: trackId[128], trackUri[128], contextUri[128],
-        // canShare, canEditPlaylist: the playing track's id, sc<its place in
-        // the queue>, which the player panel's R3 "+" (add to your music)
-        // needs before it is enabled.
+        // canShare, canEditPlaylist: the playing track's id, which the player
+        // panel's R3 "+" (add to your music) needs before it is enabled.
+        // sc<its library number>, as the track lists' rows have it (1.51:
+        // sc<its place in the queue>, another track's id once the queue was
+        // moved, cut or shuffled); its place only while that is not known.
         uint8_t* p = outBuf(f, 0, 386);
         if (!p) return;
         memset(p, 0, 386);
+        const int32_t lib = g_fake.lib;
+        const uint32_t id = lib >= 0 ? (uint32_t)lib : g_fake.index;
         char v[64];
-        fmt(v, sizeof(v), "sc%u", g_fake.index);
+        fmt(v, sizeof(v), "sc%u", id);
         putStr(p, 0, 128, v);
-        fmt(v, sizeof(v), "spotify:track:sc%u", g_fake.index);
+        fmt(v, sizeof(v), "spotify:track:sc%u", id);
         putStr(p, 128, 128, v);
         putStr(p, 256, 128, "spotify:user:shellcompanion:playlist:queue");
         p[384] = 0;  // canShare
@@ -1344,6 +1477,15 @@ static struct {
     uint32_t used;      // when it was last updated (g_rowClock), for reusing it
     float x[2];         // the labels' own X, before they were moved
 } g_rows[ROWS];
+
+// An entry's handles freed, the entry made free.
+static void rowEntryFree(int i) {
+    if (g_row.freeHandle) {
+        if (g_rows[i].row) g_row.freeHandle(g_rows[i].row);
+        if (g_rows[i].img) g_row.freeHandle(g_rows[i].img);
+    }
+    memset(&g_rows[i], 0, sizeof(g_rows[i]));
+}
 static int g_rowSaid;
 
 static void* rowCall(void* method, void* obj, void** args) {
@@ -1579,21 +1721,9 @@ static void rowArt(Frame* f) {
         else if (!t && free_ < 0) free_ = i;
         if (t && t != row && (oldest < 0 || g_rows[i].used < g_rows[oldest].used)) oldest = i;
     }
-    if (e < 0 && free_ < 0 && oldest >= 0) {
-        void* oldRow = g_row.target(g_rows[oldest].row);
-        void* oldImg = g_rows[oldest].img ? g_row.target(g_rows[oldest].img) : NULL;
-        if (oldImg) {
-            rowShow(oldImg, 0);
-            if (g_row.removeChild) rowCall(g_row.removeChild, oldImg, NULL);
-        }
-        if (oldRow && g_rows[oldest].shifted) rowShift(oldRow, oldest, 0, 0.0f);
-        if (g_row.freeHandle) {
-            if (g_rows[oldest].row) g_row.freeHandle(g_rows[oldest].row);
-            if (g_rows[oldest].img) g_row.freeHandle(g_rows[oldest].img);
-        }
-        memset(&g_rows[oldest], 0, sizeof(g_rows[oldest]));
-        free_ = oldest;
-    }
+    // An entry whose row is gone: its handles freed before it is used again
+    // (1.51: they were left, one weak handle or two each time).
+    if (free_ >= 0) rowEntryFree(free_);
     int type = -1;
     if (g_row.fType) g_mono.get(data, g_row.fType, &type);
     void* json = monoGet(data, g_row.fData);
@@ -1605,6 +1735,19 @@ static void rowArt(Frame* f) {
     static char webCover[1048];
     const int has = idx >= 0 && rowCover(idx, rev, webCover, sizeof(webCover));
     if (e < 0 && !has) return;  // nothing to show, nothing shown
+    // Full: the oldest row's cover given up, only for a row that has one to
+    // show (1.51: before, for a row that then showed none too).
+    if (e < 0 && free_ < 0 && oldest >= 0) {
+        void* oldRow = g_row.target(g_rows[oldest].row);
+        void* oldImg = g_rows[oldest].img ? g_row.target(g_rows[oldest].img) : NULL;
+        if (oldImg) {
+            rowShow(oldImg, 0);
+            if (g_row.removeChild) rowCall(g_row.removeChild, oldImg, NULL);
+        }
+        if (oldRow && g_rows[oldest].shifted) rowShift(oldRow, oldest, 0, 0.0f);
+        rowEntryFree(oldest);
+        free_ = oldest;
+    }
     if (e < 0) {
         if (free_ < 0) return;
         void* img = rowNewBox(row);
@@ -1619,7 +1762,7 @@ static void rowArt(Frame* f) {
     g_rows[e].used = ++rowClock;
     void* img = g_row.target(g_rows[e].img);
     if (!img) {
-        g_rows[e].row = 0;
+        rowEntryFree(e);
         return;
     }
     if (has) {
