@@ -142,7 +142,56 @@ typedef struct ScQueueStatus {
 // What the player says now (status.txt). 0, or -1 if there is none.
 int scReadQueueStatus(ScQueueStatus* out);
 
-// ── Self-update ──────────────────────────────────────────────────────────────
+// ── Background downloads ─────────────────────────────────────────────────────
+// Files fetched in the shell after the app has gone, as the Vita client's
+// (docs/PROTOCOL.md §5): a partial file continued (HTTP Range), waited for
+// and tried again, a notification at the start, as each item ends and at
+// the end. ps4/README.md, "Background downloads".
+
+typedef struct ScDownload {
+    const char* id;        // the app's id for it
+    const char* file;      // the file to write (/data/...), continued from its size;
+                           // for "pages" a template with {page} or {page:N}
+    uint64_t size;         // its full size, 0 if unknown
+    const char* title;     // for the notifications
+    const char* kind;      // "url", "pages" or "pkg" (below)
+    const char* args[3];   // url: the URL, extra header lines; pages: the URL with
+                           // {page}, "count" or "count,first", extra header lines
+    const char* icon;      // optional: its picture in Notifications > Downloads, a PNG
+                           // (a path on the console, /data/..., or a URL); NULL for
+                           // the app's own icon (a package's own if it has one)
+} ScDownload;
+
+// The list, written whole (downloads.txt): up to 200 items, in order.
+// notify 1 for the notifications; headers "Name: value" lines, \r\n
+// between, sent with every request (a token, say). 0, or -1.
+int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count);
+// As the app goes: the shell begins the list written. 0, or -1.
+int scDownloadsStart(void);
+// As the app opens: the shell stops after the piece it is writing; this waits
+// (up to 5 s) for running=0 in the status, after which the files are the
+// app's. 0 when stopped, -1 if it did not say so in time.
+int scDownloadsTakeBack(void);
+
+typedef struct ScDownloadStatus {
+    char id[64];
+    char state[12];        // going, waiting, paused, done, gone, failed or cancelled
+    uint64_t bytes;
+    uint64_t size;         // 0 if not known
+    uint32_t pagesDone;    // pages: those whole, of pageCount
+    uint32_t pageCount;
+} ScDownloadStatus;
+// What the shell says now (downloads-status.txt): running 1 while it
+// fetches; up to cap items into items, how many in *count. 0, or -1.
+int scReadDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count);
+
+// ── Packages and self-update ─────────────────────────────────────────────────
+// A download list's item of kind "pkg" (args[0] its URL or a path on the
+// console, args[1] extra header lines; file may be NULL) goes to the PS4's
+// own download service: it downloads and installs it as the Store's are,
+// with its entry and progress bar in Notifications > Downloads. Its status
+// says how far, and its task id with the service in the fifth field.
+
 // The app's own update, a package (a /data/... path or a URL), installed by
 // the shell once the app has gone, which it does at once after this (the
 // shell waits 3 s). relaunch 1: the app started again once installed. 0, or

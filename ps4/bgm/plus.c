@@ -1,6 +1,6 @@
 /**
  * The Music section's "+" (R3, "Add to Your Music") as each app wants it
- * (0.86), inside the player module (bgm.c includes this).
+ * (0.86), inside the player module (bgm.c includes this after downloads.c).
  *
  * The music watch answers the shell's library requests from liked.txt (a
  * path or URL a line) and tells the player of each press (plus_save=<track>,
@@ -68,7 +68,7 @@ static int plusLine(const char* line, int len) {
     }
     memcpy(value, line + k + 1, (size_t)vn);
     value[vn] = 0;
-    textDecode(value);
+    dlDecode(value);
 #define KEY(name) (keyLen == (int)sizeof(name) - 1 && !memcmp(key, name, sizeof(name) - 1))
     const char* kept = poolCopy(value);
     if (KEY("mode")) g_plus.http = !memcmp(value, "http", 5);
@@ -188,7 +188,7 @@ static int plusRequest(const char* method, const char* url, const char* body, co
     if (req >= 0) {
         if (g_http.connectTimeout) g_http.connectTimeout(req, 10u * 1000000u);
         if (g_http.recvTimeout) g_http.recvTimeout(req, 15u * 1000000u);
-        httpHeaders(req, headers);
+        dlHeaders(req, headers);
         if (bodyLen && g_http.addHeader) g_http.addHeader(req, "Content-Type", type && type[0] ? type : "application/json", 0);
         const int rc = g_http.send(req, bodyLen ? body : NULL, bodyLen);
         if (rc >= 0) {

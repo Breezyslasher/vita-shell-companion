@@ -39,7 +39,7 @@ particular server.
 >
 > **PS4 (GoldHEN, tested on 11.50):** background music, local and streamed,
 > in the quick menu's Music tab, with covers, queue editing and a per-app
-> "+"; app self-update; a client library. See [docs/PS4.md](docs/PS4.md).
+> "+"; background downloads; a client library. See [docs/PS4.md](docs/PS4.md).
 
 ## PS4
 
@@ -55,7 +55,8 @@ through its client library (`ps4/client/`):
 - **Self-update:** the app's own `.pkg` installed through the PS4's download
   service once the app has closed, and the app started again.
 
-Background downloads are not in the PS4's first release. Requirements,
+Background downloads are not in the PS4's first release; they are back in
+development on the development branch (1.50 on), not yet released. Requirements,
 the calls, files and limits are in [docs/PS4.md](docs/PS4.md); the
 engineering notes in [`ps4/README.md`](ps4/README.md).
 

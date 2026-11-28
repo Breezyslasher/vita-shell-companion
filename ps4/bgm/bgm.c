@@ -978,55 +978,8 @@ static void writeText(const char* path, const char* text) {
     sysRename(tmp, path);
 }
 
-// A %-encoded value decoded in place (an app's lines: plus.c).
-static void textDecode(char* s) {
-    char* o = s;
-    for (const char* p = s; *p; p++) {
-        if (p[0] == '%' && p[1] && p[2]) {
-            int v = 0, ok = 1;
-            for (int k = 1; k <= 2; k++) {
-                const char c = p[k];
-                v <<= 4;
-                if (c >= '0' && c <= '9') v |= c - '0';
-                else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
-                else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
-                else ok = 0;
-            }
-            if (ok) {
-                *o++ = (char)v;
-                p += 2;
-                continue;
-            }
-        }
-        *o++ = *p;
-    }
-    *o = 0;
-}
-
-// Header lines ("Name: value", \r\n or \n between) added to a request.
-static void httpHeaders(int req, const char* lines) {
-    if (!g_http.addHeader || !lines) return;
-    char name[128], value[4096];
-    for (const char* p = lines; *p;) {
-        const char* e = p;
-        while (*e && *e != '\r' && *e != '\n') e++;
-        const char* colon = p;
-        while (colon < e && *colon != ':') colon++;
-        if (colon < e && colon > p && (size_t)(colon - p) < sizeof(name)) {
-            memcpy(name, p, (size_t)(colon - p));
-            name[colon - p] = 0;
-            const char* v = colon + 1;
-            while (v < e && *v == ' ') v++;
-            size_t vn = (size_t)(e - v);
-            if (vn >= sizeof(value)) vn = sizeof(value) - 1;
-            memcpy(value, v, vn);
-            value[vn] = 0;
-            g_http.addHeader(req, name, value, 0 /* overwrite */);
-        }
-        p = e;
-        while (*p == '\r' || *p == '\n') p++;
-    }
-}
+// Background downloads (0.82): their own file, with this one's HTTP and files.
+#include "downloads.c"
 
 static int cmpName(const char* a, const char* b) {
     for (;; a++, b++) {
@@ -1909,8 +1862,14 @@ static void queueInsert(int at, int lib) {
 // The Music section's "+" as each app wants it (0.86).
 #include "plus.c"
 
-// An app's own update through the PS4's download service (0.89).
+// Packages through the PS4's own download service, and self-update (0.89).
 #include "pkg.c"
+
+// A download list's files in Notifications > Downloads (0.96).
+#include "dllist.c"
+
+// Research: how the Downloads list is told a task changed (1.17).
+#include "ndbprobe.c"
 
 
 static void writeStatus(void) {
@@ -2129,10 +2088,25 @@ static void runCommand(const char* text, int n) {
         int lib = 0;
         for (int i = save ? 10 : 12; i < n && text[i] >= '0' && text[i] <= '9'; i++) lib = lib * 10 + (text[i] - '0');
         plusPressed(save, lib);
+#ifdef SC_DEBUG
+    } else if (IS("bgft_probe")) {
+        // An experiment (0.90): media through the PS4's download service.
+        probeStart();
+#endif
     } else if (IS("update_start")) {
         // An app's own update, once it has gone (the client library's
         // scUpdateInstallPkg, 0.89): pkg.c.
         updateStart();
+    } else if (IS("dl_start")) {
+        // An app's downloads handed over (the client library's
+        // scDownloadsStart, 0.82): downloads.c's thread takes them.
+        g_dls.takeBack = 0;
+        g_dls.start = 1;
+    } else if (IS("dl_takeback")) {
+        // Back to the app: stopped after the piece being written,
+        // running=0 in downloads-status.txt once it has.
+        g_dls.takeBack = 1;
+        if (!g_dls.running) dlStatus();
     } else if (IS("takeback")) {
         // An app takes the music back (the client library's
         // scMusicTakeBack, 0.81): where it was kept for status.txt, so the
@@ -2446,6 +2420,7 @@ static void* begin(void* arg) {
     char fw[64];
     firmware(fw, sizeof(fw));
     logLine("background music %s: started, firmware %s", SC_BGM_VERSION, fw);
+    if (threadStart(dlMain, NULL, "ScBgmDl") < 0) logLine("downloads: no thread");
     return player(arg);
 }
 

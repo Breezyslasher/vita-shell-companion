@@ -1,10 +1,16 @@
 /**
- * Self-update through the PS4's own download service, BGFT (0.89), inside
- * the player module (bgm.c includes this after plus.c): update.txt, the
- * "update_start" command, the client library's scUpdateInstallPkg. The
- * app's own package (a URL, or a path on the console, installed from where
- * it is, "by storage") is installed once the app has gone, the result
- * written to update-result.txt, the app started again.
+ * Packages (.pkg) through the PS4's own download service, BGFT (0.89),
+ * inside the player module (bgm.c includes this after plus.c):
+ *
+ *   - a download list's "pkg" items (downloads.c): a package by URL is
+ *     registered with the service, which downloads and installs it as the
+ *     Store's are, its entry and progress bar in Notifications > Downloads;
+ *     a package on the console (/data/..., /mnt/usb...) is installed from
+ *     where it is ("by storage");
+ *   - self-update (update.txt, the "update_start" command, the client
+ *     library's scUpdateInstallPkg): the app's own package installed once
+ *     the app has gone, the result written to update-result.txt, the app
+ *     started again.
  *
  * As GoldHEN's Package Installer, flatz's remote package installer and
  * cy33hc's ps4-webdav-client register theirs: sceBgftServiceIntInit (a
@@ -176,7 +182,8 @@ static size_t urlRange(const char* url, const char* extra, uint64_t off, size_t 
     if (req >= 0) {
         if (g_http.connectTimeout) g_http.connectTimeout(req, 15u * 1000000u);
         if (g_http.recvTimeout) g_http.recvTimeout(req, 30u * 1000000u);
-        (void)extra;
+        dlHeaders(req, g_dls.headers);
+        dlHeaders(req, extra);
         char range[64];
         fmt(range, sizeof(range), "bytes=%lu-%lu", (unsigned long)off, (unsigned long)(off + len - 1));
         if (g_http.addHeader) g_http.addHeader(req, "Range", range, 0);
@@ -269,6 +276,55 @@ static int pkgIcon(const char* where, const char* extra, const char* contentId, 
     sysUnmap(png, mapped);
     logLine("pkg: %s: icon, %u bytes at 0x%x: %s", contentId, (unsigned)size, (unsigned)off, ok ? out : "not kept");
     return ok;
+}
+
+// The icon an app gave an item (icon=, 1.29), ready for the service's
+// iconPath: a path on the console as it is (/data/... is /user/data/...
+// here), a URL fetched once to SC_BGM_DIR/icons/u<hash>.<png|jpg>. NULL
+// if it gave none or it can't be had. The service is given PNGs (the
+// apps' icon0.png, packages' own); anything else is passed on and logged.
+static const char* dlItemIcon(int i, char* out, size_t cap) {
+    const char* want = i >= 0 && i < g_dls.count ? g_dls.item[i].icon : "";
+    if (!want[0]) return NULL;
+    if (want[0] == '/') {
+        fmt(out, cap, "%s%s", !memcmp(want, "/data/", 6) ? "/user" : "", want);
+        if (sysExists(out)) return out;
+        logLine("dlicon: %s: not there", out);
+        return NULL;
+    }
+    uint32_t h = 2166136261u;
+    for (const char* p = want; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+    char dir[MAX_PATH], part[MAX_PATH];
+    fmt(dir, sizeof(dir), "%s/icons", SC_BGM_DIR);
+    fmt(out, cap, "%s/u%08x.png", dir, h);
+    if (sysExists(out)) return out;
+    fmt(out, cap, "%s/u%08x.jpg", dir, h);
+    if (sysExists(out)) return out;
+    sysMkdir(dir, 0777);
+    fmt(part, sizeof(part), "%s/u%08x.part", dir, h);
+    sysUnlink(part);
+    uint64_t got = 0, have = 0, size = 0;
+    const int r = dlGet(want, part, NULL, &got, &have, &size);
+    uint8_t m[4] = {0};
+    const int fd = r == GET_DONE ? sysOpen(part, SC_O_RDONLY, 0) : -1;
+    if (fd >= 0) {
+        sysRead(fd, m, sizeof(m));
+        sysClose(fd);
+    }
+    const int png = m[0] == 0x89 && m[1] == 'P' && m[2] == 'N' && m[3] == 'G';
+    const int jpg = m[0] == 0xFF && m[1] == 0xD8;
+    if (!png && !jpg) {
+        logLine("dlicon: item %d: icon URL not fetched as a picture (%d, %lu bytes)", i, r, (unsigned long)have);
+        sysUnlink(part);
+        return NULL;
+    }
+    fmt(out, cap, "%s/u%08x.%s", dir, h, png ? "png" : "jpg");
+    if (sysRename(part, out) != 0) {
+        sysUnlink(part);
+        return NULL;
+    }
+    logLine("dlicon: item %d: %lu bytes, %s%s", i, (unsigned long)have, out, png ? "" : " (a JPEG: may not show)");
+    return out;
 }
 
 // The package (a URL, or a path on the console) registered with the
@@ -531,4 +587,380 @@ static void updateStart(void) {
     }
 }
 
+// A download list's "pkg" item: its URL (or path) to the service, followed
+// until it is installed. GET_* as downloads.c's. Its notifications are the
+// PS4's own (Notifications > Downloads), so none of ours for it.
+static int pkgItem(int i) {
+    __typeof__(g_dls.item[0])* it = &g_dls.item[i];
+    it->state = DLS_GOING;
+    dlStatus();
+    // A path the app gave (/data/...) is /user/data/... in the shell (0.99).
+    char where[MAX_PATH];
+    fmt(where, sizeof(where), "%s%s", !memcmp(it->arg[0], "/data/", 6) ? "/user" : "", it->arg[0]);
+    char given[MAX_PATH];
+    const char* icon = dlItemIcon(i, given, sizeof(given));
+    const int32_t task = pkgRegister(where, it->arg[1], it->title, icon);
+    if (task == (int32_t)0x80990088) {
+        // 1.01's log: the same package (its content id, version and size)
+        // installed already, as the Downloads list's finished task for it
+        // showed. Nothing to do.
+        logLine("pkg: %s: installed already (0x80990088)", it->title);
+        return GET_DONE;
+    }
+    if (task < 0) return task == -2 || task == -3 ? GET_GONE : GET_RETRY;
+    it->task = task;
+    dlStatus();
+    int rc = pkgFollow(task, &it->bytes, &it->size, &g_dls.takeBack);
+    if (rc == (int)0x80990004 && where[0] == '/' && g_pkgUserPaths) {
+        // Failed as it began (1.04): the path's other form, once. The failed
+        // task goes first, or the content id is taken (0x80990086).
+        typedef int (*FnTaskId)(int32_t);
+        FnTaskId unregister = (FnTaskId)anySym(libLoad("libSceBgft.sprx"), "sceBgftServiceIntDownloadUnregisterTask");
+        logLine("pkg: task %d failed 0x80990004: removed 0x%08X; trying the path as /data/...", task,
+                (unsigned)(unregister ? unregister(task) : -1));
+        g_pkgUserPaths = 0;
+        const int32_t again = pkgRegister(where, it->arg[1], it->title, icon);
+        if (again < 0) return again == (int32_t)0x80990088 ? GET_DONE : GET_RETRY;
+        it->task = again;
+        dlStatus();
+        rc = pkgFollow(again, &it->bytes, &it->size, &g_dls.takeBack);
+    }
+    return rc == 0 ? GET_DONE : rc == 1 ? GET_STOPPED : GET_RETRY;
+}
 
+#ifdef SC_DEBUG  // the experiment: SC_DEBUG builds only (0.95)
+// ── An experiment: media through the service (0.90) ─────────────────────────
+//
+// The service has task subtypes for photos, music and video besides
+// packages. Whether it takes a plain MP3 (or MP4) by URL is not known: this
+// registers one with each of a few package types, logs each answer, and
+// for the first taken, starts it, follows it for up to 3 minutes and lists
+// the folders it might have gone to. The "bgft_probe" command; its URL from
+// bgft-probe.txt (its first line), else a test MP3.
+
+static void probeList(const char* dir, int depth) {
+    const int fd = sysOpen(dir, SC_O_RDONLY | SC_O_DIRECTORY, 0);
+    if (fd < 0) {
+        logLine("probe: %s: not opened (%d)", dir, fd);
+        return;
+    }
+    static uint8_t buf[0x2000];
+    int n, shown = 0;
+    while ((n = sysGetdents(fd, buf, sizeof(buf))) > 0 && shown < 60) {
+        for (int at = 0; at < n && shown < 60;) {
+            const uint16_t reclen = le16(buf + at + 4);
+            const uint8_t type = buf[at + 6], namlen = buf[at + 7];
+            if (!reclen) break;
+            char name[256];
+            memcpy(name, buf + at + 8, namlen);
+            name[namlen] = 0;
+            at += reclen;
+            if (name[0] == '.') continue;
+            char path[512];
+            fmt(path, sizeof(path), "%s/%s", dir, name);
+            int64_t size = -1;
+            if (type != 4) {
+                const int f = sysOpen(path, SC_O_RDONLY, 0);
+                if (f >= 0) {
+                    size = sysSeek(f, 0, 2);
+                    sysClose(f);
+                }
+            }
+            logLine("probe:   %s%s %ld", path, type == 4 ? "/" : "", (long)size);
+            shown++;
+            if (type == 4 && depth > 0) probeList(path, depth - 1);
+        }
+    }
+    sysClose(fd);
+}
+
+// A web server on the PS4 itself, for the experiment (0.94): one file,
+// served at http://127.0.0.1:<port>/probe.mp3 to whoever asks (the download
+// service, from another process), each request logged in full, so what the
+// service asks for is seen without a PC. GET and HEAD, Range, then closed.
+typedef int (*FnNetSocket)(const char*, int, int, int);
+typedef int (*FnNetBind)(int, const void*, uint32_t);
+typedef int (*FnNetListen)(int, int);
+typedef int (*FnNetAccept)(int, void*, uint32_t*);
+typedef int (*FnNetIo)(int, void*, size_t, int);
+typedef int (*FnNetClose)(int);
+static struct {
+    FnNetSocket socket;
+    FnNetBind bind;
+    FnNetListen listen;
+    FnNetAccept accept;
+    FnNetIo recv, send;
+    FnNetClose close;
+    char file[MAX_PATH];
+    int port, fd;
+} g_srv;
+
+static void srvSend(int c, const void* p, size_t n) {
+    const uint8_t* b = (const uint8_t*)p;
+    while (n) {
+        const int k = g_srv.send(c, (void*)b, n > 65536 ? 65536 : n, 0);
+        if (k <= 0) return;
+        b += k;
+        n -= (size_t)k;
+    }
+}
+
+static void* srvMain(void* arg) {
+    (void)arg;
+    static char req[4096];
+    static uint8_t buf[65536];
+    for (;;) {
+        uint8_t from[16];
+        uint32_t fromLen = sizeof(from);
+        const int c = g_srv.accept(g_srv.fd, from, &fromLen);
+        if (c < 0) {
+            logLine("probe server: accept 0x%08X, stopped", (unsigned)c);
+            return NULL;
+        }
+        int got = 0;
+        while (got < (int)sizeof(req) - 1) {
+            const int k = g_srv.recv(c, req + got, sizeof(req) - 1 - (size_t)got, 0);
+            if (k <= 0) break;
+            got += k;
+            req[got] = 0;
+            if (hasText(req, "\r\n\r\n")) break;
+        }
+        req[got > 0 ? got : 0] = 0;
+        // The request, its lines logged.
+        for (char* p = req; *p;) {
+            char* e = p;
+            while (*e && *e != '\n') e++;
+            const char keep = *e;
+            *e = 0;
+            if (e > p && e[-1] == '\r') e[-1] = 0;
+            if (*p) logLine("probe server < %s", p);
+            *e = keep;
+            p = *e ? e + 1 : e;
+        }
+        const int head = !memcmp(req, "HEAD", 4);
+        const int fd = sysOpen(g_srv.file, SC_O_RDONLY, 0);
+        const int64_t size = fd >= 0 ? sysSeek(fd, 0, 2) : -1;
+        char hdr[512];
+        if (size < 0) {
+            const int n = fmt(hdr, sizeof(hdr), "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            srvSend(c, hdr, (size_t)n);
+            logLine("probe server > 404");
+        } else {
+            // Range: bytes=a-b, bytes=a-
+            uint64_t from0 = 0, to = (uint64_t)size - 1;
+            int ranged = 0;
+            for (const char* p = req; *p; p++)
+                if (!memcmp(p, "\nRange: bytes=", 14) || !memcmp(p, "\nrange: bytes=", 14)) {
+                    const char* q = p + 14;
+                    from0 = 0;
+                    while (*q >= '0' && *q <= '9') from0 = from0 * 10 + (uint64_t)(*q++ - '0');
+                    if (*q == '-' && q[1] >= '0' && q[1] <= '9') {
+                        to = 0;
+                        for (q++; *q >= '0' && *q <= '9'; q++) to = to * 10 + (uint64_t)(*q - '0');
+                    }
+                    if (to >= (uint64_t)size) to = (uint64_t)size - 1;
+                    ranged = 1;
+                    break;
+                }
+            const uint64_t len = from0 <= to ? to - from0 + 1 : 0;
+            const int n = ranged ? fmt(hdr, sizeof(hdr),
+                                       "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mpeg\r\nContent-Length: %lu\r\n"
+                                       "Content-Range: bytes %lu-%lu/%ld\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                                       (unsigned long)len, (unsigned long)from0, (unsigned long)to, (long)size)
+                                 : fmt(hdr, sizeof(hdr),
+                                       "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: %ld\r\n"
+                                       "Accept-Ranges: bytes\r\nConnection: close\r\n\r\n", (long)size);
+            srvSend(c, hdr, (size_t)n);
+            uint64_t sent = 0;
+            if (!head && len) {
+                sysSeek(fd, (int64_t)from0, 0);
+                while (sent < len) {
+                    const size_t want = len - sent > sizeof(buf) ? sizeof(buf) : (size_t)(len - sent);
+                    const int k = sysRead(fd, buf, want);
+                    if (k <= 0) break;
+                    srvSend(c, buf, (size_t)k);
+                    sent += (uint64_t)k;
+                }
+            }
+            logLine("probe server > %s, %lu bytes sent", ranged ? "206" : "200", (unsigned long)sent);
+        }
+        if (fd >= 0) sysClose(fd);
+        g_srv.close(c);
+    }
+}
+
+// The server started on a port of 127.0.0.1, serving file: the port, or 0.
+static int srvStart(const char* file) {
+    if (g_srv.port) {
+        fmt(g_srv.file, sizeof(g_srv.file), "%s", file);
+        return g_srv.port;
+    }
+    const int net = libLoad("libSceNet.sprx");
+    g_srv.socket = (FnNetSocket)anySym(net, "sceNetSocket");
+    g_srv.bind = (FnNetBind)anySym(net, "sceNetBind");
+    g_srv.listen = (FnNetListen)anySym(net, "sceNetListen");
+    g_srv.accept = (FnNetAccept)anySym(net, "sceNetAccept");
+    g_srv.recv = (FnNetIo)anySym(net, "sceNetRecv");
+    g_srv.send = (FnNetIo)anySym(net, "sceNetSend");
+    g_srv.close = (FnNetClose)anySym(net, "sceNetSocketClose");
+    if (!g_srv.socket || !g_srv.bind || !g_srv.listen || !g_srv.accept || !g_srv.recv || !g_srv.send || !g_srv.close) {
+        logLine("probe server: libSceNet's socket functions missing");
+        return 0;
+    }
+    g_srv.fd = g_srv.socket("ScProbe", 2 /* AF_INET */, 1 /* STREAM */, 0);
+    if (g_srv.fd < 0) {
+        logLine("probe server: socket 0x%08X", (unsigned)g_srv.fd);
+        return 0;
+    }
+    for (int port = 38521; port < 38531; port++) {
+        uint8_t addr[16];
+        memset(addr, 0, sizeof(addr));
+        addr[0] = 16;  // sin_len
+        addr[1] = 2;   // AF_INET
+        addr[2] = (uint8_t)(port >> 8);
+        addr[3] = (uint8_t)port;
+        addr[4] = 127;
+        addr[7] = 1;  // 127.0.0.1
+        const int b = g_srv.bind(g_srv.fd, addr, sizeof(addr));
+        if (b >= 0) {
+            const int l = g_srv.listen(g_srv.fd, 8);
+            logLine("probe server: 127.0.0.1:%d, listen 0x%08X", port, (unsigned)l);
+            if (l < 0) return 0;
+            g_srv.port = port;
+            fmt(g_srv.file, sizeof(g_srv.file), "%s", file);
+            if (threadStart(srvMain, NULL, "ScBgmProbeSrv") < 0) return 0;
+            return port;
+        }
+    }
+    logLine("probe server: no port could be bound");
+    return 0;
+}
+
+static void* probeMain(void* arg) {
+    (void)arg;
+    static char url[MAX_PATH];
+    char text[MAX_PATH];
+    url[0] = 0;
+    const int n = readText(SC_BGM_DIR "/bgft-probe.txt", text, sizeof(text));
+    if (n > 0) {
+        int k = 0;
+        while (k < n && text[k] != '\n' && text[k] != '\r') k++;
+        text[k] = 0;
+        if (isUrl(text)) fmt(url, sizeof(url), "%s", text);
+    }
+    if (!url[0]) {
+        // No URL given (0.94): a file of the console's, served from here,
+        // every request the service makes logged ("probe server <").
+        const char* file = SC_BGM_MUSIC "/yoursong.mp3";
+        if (!sysExists(file))
+            for (int i = 0; i < g_libCount && !sysExists(file); i++)
+                if (!isUrl(g_tracks[i])) file = g_tracks[i];
+        const int port = srvStart(file);
+        if (port) fmt(url, sizeof(url), "http://127.0.0.1:%d/probe.mp3", port);
+        else fmt(url, sizeof(url), "%s", "http://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3");
+        logLine("probe: serving %s", file);
+    }
+    char shown[160];
+    urlShown(url, shown, sizeof(shown));
+    logLine("probe: media through the download service: %s", shown);
+    if (!bgftSetup()) {
+        logLine("probe: the service is not there");
+        return NULL;
+    }
+    if (g_bgft.user == -1) bgftUser();
+    // Its size, as a package installer gives a package's (0.93: 0.92
+    // registered with none, and the PS4 said it was not on the server):
+    // HEAD, its Content-Length.
+    uint64_t size = 0;
+    if (httpSetup()) {
+        const int tmpl = g_http.tmpl(g_http.ctx, "ShellCompanion/" SC_BGM_VERSION, 2, 1);
+        const int conn = tmpl >= 0 ? g_http.conn(tmpl, url, 1) : -1;
+        const int req = conn >= 0 ? g_http.req(conn, 2 /* HEAD */, url, 0) : -1;
+        int code = 0, known = -1;
+        if (req >= 0 && g_http.send(req, NULL, 0) >= 0) {
+            g_http.status(req, &code);
+            g_http.length(req, &known, &size);
+        }
+        if (known != 0) size = 0;
+        logLine("probe: HEAD: HTTP %d, %lu bytes", code, (unsigned long)size);
+        if (req >= 0) g_http.delReq(req);
+        if (conn >= 0) g_http.delConn(conn);
+        if (tmpl >= 0) g_http.delTmpl(tmpl);
+    }
+    // A content id of its own each run (0.94): an earlier run's task is
+    // otherwise taken again (0x80990086) and followed instead.
+    static char probeId[40];
+    fmt(probeId, sizeof(probeId), "IV0000-SCMP00001_00-PROBE%011lu", (unsigned long)(sysNowUs() / 1000u % 100000000000u));
+    logLine("probe: content id %s", probeId);
+    // Package types to try: none, empty, and guesses at a media one.
+    // NULL last: the service may take a missing one worst.
+    static const char* const types[] = {"", "PS4MUSIC", "MUSIC", "PS4AUDIO", "AUDIO", "PS4VIDEO", "VIDEO", "audio/mpeg", NULL};
+    const int nTypes = (int)(sizeof(types) / sizeof(types[0]));
+    int32_t task = -1;
+    for (int t = 0; t < nTypes && task < 0; t++) {
+        for (int ent = 0; ent < 2 && task < 0; ent++) {
+            BgftParam p;
+            memset(&p, 0, sizeof(p));
+            p.userId = g_bgft.user;
+            p.entitlementType = ent ? 0 : 5;
+            p.id = probeId;
+            p.contentUrl = url;
+            p.contentName = "Shell Companion test";
+            p.iconPath = "";
+            p.playgoScenarioId = "0";
+            p.option = 0x10000;  // DISABLE_CDN_QUERY_PARAM
+            p.packageType = types[t];
+            p.packageSubType = "";
+            p.packageSize = size;
+            int32_t id = -1;
+            const int rc = g_bgft.reg(&p, &id);
+            logLine("probe: type %s%s%s, entitlement %d: 0x%08X, task %d", types[t] ? "\"" : "",
+                    types[t] ? types[t] : "NULL", types[t] ? "\"" : "", p.entitlementType, (unsigned)rc, id);
+            if (rc >= 0 && id >= 0) task = id;
+            if (rc == (int)0x80990086 && g_bgft.find) {
+                // Registered by an earlier run: that task, followed.
+                const int fr = g_bgft.find(p.id, 0, &id);
+                logLine("probe: taken already, an earlier run's: 0x%08X, task %d", (unsigned)fr, id);
+                if (fr >= 0 && id >= 0) task = id;
+            }
+        }
+    }
+    if (task < 0) {
+        logLine("probe: no type was taken: media can't go through the service this way");
+        notify("Download service test: not taken (see bgm.log)");
+        return NULL;
+    }
+    const int st = g_bgft.start(task);
+    logLine("probe: task %d started: 0x%08X", task, (unsigned)st);
+    notify("Download service test: task %d taken, see Notifications > Downloads", task);
+    // (0.91 asked sceBgftServiceIntDownloadGetTaskInfo here, with null
+    // pointers for the title and icon: it writes into buffers it is given,
+    // and the shell went down. Not asked now.)
+    for (int s = 0; s < 90; s++) {
+        BgftProgress pr;
+        memset(&pr, 0, sizeof(pr));
+        const int rc = g_bgft.progress(task, &pr);
+        logLine("probe: progress 0x%08X: bits 0x%x, error 0x%08X, %lu of %lu (total %lu of %lu), %u s left",
+                (unsigned)rc, pr.bits, (unsigned)pr.errorResult, (unsigned long)pr.transferred,
+                (unsigned long)pr.length, (unsigned long)pr.transferredTotal, (unsigned long)pr.lengthTotal,
+                pr.restSec);
+        if (rc < 0 || pr.errorResult) break;
+        if (pr.length && pr.transferred >= pr.length) break;
+        sysSleepMs(2000);
+    }
+    // Where it may have gone.
+    static const char* const dirs[] = {"/user/av_contents", "/user/download", "/user/data/download",
+                                       "/user/av_contents/music", "/user/av_contents/video_temp",
+                                       "/system_data/priv/bgft", "/user/system/download"};
+    for (int d = 0; d < (int)(sizeof(dirs) / sizeof(dirs[0])); d++) probeList(dirs[d], 2);
+    logLine("probe: done");
+    return NULL;
+}
+
+static void probeStart(void) {
+    static volatile int running;
+    if (running) return;
+    running = 1;
+    if (threadStart(probeMain, NULL, "ScBgmProbe") < 0) running = 0;
+}
+#endif  // SC_DEBUG

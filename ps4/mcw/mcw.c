@@ -1329,7 +1329,7 @@ static void jsonLog(Frame* f) {
 // there: Spotify is not installed, and the section offered to download it);
 // the version it found (3, logged); the panels told of it (4, never of a
 // version below APPVER_SAID while ebgm/ is there).
-#define MONO_HOOKS 21
+#define MONO_HOOKS 34
 static Hook g_monoHooks[MONO_HOOKS];
 static int g_forceApp;  // ebgm/ there: PlayStationMusicContext.IsValidAppVer answered true
 #define APPVER_AT 0xB8      // PlayStationMusicContext's m_appVer (a float)
@@ -2230,6 +2230,65 @@ static void rowArtSetup(void* mono, void* domain, void* imageLoaded, void* class
     qkSetup(pui, app, cls);
 }
 
+// The Downloads list's calls to the download service (BGFT), logged only
+// (0.85): what a task of ours in Notifications > Downloads would have to
+// answer. After the call: its arguments, its answer, and what it filled in.
+static void bgftLog(Frame* f) {
+    const Hook* h = f->hook;
+    if (f->seq > 150) return;
+    const uint64_t* g = f->gpr;
+    char extra[400];
+    extra[0] = 0;
+    if (contains(h->name, "DownloadQueryTaskSection") || contains(h->name, "DownloadQueryTask")) {
+        // (..., out uint actualNum, QueryTaskResult[] results): the last two.
+        const int sec = contains(h->name, "Section");
+        const uint32_t* num = (const uint32_t*)(uintptr_t)(sec ? g[2] : g[4]);
+        const uint8_t* arr = (const uint8_t*)(uintptr_t)(sec ? g[3] : g[5]);
+        uint32_t n = 0;
+        if (hookReadable(num, 4) == 4) n = *num;
+        int at = fmt(extra, sizeof(extra), " actualNum %u:", n);
+        for (uint32_t k = 0; k < n && k < 12 && arr && hookReadable(arr + 0x20 + k * 8, 8) == 8; k++) {
+            int32_t id;
+            uint32_t prm;
+            memcpy(&id, arr + 0x20 + k * 8, 4);
+            memcpy(&prm, arr + 0x24 + k * 8, 4);
+            at += fmt(extra + at, sizeof(extra) - at, " [task %d param 0x%x]", id, prm);
+        }
+    } else if (contains(h->name, "DownloadGetProgress")) {
+        // (taskId, TaskProgress progress): the object's fields, raw.
+        const uint8_t* o = (const uint8_t*)(uintptr_t)g[1];
+        if (o && hookReadable(o + 0x10, 0x48) == 0x48) {
+            int at = fmt(extra, sizeof(extra), " progress:");
+            for (int k = 0; k < 0x48; k += 4) {
+                uint32_t v;
+                memcpy(&v, o + 0x10 + k, 4);
+                at += fmt(extra + at, sizeof(extra) - at, " %x", v);
+            }
+        }
+    } else if (contains(h->name, "DownloadGetTaskInfo")) {
+        // (taskId, out DownloadTaskInfo {string contentTitle, iconPath; ulong tick}).
+        const uint64_t* info = (const uint64_t*)(uintptr_t)g[1];
+        if (hookReadable(info, 24) == 24) {
+            char t[120], icon[160];
+            monoText(info[0], t, sizeof(t));
+            monoText(info[1], icon, sizeof(icon));
+            fmt(extra, sizeof(extra), " title \"%s\", icon \"%s\", tick %lu", t, icon, (unsigned long)info[2]);
+        }
+    } else if (contains(h->name, "GetTaskInfoValueString")) {
+        const uint64_t* out = (const uint64_t*)(uintptr_t)g[2];
+        if (hookReadable(out, 8) == 8) {
+            char t[200];
+            monoText(*out, t, sizeof(t));
+            fmt(extra, sizeof(extra), " \"%s\"", t);
+        }
+    } else if (contains(h->name, "GetTaskInfoValue")) {
+        const uint64_t* out = (const uint64_t*)(uintptr_t)g[2];
+        if (hookReadable(out, 8) == 8) fmt(extra, sizeof(extra), " value %lu", (unsigned long)*out);
+    }
+    say("bgft: %s(%lx, %lx, %lx, %lx) = 0x%lx%s  [#%u, thread %d]", h->name, (unsigned long)g[0], (unsigned long)g[1],
+        (unsigned long)g[2], (unsigned long)g[3], (unsigned long)f->retRax, extra, f->seq, scePthreadGetthreadid());
+}
+
 static void monoLog(Frame* f) {
     const Hook* h = f->hook;
     if (h->json == 1) {
@@ -2281,6 +2340,8 @@ static void monoLog(Frame* f) {
         rowLoaded(f);
     } else if (h->json == 10) {
         rowShellLoad(f);
+    } else if (h->json == 17) {
+        bgftLog(f);
     } else if (h->json == 12) {
         qkMoved(f);
     } else if (h->json == 13) {
@@ -2297,6 +2358,162 @@ static void monoLog(Frame* f) {
             (hundredths < 0 ? -hundredths : hundredths) % 100, f->seq, scePthreadGetthreadid());
     }
 }
+
+#ifdef SC_COMPANION
+// The Downloads list told that its table changed (1.19), as the download
+// service's own writes tell it: Sce.Vsh.Accessor.Db.Notify.DbNotify.Post
+// (dbPath, tableName), static, which posts the "database updated" event the
+// list's accessor (Sce.Vsh.Orbis.Bgft.NotificationDbAccessor, a
+// DbItemAccessor) registered for with RegistDbEventCallback. Its path from
+// that accessor's own GetDbPath(), its table its TableName, "item" (and the
+// file's one table, "notification", too). Nothing is written to the
+// database. On a thread of the shell's (the list's, in a hook): 1 if posted.
+// The subscriptions seen (1.42): DbNotify.RegistDbEventCallback(dbPath,
+// tableName, callback), static: its strings in the first two arguments.
+static struct {
+    char path[8][160], table[8][64];
+    volatile int n;
+} g_dbReg;
+
+static void dbKeep(const char* path, const char* table, const char* how);
+static void dbRegistSeen(Frame* f) {
+    char path[160] = "", table[64] = "";
+    monoText(f->gpr[0], path, sizeof(path));
+    monoText(f->gpr[1], table, sizeof(table));
+    int known = 0;
+    for (int i = 0; i < g_dbReg.n; i++)
+        if (eq(g_dbReg.path[i], path) && eq(g_dbReg.table[i], table)) known = 1;
+    say("dbnotify: subscription (\"%s\", \"%s\")%s  [thread %d]", path, table, known ? " again" : "",
+        scePthreadGetthreadid());
+    dbKeep(path, table, "subscription");
+}
+
+static void dbKeep(const char* path, const char* table, const char* how) {
+    int known = 0;
+    for (int i = 0; i < g_dbReg.n; i++)
+        if (eq(g_dbReg.path[i], path) && eq(g_dbReg.table[i], table)) known = 1;
+    if (known || !path[0] || !table[0] || path[0] == '(' || table[0] == '(') return;
+    say("dbnotify: %s (\"%s\", \"%s\")  [thread %d]", how, path, table, scePthreadGetthreadid());
+    if (g_dbReg.n < 8) {
+        fmt(g_dbReg.path[g_dbReg.n], sizeof(g_dbReg.path[0]), "%s", path);
+        fmt(g_dbReg.table[g_dbReg.n], sizeof(g_dbReg.table[0]), "%s", table);
+        __atomic_store_n(&g_dbReg.n, g_dbReg.n + 1, __ATOMIC_RELEASE);
+    }
+}
+
+// DbItemAccessor.DbEventHandler, an event heard (1.43): the accessor's own
+// strings, m_dbPath (0x38) and m_tablePath (0x40) (the dump's fields), kept
+// as a subscription's. 1.42's log: the list's and the tile's accessors had
+// subscribed before the hooks were in, and only these events showed them.
+static void dbHandlerSeen(Frame* f) {
+    static uint32_t seen;
+    const uint8_t* acc = (const uint8_t*)(uintptr_t)f->gpr[0];
+    char path[160] = "", table[64] = "";
+    if ((uintptr_t)acc > 0x10000 && hookReadable(acc, 0x48) == 0x48) {
+        uint64_t sp, st;
+        memcpy(&sp, acc + 0x38, 8);
+        memcpy(&st, acc + 0x40, 8);
+        if (sp > 0x10000 && hookReadable((void*)(uintptr_t)sp, 0x18) == 0x18) monoText(sp, path, sizeof(path));
+        if (st > 0x10000 && hookReadable((void*)(uintptr_t)st, 0x18) == 0x18) monoText(st, table, sizeof(table));
+        // (1.44: empty in 1.43's log: NotificationDbAccessor subscribes with
+        // its own m_dbInfo, path at 0x58, table at 0x60, which its
+        // GetDbTableForNotification returns, the dump's.)
+        if ((!path[0] || !table[0]) && hookReadable(acc, 0x68) == 0x68) {
+            memcpy(&sp, acc + 0x58, 8);
+            memcpy(&st, acc + 0x60, 8);
+            path[0] = table[0] = 0;
+            if (sp > 0x10000 && hookReadable((void*)(uintptr_t)sp, 0x18) == 0x18) monoText(sp, path, sizeof(path));
+            if (st > 0x10000 && hookReadable((void*)(uintptr_t)st, 0x18) == 0x18) monoText(st, table, sizeof(table));
+        }
+    }
+    if (seen++ < 80)
+        say("dbnotify: accessor %p told its table changed: \"%s\", \"%s\"  [#%u, thread %d]", (void*)acc, path, table,
+            seen, scePthreadGetthreadid());
+    dbKeep(path, table, "an accessor's");
+}
+
+// 1 once a subscription to notification.db has been seen (1.42).
+int mcwDbNotifyKnown(void) {
+    for (int i = 0; i < g_dbReg.n; i++)
+        if (contains(g_dbReg.path[i], "notification.db")) return 1;
+    return 0;
+}
+
+int mcwDbNotifyPost(void) {
+    static int tried, turn;
+    static void *post, *getPath, *ways[4];
+    static const char* const wayNames[4] = {"Post", "GlobalPost", "Send", "GlobalSend"};
+    static char path[160];
+    if (!g_setupAgain.imageLoaded || !g_setupAgain.classFromName || !g_mono.methodByName || !g_mono.invoke ||
+        !g_row.stringNew || !g_setupAgain.domain)
+        return 0;
+    if (!tried) {
+        tried = 1;
+        void* nimg = ((FnMonoName)g_setupAgain.imageLoaded)("Sce.Vsh.Accessor.Db.Notify");
+        void* ncls = nimg ? ((FnMonoClass)g_setupAgain.classFromName)(nimg, "Sce.Vsh.Accessor.Db.Notify", "DbNotify") : NULL;
+        post = ncls ? g_mono.methodByName(ncls, "Post", 2) : NULL;
+        // 1.21: Post (1.19, 1.20) didn't make the list ask again (bgm.log:
+        // its re-reads unrelated to the posts). The four ways, in turn, one
+        // per change, to see which it hears.
+        for (int w = 0; w < 4; w++) ways[w] = ncls ? g_mono.methodByName(ncls, wayNames[w], 2) : NULL;
+        say("dbnotify: Post %p, GlobalPost %p, Send %p, GlobalSend %p", ways[0], ways[1], ways[2], ways[3]);
+        void* bimg = ((FnMonoName)g_setupAgain.imageLoaded)("Sce.Vsh.Orbis.BgftAccessor");
+        void* bcls = bimg ? ((FnMonoClass)g_setupAgain.classFromName)(bimg, "Sce.Vsh.Orbis.Bgft", "NotificationDbAccessor") : NULL;
+        getPath = bcls ? g_mono.methodByName(bcls, "GetDbPath", 0) : NULL;
+        void* exc = NULL;
+        void* str = getPath ? g_mono.invoke(getPath, NULL, NULL, &exc) : NULL;
+        if (str && !exc) monoText((uint64_t)(uintptr_t)str, path, sizeof(path));
+        say("dbnotify: DbNotify %p, Post %p; NotificationDbAccessor %p, GetDbPath %p = \"%s\"%s", ncls, post, bcls,
+            getPath, path, exc ? " (an exception)" : "");
+    }
+    // 1.42: with the strings the subscriptions were made with, Post only.
+    if (mcwDbNotifyKnown() && ways[0]) {
+        int ok = 0;
+        for (int i = 0; i < g_dbReg.n; i++) {
+            if (!contains(g_dbReg.path[i], "notification.db")) continue;
+            void* args[2] = {g_row.stringNew(g_setupAgain.domain, g_dbReg.path[i]),
+                             g_row.stringNew(g_setupAgain.domain, g_dbReg.table[i])};
+            void* exc = NULL;
+            g_mono.invoke(ways[0], NULL, args, &exc);
+            if (!exc) ok = 1;
+            say("dbnotify: Post(\"%s\", \"%s\")%s  [thread %d]", g_dbReg.path[i], g_dbReg.table[i],
+                exc ? ": an exception" : "", scePthreadGetthreadid());
+        }
+        logLine("dllist: told the list (DbNotify.Post, the subscriptions' own strings)");
+        return ok;
+    }
+    if (!path[0]) return 0;
+    int w = turn++ % 4;
+    for (int tries = 0; tries < 4 && !ways[w]; tries++) w = turn++ % 4;
+    if (!ways[w]) return 0;
+    static const char* const tables[2] = {"item", "notification"};
+    int ok = 0;
+    for (int t = 0; t < 2; t++) {
+        void* args[2] = {g_row.stringNew(g_setupAgain.domain, path), g_row.stringNew(g_setupAgain.domain, tables[t])};
+        void* exc = NULL;
+        g_mono.invoke(ways[w], NULL, args, &exc);
+        if (!exc) ok = 1;
+        say("dbnotify: %s(\"%s\", \"%s\")%s  [thread %d]", wayNames[w], path, tables[t],
+            exc ? ": an exception" : "", scePthreadGetthreadid());
+    }
+    logLine("dllist: told the list (DbNotify.%s)", wayNames[w]);  // in bgm.log too, beside its re-reads
+    return ok;
+}
+#endif
+
+#ifdef SC_COMPANION
+// The same from a thread Mono doesn't know (1.42: the downloads' own, as a
+// song changes state, so the Notifications tile hears it with the
+// Downloads list closed): attached for the call, detached after.
+int mcwDbNotifyPostAttached(void) {
+    if (!mcwDbNotifyKnown() || !g_setupAgain.attach || !g_setupAgain.domain) return 0;
+    void* thread = ((FnMonoPtr)g_setupAgain.attach)(g_setupAgain.domain);
+    if (!thread) return 0;
+    const int ok = mcwDbNotifyPost();
+    if (g_setupAgain.detach) ((FnMonoDetach)g_setupAgain.detach)(thread);
+    return ok;
+}
+#endif
 
 // ── The Music section's own code, for reading (0.49) ─────────────────────────
 //
@@ -2722,8 +2939,61 @@ static void monoHooks(void) {
          "TrackListMenuPanel.OnItemSelected"},
         {"app", "Sce.Vsh.ShellUI.QuickMenu.PlayStationMusic", "TrackListMenuPanel", "OnItemSelected", 2, 16,
          "TrackListMenuPanel.OnItemSelected(withLog)"},
+        // The Downloads list's calls to the download service, logged (0.85).
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "DownloadQueryTask", 6, 17,
+         "BgftWrapper.DownloadQueryTask"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "DownloadQueryTaskSection", 4, 17,
+         "BgftWrapper.DownloadQueryTaskSection"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "DownloadGetProgress", 2, 17,
+         "BgftWrapper.DownloadGetProgress"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "DownloadGetTaskInfo", 2, 17,
+         "BgftWrapper.DownloadGetTaskInfo"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "GetTaskInfoValueString", 3, 17,
+         "BgftWrapper.GetTaskInfoValueString"},
+        {"Sce.Vsh.Orbis.Bgft", "Sce.Vsh.Orbis.Bgft", "BgftWrapper", "GetTaskInfoValueInt", 3, 17,
+         "BgftWrapper.GetTaskInfoValueInt"},
+        {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "DownloadItemAccessor2", "GetTotalCount", 0, 17,
+         "DownloadItemAccessor2.GetTotalCount"},
+        {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "DownloadItemAccessor2", "GetTaskParam", 1, 17,
+         "DownloadItemAccessor2.GetTaskParam"},
+        {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "DownloadItemAccessor", "GetTotalCount", 0, 17,
+         "DownloadItemAccessor.GetTotalCount"},
+        // 1.42: what the Downloads list and the Notifications tile listen
+        // for (the debug dump, methods5.map): DbItemAccessor subscribes
+        // with DbNotify.RegistDbEventCallback(dbPath, tableName, callback);
+        // DbNotify.OnEvent calls it for an event whose DbPath and TableName
+        // match (case aside), and its DbEventHandler marks the accessor
+        // updated, and the list and the tile read their sections again.
+        {"Sce.Vsh.Accessor.Db.Notify", "Sce.Vsh.Accessor.Db.Notify", "DbNotify", "RegistDbEventCallback", 3, 24,
+         "DbNotify.RegistDbEventCallback"},
+        {"Sce.Vsh.Accessor.Db", "Sce.Vsh.Accessor.Db", "DbItemAccessor", "DbEventHandler", 1, 25,
+         "DbItemAccessor.DbEventHandler"},
+        // 1.45: what marks the Downloads list's and the tile's accessors
+        // updated (their IsUpdated returns what only Update sets), and who
+        // calls it: the caller named from the return address.
+        {"Sce.Vsh.Orbis.BgftAccessor", "Sce.Vsh.Orbis.Bgft", "NotificationDbAccessor", "Update", 0, 26,
+         "NotificationDbAccessor.Update"},
+        {"app", "Sce.Vsh.ShellUI.NotificationList", "DownloadSummaryAccessor", "Update", 0, 26,
+         "DownloadSummaryAccessor.Update"},
     };
+    // The download service's (kind 17), logged only when asked (0.87): with a
+    // download going, Notifications > Downloads crashed the shell under
+    // 0.85's hooks. mcw-bgftlog for all but DownloadGetProgress, which
+    // aligns its stack for AVX; mcw-bgftprogress for that one too.
+#ifdef SC_DEBUG
+    const int bgftLogOn = sysExists(SC_BGM_DIR "/mcw-bgftlog") || sysExists(SC_BGM_DIR "/mcw-bgftprogress");
+#else
+    const int bgftLogOn = 0;  // SC_DEBUG builds only (0.95)
+#endif
+    const int bgftProgressOn = sysExists(SC_BGM_DIR "/mcw-bgftprogress");
+    say("bgft: logging %s", bgftProgressOn ? "on, DownloadGetProgress too" : bgftLogOn ? "on, not DownloadGetProgress"
+                                                                                       : "off (mcw-bgftlog, mcw-bgftprogress)");
     for (int i = 0; i < MONO_HOOKS; i++) {
+        if (want[i].kind == 17 &&
+            (!bgftLogOn || (contains(want[i].name, "DownloadGetProgress") && !bgftProgressOn))) {
+            g_monoHooks[i].name = want[i].name;
+            continue;
+        }
         void* image = ((FnMonoName)imageLoaded)(want[i].image);
         void* klass = image ? ((FnMonoClass)classFromName)(image, want[i].ns, want[i].klass) : NULL;
         if (!klass && image && contains(want[i].klass, "/")) {
@@ -2828,11 +3098,86 @@ void mcwPre(Frame* f) {
                 hookCallback(h, i, f->gpr[i]);
 }
 
+#ifdef SC_COMPANION
+// The player's, in the same module (ps4/bgm/dllist.c, 0.96): the download
+// service's progress call, answered for a download list's placeholders.
+void dlListHook(Frame* f);
+void dlListQueryHook(Frame* f);
+void dlListInfoHook(Frame* f);
+void dlListCtlHook(Frame* f);
+void dlListNotifHook(Frame* f);
+void ndbSendHook(Frame* f);
+void dlListAppSizeHook(Frame* f);
+
+// A native function hooked for the player, under the install lock.
+int mcwHookNative(Hook* h, void* fn, const char** why) {
+    lock(&g_installLock);
+    const int rc = hookInstall(h, fn, why);
+    unlock(&g_installLock);
+    return rc;
+}
+#endif
+
 void mcwPost(Frame* f) {
+#ifdef SC_COMPANION
+    if (f->hook->json == 18) {
+        dlListHook(f);
+        return;
+    }
+    if (f->hook->json == 19) {
+        dlListQueryHook(f);
+        return;
+    }
+    if (f->hook->json == 20) {
+        dlListInfoHook(f);
+        return;
+    }
+    if (f->hook->json == 21) {
+        dlListCtlHook(f);
+        return;
+    }
+    if (f->hook->json == 22) {
+        ndbSendHook(f);
+        return;
+    }
+    if (f->hook->json == 27) {
+        dlListNotifHook(f);
+        return;
+    }
+    if (f->hook->json == 23) {
+        dlListAppSizeHook(f);
+        return;
+    }
+    if (f->hook->json == 24) {
+        dbRegistSeen(f);
+        return;
+    }
+    if (f->hook->json == 25) {
+        dbHandlerSeen(f);
+        return;
+    }
+    if (f->hook->json == 26) {
+        static uint32_t seen;
+        if (seen++ >= 200) return;
+        const uint64_t* cs = f->callerStack;
+        uint64_t ret = 0;
+        if (cs && hookReadable(cs - 1, 8) == 8) ret = cs[-1];
+        char* who = NULL;
+        if (ret && g_dump.jitFind && g_dump.jitMethod && g_dump.fullName && g_setupAgain.domain) {
+            void* ji = g_dump.jitFind(g_setupAgain.domain, (void*)(uintptr_t)ret);
+            void* m = ji ? g_dump.jitMethod(ji) : NULL;
+            who = m ? g_dump.fullName(m, 1) : NULL;
+        }
+        say("updated: %s(%p), called from %lx %s  [#%u, thread %d]", f->hook->name, (void*)(uintptr_t)f->gpr[0],
+            (unsigned long)ret, who ? who : "(not named)", seen, scePthreadGetthreadid());
+        logLine("dllist: %s, called from %s", f->hook->name, who ? who : "(not named)");  // beside the list's reads
+        return;
+    }
+#endif
     if (f->hook->json) {
         if (!g_quiet || f->hook->json == 2 || f->hook->json == 6 || f->hook->json == 7 ||
             f->hook->json == 8 || f->hook->json == 9 || f->hook->json == 10 ||
-            f->hook->json == 12 || f->hook->json == 13)
+            f->hook->json == 12 || f->hook->json == 13 || f->hook->json == 17)
             monoLog(f);
         return;
     }
