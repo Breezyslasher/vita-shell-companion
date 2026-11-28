@@ -66,6 +66,39 @@ static struct {
     void* prison;
     void *cdir, *jdir, *rdir;
 } g_jb;  // GoldHEN SDK's jailbreak_backup
+// Out of the sandbox only during a call here (1.54): jailbroken (GoldHEN's
+// JAILBREAK, 2) on the way in when /user/data cannot be written, and put
+// back (UNJAILBREAK, 3, with the same backup; GoldHEN SDK sys_sdk_*) on the
+// way out, the outermost call's. Unless scStayJailbroken(1).
+static int g_jbLock, g_jbDepth, g_jbMine, g_jbStay;
+static void jbSpin(void) {
+    while (__atomic_exchange_n(&g_jbLock, 1, __ATOMIC_ACQUIRE)) usleep(200);
+}
+static void jbEnter(void) {
+    jbSpin();
+    if (g_jbDepth++ == 0 && !g_jbMine && access("/user/data", W_OK) != 0 &&
+        scSys(500, 2 /* JAILBREAK */, (long)&g_jb, 0) == 0)
+        g_jbMine = 1;
+    __atomic_store_n(&g_jbLock, 0, __ATOMIC_RELEASE);
+}
+static void jbLeave(void) {
+    jbSpin();
+    if (--g_jbDepth == 0 && g_jbMine && !g_jbStay && scSys(500, 3 /* UNJAILBREAK */, (long)&g_jb, 0) == 0)
+        g_jbMine = 0;
+    __atomic_store_n(&g_jbLock, 0, __ATOMIC_RELEASE);
+}
+
+static int scOpen_(char* what, size_t size);
+static int scPlayerRunning_(void);
+static int scWatchRunning_(void);
+static int scWriteQueue_(const ScQueue* queue, const ScTrack* tracks, uint32_t count);
+static int scCommand_(const char* command);
+static int scReadQueueStatus_(ScQueueStatus* out);
+static int scWriteDownloads_(int notify, const char* headers, const ScDownload* items, uint32_t count);
+static int scReadDownloadsStatus_(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count);
+static int scUpdateInstallPkg_(const char* pkg, int relaunch);
+static int scReadUpdateResult_(int* result, char* why, size_t whySize);
+static int scReadPlusEvents_(ScPlusEvent* events, uint32_t cap, uint32_t* count);
 
 struct ScPrxLoad {
     char processName[32];
@@ -180,11 +213,11 @@ int scInit(const char* titleId, const char* name) {
     return 0;
 }
 
-int scPlayerRunning(void) {
+static int scPlayerRunning_(void) {
     return beatFresh(SC_BGM_STATUS);
 }
 
-int scWatchRunning(void) {
+static int scWatchRunning_(void) {
     return beatFresh(WATCH_BEAT);
 }
 
@@ -265,7 +298,7 @@ static int waitFor(int (*running)(void), unsigned ms) {
 
 static int openLocked(char* what, size_t size);
 
-int scOpen(char* what, size_t size) {
+static int scOpen_(char* what, size_t size) {
     lock();
     const int rc = openLocked(what, size);
     unlock();
@@ -281,7 +314,6 @@ static int openLocked(char* what, size_t size) {
     // Out of the sandbox, to reach /data and GoldHEN's calls. Not undone:
     // the app keeps reaching /data (status, "+" events) until it exits
     // (shell_companion.h, scOpen).
-    if (access("/user/data", W_OK) != 0) scSys(500, 2 /* JAILBREAK */, (long)&g_jb, 0);
     mkdir("/user/data/ShellCompanion", 0777);
     mkdir(SC_BGM_DIR, 0777);
     if (access(SC_BGM_DIR, W_OK) != 0) {
@@ -329,7 +361,7 @@ static size_t putField(char* out, size_t at, size_t cap, const char* s) {
     return at;
 }
 
-int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count) {
+static int scWriteQueue_(const ScQueue* queue, const ScTrack* tracks, uint32_t count) {
     if (!tracks && count) return -1;
     if (count > 10000) count = 10000;
     size_t cap = 64 + 16384;  // the head, "+"'s templates included
@@ -406,7 +438,7 @@ static int namedWaiting(void) {
 // when there is none and no other waits, else cmd.<ms>-<pid>-<n>, which the
 // player reads after cmd, in name order (the ms 13 digits, so that order is
 // the order sent).
-int scCommand(const char* command) {
+static int scCommand_(const char* command) {
     if (!command || !command[0]) return -1;
     static unsigned seq;
     lock();
@@ -446,7 +478,10 @@ int scMusicTakeBack(void) {
     // Sent even when the heartbeat is late: the player may be waiting on a
     // slow or unreachable server, and takes it when it is back. Only a
     // player never there (no status at all) is not asked.
-    if (access(SC_BGM_STATUS, F_OK) != 0) return -1;
+    jbEnter();
+    const int there = access(SC_BGM_STATUS, F_OK) == 0;
+    jbLeave();
+    if (!there) return -1;
     const uint64_t sent = nowMs();
     if (scCommand("takeback\n") != 0) return -1;
     // Until the player has said so in a status written since: up to 5 s.
@@ -458,7 +493,7 @@ int scMusicTakeBack(void) {
     return -1;
 }
 
-int scReadQueueStatus(ScQueueStatus* out) {
+static int scReadQueueStatus_(ScQueueStatus* out) {
     if (!out) return -1;
     memset(out, 0, sizeof(*out));
     static char text[8192];
@@ -507,7 +542,7 @@ static size_t putEncoded(char* out, size_t at, size_t cap, const char* s) {
     return at;
 }
 
-int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count) {
+static int scWriteDownloads_(int notify, const char* headers, const ScDownload* items, uint32_t count) {
     if (!items && count) return -1;
     if (count > 200) count = 200;
     const size_t cap = 4096 + (size_t)count * 4096;
@@ -570,7 +605,7 @@ int scDownloadsTakeBack(void) {
 
 static int readDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count);
 
-int scReadDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count) {
+static int scReadDownloadsStatus_(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count) {
     lock();
     const int rc = readDownloadsStatus(running, items, cap, count);
     unlock();
@@ -625,7 +660,7 @@ static int readDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t c
 
 static int readPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count);
 
-int scReadPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count) {
+static int scReadPlusEvents_(ScPlusEvent* events, uint32_t cap, uint32_t* count) {
     lock();
     const int rc = readPlusEvents(events, cap, count);
     unlock();
@@ -697,7 +732,7 @@ static int readPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count) {
 #define UPDATE_FILE SC_BGM_DIR "/update.txt"
 #define UPDATE_RESULT SC_BGM_DIR "/update-result.txt"
 
-int scUpdateInstallPkg(const char* pkg, int relaunch) {
+static int scUpdateInstallPkg_(const char* pkg, int relaunch) {
     if (!g_titleId[0] || !pkg || !pkg[0] || !scPlayerRunning()) return -1;
     unlink(UPDATE_RESULT);
     char text[1200];
@@ -706,11 +741,112 @@ int scUpdateInstallPkg(const char* pkg, int relaunch) {
     return scCommand("update_start\n");
 }
 
-int scReadUpdateResult(int* result, char* why, size_t whySize) {
+static int scReadUpdateResult_(int* result, char* why, size_t whySize) {
     char text[1024];
     if (readAll(UPDATE_RESULT, text, sizeof(text)) <= 0) return -1;
     char v[24];
     if (result) *result = field(text, "result", v, sizeof(v)) ? atoi(v) : -1;
     if (why && whySize) field(text, "why", why, whySize);
     return 0;
+}
+
+// ── Out of the sandbox for each call (1.54) ──────────────────────────────────
+
+void scStayJailbroken(int on) {
+    jbSpin();
+    g_jbStay = on ? 1 : 0;
+    __atomic_store_n(&g_jbLock, 0, __ATOMIC_RELEASE);
+    if (on) {  // now, as before 1.54
+        jbEnter();
+        jbLeave();
+    }
+}
+
+int scClose(void) {
+    jbSpin();
+    g_jbStay = 0;
+    int rc = 0;
+    if (g_jbDepth == 0 && g_jbMine) {
+        rc = scSys(500, 3 /* UNJAILBREAK */, (long)&g_jb, 0) == 0 ? 0 : -1;
+        if (rc == 0) g_jbMine = 0;
+    }
+    __atomic_store_n(&g_jbLock, 0, __ATOMIC_RELEASE);
+    return rc;
+}
+
+int scOpen(char* what, size_t size) {
+    jbEnter();
+    const int rc = scOpen_(what, size);
+    jbLeave();
+    return rc;
+}
+
+int scPlayerRunning(void) {
+    jbEnter();
+    const int rc = scPlayerRunning_();
+    jbLeave();
+    return rc;
+}
+
+int scWatchRunning(void) {
+    jbEnter();
+    const int rc = scWatchRunning_();
+    jbLeave();
+    return rc;
+}
+
+int scWriteQueue(const ScQueue* queue, const ScTrack* tracks, uint32_t count) {
+    jbEnter();
+    const int rc = scWriteQueue_(queue, tracks, count);
+    jbLeave();
+    return rc;
+}
+
+int scCommand(const char* command) {
+    jbEnter();
+    const int rc = scCommand_(command);
+    jbLeave();
+    return rc;
+}
+
+int scReadQueueStatus(ScQueueStatus* out) {
+    jbEnter();
+    const int rc = scReadQueueStatus_(out);
+    jbLeave();
+    return rc;
+}
+
+int scWriteDownloads(int notify, const char* headers, const ScDownload* items, uint32_t count) {
+    jbEnter();
+    const int rc = scWriteDownloads_(notify, headers, items, count);
+    jbLeave();
+    return rc;
+}
+
+int scReadDownloadsStatus(int* running, ScDownloadStatus* items, uint32_t cap, uint32_t* count) {
+    jbEnter();
+    const int rc = scReadDownloadsStatus_(running, items, cap, count);
+    jbLeave();
+    return rc;
+}
+
+int scUpdateInstallPkg(const char* pkg, int relaunch) {
+    jbEnter();
+    const int rc = scUpdateInstallPkg_(pkg, relaunch);
+    jbLeave();
+    return rc;
+}
+
+int scReadUpdateResult(int* result, char* why, size_t whySize) {
+    jbEnter();
+    const int rc = scReadUpdateResult_(result, why, whySize);
+    jbLeave();
+    return rc;
+}
+
+int scReadPlusEvents(ScPlusEvent* events, uint32_t cap, uint32_t* count) {
+    jbEnter();
+    const int rc = scReadPlusEvents_(events, cap, count);
+    jbLeave();
+    return rc;
 }
